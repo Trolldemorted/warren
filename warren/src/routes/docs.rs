@@ -1,7 +1,7 @@
 use crate::AppState;
 use axum::{
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
+    http::{header, HeaderValue, StatusCode},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
@@ -45,17 +45,19 @@ const DOCS_INITIALIZER_JS: &str = r##"window.onload = function() {
 
 pub fn router(state: AppState) -> Router<AppState> {
     let docs_dir = state.config.docs_dir.clone();
-    Router::new().nest(
-        "/docs",
-        Router::new()
-            .route("/", get(docs_index))
-            .route("/swagger-initializer.js", get(docs_initializer))
-            .fallback_service(ServeDir::new(docs_dir)),
-    )
+    Router::new()
+        .route("/docs", get(|| async { Redirect::to("/docs/") }))
+        .nest(
+            "/docs",
+            Router::new()
+                .route("/", get(docs_index))
+                .route("/swagger-initializer.js", get(docs_initializer))
+                .fallback_service(ServeDir::new(docs_dir)),
+        )
 }
 
-async fn docs_index() -> Response {
-    html(DOCS_INDEX_HTML)
+async fn docs_index() -> Html<&'static str> {
+    Html(DOCS_INDEX_HTML)
 }
 
 async fn docs_initializer() -> Response {
@@ -63,18 +65,9 @@ async fn docs_initializer() -> Response {
         StatusCode::OK,
         [(
             header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
+            HeaderValue::from_static("application/javascript; charset=utf-8"),
         )],
         DOCS_INITIALIZER_JS,
-    )
-        .into_response()
-}
-
-fn html(body: &'static str) -> Response {
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        body,
     )
         .into_response()
 }
