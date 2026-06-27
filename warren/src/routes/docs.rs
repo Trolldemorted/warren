@@ -45,11 +45,13 @@ const DOCS_INITIALIZER_JS: &str = r##"window.onload = function() {
 
 pub fn router(state: AppState) -> Router<AppState> {
     let docs_dir = state.config.docs_dir.clone();
-    Router::new()
-        .route("/docs", get(docs_index))
-        .route("/docs/", get(docs_index))
-        .route("/docs/swagger-initializer.js", get(docs_initializer))
-        .nest_service("/docs", ServeDir::new(docs_dir))
+    Router::new().nest(
+        "/docs",
+        Router::new()
+            .route("/", get(docs_index))
+            .route("/swagger-initializer.js", get(docs_initializer))
+            .fallback_service(ServeDir::new(docs_dir)),
+    )
 }
 
 async fn docs_index() -> Response {
