@@ -1,0 +1,74 @@
+use askama::Template;
+use serde::Serialize;
+
+#[derive(Template)]
+#[template(path = "login.html")]
+pub struct LoginTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "agents.html")]
+pub struct AgentsTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub agents: Vec<crate::entity::agent::Model>,
+}
+
+#[derive(Template)]
+#[template(path = "agent_form.html")]
+pub struct AgentFormTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub agent: Option<crate::entity::agent::Model>,
+    pub form_action: String,
+}
+
+#[derive(Template)]
+#[template(path = "messages.html")]
+pub struct MessagesTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub requests: Vec<crate::entity::request::Model>,
+    pub memos: Vec<crate::entity::memo::Model>,
+    pub status_req: String,
+    pub status_memo: String,
+    pub req_statuses: Vec<String>,
+    pub memo_statuses: Vec<String>,
+}
+
+#[derive(Template)]
+#[template(path = "message_inject.html")]
+pub struct MessageInjectTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Flash {
+    pub level: &'static str,
+    pub message: String,
+}
+
+impl Flash {
+    pub fn error(m: impl Into<String>) -> Self {
+        Self {
+            level: "error",
+            message: m.into(),
+        }
+    }
+    pub fn success(m: impl Into<String>) -> Self {
+        Self {
+            level: "success",
+            message: m.into(),
+        }
+    }
+}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block body %}
+<h1 class="h3 mb-3">{% if let Some(a) = agent %}Edit agent <code>{{ a.name }}</code>{% else %}New agent{% endif %}</h1>
+<form method="post" action="{{ form_action }}" class="col-md-6">
+  <div class="mb-3">
+    <label class="form-label">Name</label>
+    <input type="text" name="name" class="form-control" required
+      {% if let Some(a) = agent %}value="{{ a.name }}"{% endif %}>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Class</label>
+    <input type="text" name="class" class="form-control" required
+      {% if let Some(a) = agent %}value="{{ a.class }}"{% endif %}>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Type (optional)</label>
+    <input type="text" name="kind" class="form-control"
+      {% if let Some(a) = agent %}{% if let Some(k) = a.kind %}value="{{ k }}"{% endif %}{% endif %}>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Model</label>
+    <input type="text" name="model" class="form-control" required
+      {% if let Some(a) = agent %}value="{{ a.model }}"{% endif %}>
+  </div>
+  <button type="submit" class="btn btn-primary">Save</button>
+  <a href="/agents" class="btn btn-link">Cancel</a>
+</form>
+
+{% if let Some(a) = agent %}
+<hr class="my-4">
+<h2 class="h5">Auth token</h2>
+{% if a.authtoken.is_empty() %}
+  <p class="text-muted">Token not shown again after creation. The CLI uses it as <code>WARREN_TOKEN</code>.</p>
+{% else %}
+  <div class="alert alert-warning">
+    Copy this token now — it will not be shown again.
+    <pre class="payload mt-2 mb-0"><code>{{ a.authtoken }}</code></pre>
+  </div>
+{% endif %}
+{% endif %}
+{% endblock %}

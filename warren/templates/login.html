@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="row justify-content-center mt-5">
+  <div class="col-md-5">
+    <div class="card">
+      <div class="card-body">
+        <h1 class="h4 mb-3">Sign in</h1>
+        {% if let Some(err) = error %}
+        <div class="alert alert-danger">{{ err }}</div>
+        {% endif %}
+        <form method="post" action="/login">
+          <div class="mb-3">
+            <label for="password" class="form-label">Admin PSK</label>
+            <input type="password" class="form-control" id="password" name="password" autofocus required>
+          </div>
+          <button type="submit" class="btn btn-primary w-100">Sign in</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if let Some(t) = title %}{{ t }} · warren{% else %}warren{% endif %}</title>
+  <link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
+  <style>
+    body { padding-top: 4.5rem; }
+    pre.payload { background: #f5f5f5; padding: .5rem; border-radius: .25rem; max-height: 12rem; overflow: auto; }
+    table.table th { white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <nav class="navbar navbar-expand-md navbar-dark bg-dark fixed-top">
+    <div class="container-fluid">
+      <a class="navbar-brand" href="/">warren</a>
+      {% if let Some(_) = nav %}
+      <ul class="navbar-nav me-auto">
+        {% if nav == Some("agents") %}<li class="nav-item"><a class="nav-link active" href="/agents">Agents</a></li>{% endif %}
+        {% if nav == Some("messages") %}<li class="nav-item"><a class="nav-link active" href="/messages">Messages</a></li>{% endif %}
+      </ul>
+      <form method="post" action="/logout" class="d-flex">
+        <button class="btn btn-outline-light btn-sm" type="submit">Sign out</button>
+      </form>
+      {% endif %}
+    </div>
+  </nav>
+  <main class="container">
+    {% if let Some(flash) = flash %}
+    <div class="alert alert-{{ flash.level }} mt-3" role="alert">{{ flash.message }}</div>
+    {% endif %}
+    {% block body %}{% endblock %}
+  </main>
+</body>
+</html>
