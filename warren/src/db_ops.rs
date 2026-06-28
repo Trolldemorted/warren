@@ -273,42 +273,69 @@ fn is_missing_relation(e: &sea_orm::DbErr) -> bool {
 }
 
 pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
-    // Each candidate is (schema-qualified-table, version-col, description-expr, timestamp-col).
-    // Order matches likelihood for the current setup (atlas with a dedicated schema first).
-    let candidates: &[(&str, &str, &str, &str)] = &[
-        (
-            "atlas_schema_revisions.atlas_schema_revisions",
-            "version",
-            "description",
-            "applied",
-        ),
-        (
-            "public.atlas_schema_revisions",
-            "version",
-            "description",
-            "applied",
-        ),
-        (
-            "public.schema_migrations",
-            "version",
-            "NULL",
-            "installed_on",
-        ),
+    // Atlas revisions live in one of these tables and the timestamp column may be
+    // either `applied_at BIGINT` (nanoseconds since epoch, modern atlas) or
+    // `applied TIMESTAMPTZ` (older atlas). We try the modern shape first.
+    let atlas_candidates: &[&str] = &[
+        "atlas_schema_revisions.atlas_schema_revisions",
+        "public.atlas_schema_revisions",
     ];
-    for (table, version_col, desc_expr, ts_col) in candidates {
+    for table in atlas_candidates {
+        // Modern: applied_at is bigint nanoseconds — convert to timestamptz in SQL.
         let sql = format!(
-            "SELECT {version_col}::text AS version, \
-                    {desc_expr} AS description, \
-                    {ts_col} AS applied_at \
+            "SELECT version::text AS version, \
+                    description, \
+                    to_timestamp(applied_at::numeric / 1000000000) AS applied_at \
                FROM {table} \
-              ORDER BY {version_col}"
+              ORDER BY version"
         );
         let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
         match MigrationRow::find_by_statement(stmt).all(db).await {
             Ok(rows) => return Ok(rows),
-            Err(e) if is_missing_relation(&e) => continue,
+            Err(e) if is_missing_relation(&e) => {}
             Err(e) => return Err(AppError::Db(e)),
         }
+        // Older atlas: applied is timestamptz already.
+        let sql = format!(
+            "SELECT version::text AS version, \
+                    description, \
+                    applied AS applied_at \
+               FROM {table} \
+              ORDER BY version"
+        );
+        let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+        match MigrationRow::find_by_statement(stmt).all(db).await {
+            Ok(rows) => return Ok(rows),
+            Err(e) if is_missing_relation(&e) => {}
+            Err(e) => return Err(AppError::Db(e)),
+        }
+        // Also tolerate the column being named `applied_at` but already a timestamptz
+        // (e.g. someone manually created the table in that shape).
+        let sql = format!(
+            "SELECT version::text AS version, \
+                    description, \
+                    applied_at AS applied_at \
+               FROM {table} \
+              ORDER BY version"
+        );
+        let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+        match MigrationRow::find_by_statement(stmt).all(db).await {
+            Ok(rows) => return Ok(rows),
+            Err(e) if is_missing_relation(&e) => {}
+            Err(e) => return Err(AppError::Db(e)),
+        }
+    }
+    // golang-migrate / sqlx-style: public.schema_migrations(installed_on TIMESTAMPTZ)
+    let sql = "SELECT version::text AS version, \
+                      NULL::text AS description, \
+                      installed_on AS applied_at \
+                 FROM public.schema_migrations \
+                ORDER BY version";
+    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql.to_string());
+    match MigrationRow::find_by_statement(stmt).all(db).await {
+        Ok(rows) => return Ok(rows),
+        Err(e) if is_missing_relation(&e) => {}
+        Err(e) => return Err(AppError::Db(e)),
     }
     Ok(vec![])
 }
