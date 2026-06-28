@@ -5,7 +5,6 @@ mod db_ops;
 mod entity;
 mod error;
 mod ids;
-mod migrate;
 mod models;
 mod routes;
 mod templates;
@@ -39,9 +38,9 @@ struct Cli {
 enum Command {
     /// Start the HTTP server.
     Server,
-    /// Apply pending SQL migrations from migrations_atlas/ against DATABASE_URL.
-    #[command(name = "applyMigrations")]
-    ApplyMigrations,
+    /// Run `atlas migrate apply` against $DATABASE_URL using warren/migrations_atlas.
+    #[command(name = "applyMigration")]
+    ApplyMigration,
     /// Emit CREATE TABLE SQL for every entity to stdout.
     DumpSchema,
 }
@@ -62,7 +61,7 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(async move {
         match cli.command {
             Command::Server => run_server().await,
-            Command::ApplyMigrations => run_apply_migrations().await,
+            Command::ApplyMigration => run_apply_migration().await,
             Command::DumpSchema => run_dump_schema().await,
         }
     })
@@ -96,13 +95,30 @@ async fn run_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_apply_migrations() -> anyhow::Result<()> {
+async fn run_apply_migration() -> anyhow::Result<()> {
     let cfg = Config::from_env().context("loading configuration")?;
-    log::info!("connecting to database");
-    let db = db::connect(&cfg.database_url)
-        .await
-        .context("connecting to database")?;
-    migrate::run(&db).await.context("applying migrations")?;
+    let migrations_dir = std::env::current_dir()
+        .context("getting current directory")?
+        .join("warren/migrations_atlas");
+    let dir_url = format!("file://{}", migrations_dir.display());
+    log::info!("running atlas migrate apply against {}", cfg.database_url);
+    let status = std::process::Command::new("atlas")
+        .args([
+            "migrate",
+            "apply",
+            "--url",
+            &cfg.database_url,
+            "--dir",
+            &dir_url,
+        ])
+        .status()
+        .context("spawning atlas (install from https://atlasgo.io)")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "atlas migrate apply exited with {}",
+            status.code().unwrap_or(-1)
+        ));
+    }
     Ok(())
 }
 
