@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block body %}
 <h1 class="h3 mb-3">Inject request</h1>
-<form method="post" action="/messages/requests/new">
+<form method="post" action="/comms/requests/new">
   <div class="mb-3">
     <label class="form-label">Target class</label>
     <input class="form-control" name="target_class" required>
@@ -19,6 +19,6 @@
     <label class="form-check-label" for="approved">Approved (visible to inbox immediately)</label>
   </div>
   <button type="submit" class="btn btn-primary">Create</button>
-  <a href="/messages" class="btn btn-link">Cancel</a>
+  <a href="/comms" class="btn btn-link">Cancel</a>
 </form>
 {% endblock %}

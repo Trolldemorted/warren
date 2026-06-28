@@ -3,8 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
 use crate::models::{AgentNew, AgentPatch, RequestNew};
 use crate::templates::{
-    AgentFormTemplate, AgentsTemplate, Flash, LoginTemplate, MessageInjectTemplate,
-    MessagesTemplate,
+    AgentFormTemplate, AgentsTemplate, CommsInjectTemplate, CommsTemplate, Flash, LoginTemplate,
 };
 use crate::{auth, AppState};
 use askama::Template;
@@ -29,29 +28,23 @@ pub fn router() -> Router<AppState> {
         .route("/agents/:id/edit", get(agent_edit_page))
         .route("/agents/:id", post(agent_update))
         .route("/agents/:id/delete", post(agent_delete))
-        .route("/messages", get(messages_page))
+        .route("/comms", get(comms_page))
         .route(
-            "/messages/requests/new",
+            "/comms/requests/new",
             get(inject_page_req).post(inject_create_req),
         )
+        .route("/comms/requests/:id/approve", post(message_approve_request))
+        .route("/comms/requests/:id/reject", post(message_reject_request))
         .route(
-            "/messages/requests/:id/approve",
-            post(message_approve_request),
-        )
-        .route(
-            "/messages/requests/:id/reject",
-            post(message_reject_request),
-        )
-        .route(
-            "/messages/requests/:id/approve-response",
+            "/comms/requests/:id/approve-response",
             post(message_approve_response),
         )
         .route(
-            "/messages/requests/:id/reject-response",
+            "/comms/requests/:id/reject-response",
             post(message_reject_response),
         )
         .route(
-            "/messages/requests/:id/edit",
+            "/comms/requests/:id/edit",
             get(message_edit_page).post(message_edit_save),
         )
 }
@@ -322,7 +315,7 @@ fn err_page(e: AppError) -> Response {
 }
 
 #[derive(Deserialize, Default)]
-struct MessagesQuery {
+struct CommsQuery {
     status_req: Option<String>,
 }
 
@@ -355,10 +348,10 @@ fn parse_payload(s: &str) -> serde_json::Value {
     serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.to_string()))
 }
 
-async fn messages_page(
+async fn comms_page(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(q): Query<MessagesQuery>,
+    Query(q): Query<CommsQuery>,
 ) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
@@ -372,9 +365,9 @@ async fn messages_page(
         Ok(r) => r,
         Err(e) => return err_page(e),
     };
-    let t = MessagesTemplate {
-        title: Some("Messages"),
-        nav: Some("messages"),
+    let t = CommsTemplate {
+        title: Some("Comms"),
+        nav: Some("comms"),
         flash: None,
         requests: reqs,
         status_req: status_req_label,
@@ -403,9 +396,9 @@ async fn inject_page_req(State(state): State<AppState>, headers: HeaderMap) -> R
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    render(MessageInjectTemplate {
+    render(CommsInjectTemplate {
         title: Some("Inject request"),
-        nav: Some("messages"),
+        nav: Some("comms"),
         flash: None,
     })
 }
@@ -427,7 +420,7 @@ async fn inject_create_req(
     if let Err(e) = crate::db_ops::create_request(&state.db, &new).await {
         return err_page(e);
     }
-    Redirect::to("/messages").into_response()
+    Redirect::to("/comms").into_response()
 }
 
 async fn message_approve_request(
@@ -446,7 +439,7 @@ async fn message_approve_request(
     )
     .await
     {
-        Ok(_) => Redirect::to("/messages").into_response(),
+        Ok(_) => Redirect::to("/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -467,7 +460,7 @@ async fn message_reject_request(
     )
     .await
     {
-        Ok(_) => Redirect::to("/messages").into_response(),
+        Ok(_) => Redirect::to("/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -481,7 +474,7 @@ async fn message_approve_response(
         return redirect_to_login();
     }
     match crate::db_ops::accept_request_response(&state.db, id).await {
-        Ok(_) => Redirect::to("/messages").into_response(),
+        Ok(_) => Redirect::to("/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -495,14 +488,14 @@ async fn message_reject_response(
         return redirect_to_login();
     }
     match crate::db_ops::reject_request_response(&state.db, id).await {
-        Ok(_) => Redirect::to("/messages").into_response(),
+        Ok(_) => Redirect::to("/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
 
 #[derive(Template)]
-#[template(path = "message_edit.html")]
-struct MessageEditTemplate {
+#[template(path = "comms_edit.html")]
+struct CommsEditTemplate {
     title: Option<&'static str>,
     nav: Option<&'static str>,
     flash: Option<Flash>,
@@ -521,14 +514,14 @@ async fn message_edit_page(
         return redirect_to_login();
     }
     match crate::db_ops::get_request(&state.db, id).await {
-        Ok(Some(r)) => render(MessageEditTemplate {
+        Ok(Some(r)) => render(CommsEditTemplate {
             title: Some("Edit request"),
-            nav: Some("messages"),
+            nav: Some("comms"),
             flash: None,
             target_class: r.target_class,
             target_type: r.target_type,
             payload: r.payload.to_string(),
-            form_action: format!("/messages/requests/{id}/edit"),
+            form_action: format!("/comms/requests/{id}/edit"),
         }),
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => err_page(e),
@@ -555,7 +548,7 @@ async fn message_edit_save(
     )
     .await
     {
-        Ok(_) => Redirect::to("/messages").into_response(),
+        Ok(_) => Redirect::to("/comms").into_response(),
         Err(e) => err_page(e),
     }
 }

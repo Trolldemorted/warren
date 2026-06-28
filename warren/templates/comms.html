@@ -1,17 +1,17 @@
 {% extends "base.html" %}
 {% block body %}
-<h1 class="h3 mb-3">Messages</h1>
+<h1 class="h3 mb-3">Comms</h1>
 <p class="text-muted">Approve or reject pending requests, review responses, inject new requests.</p>
 
 <section class="mb-5">
   <h2 class="h5">Requests
-    <a class="btn btn-sm btn-primary ms-2" href="/messages/requests/new">Inject</a>
+    <a class="btn btn-sm btn-primary ms-2" href="/comms/requests/new">Inject</a>
   </h2>
   <ul class="nav nav-tabs mb-3" role="tablist">
     {% for s in req_statuses %}
       <li class="nav-item">
         <a class="nav-link {% if s.as_str() == status_req.as_str() %}active{% endif %}"
-           href="/messages?status_req={{ s }}">{{ s }}</a>
+           href="/comms?status_req={{ s }}">{{ s }}</a>
       </li>
     {% endfor %}
   </ul>
@@ -34,20 +34,20 @@
           <td><small class="text-muted">{% if let Some(c) = r.claimed_by %}{{ c }}{% else %}—{% endif %}</small></td>
           <td>{% if let Some(resp) = r.response %}<pre class="payload mb-0">{{ resp }}</pre>{% else %}—{% endif %}</td>
           <td class="text-end">
-            <a class="btn btn-sm btn-outline-secondary" href="/messages/requests/{{ r.id }}/edit">Edit</a>
+            <a class="btn btn-sm btn-outline-secondary" href="/comms/requests/{{ r.id }}/edit">Edit</a>
             {% if r.status == 0 %}
-            <form method="post" action="/messages/requests/{{ r.id }}/approve" class="d-inline">
+            <form method="post" action="/comms/requests/{{ r.id }}/approve" class="d-inline">
               <button class="btn btn-sm btn-success" type="submit">Approve</button>
             </form>
-            <form method="post" action="/messages/requests/{{ r.id }}/reject" class="d-inline">
+            <form method="post" action="/comms/requests/{{ r.id }}/reject" class="d-inline">
               <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
             </form>
             {% endif %}
             {% if r.status == 1 && r.response.is_some() %}
-            <form method="post" action="/messages/requests/{{ r.id }}/approve-response" class="d-inline">
+            <form method="post" action="/comms/requests/{{ r.id }}/approve-response" class="d-inline">
               <button class="btn btn-sm btn-success" type="submit">Accept</button>
             </form>
-            <form method="post" action="/messages/requests/{{ r.id }}/reject-response" class="d-inline">
+            <form method="post" action="/comms/requests/{{ r.id }}/reject-response" class="d-inline">
               <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
             </form>
             {% endif %}

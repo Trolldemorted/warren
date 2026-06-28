@@ -30,8 +30,8 @@ pub struct AgentFormTemplate {
 }
 
 #[derive(Template)]
-#[template(path = "messages.html")]
-pub struct MessagesTemplate {
+#[template(path = "comms.html")]
+pub struct CommsTemplate {
     pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
@@ -41,8 +41,8 @@ pub struct MessagesTemplate {
 }
 
 #[derive(Template)]
-#[template(path = "message_inject.html")]
-pub struct MessageInjectTemplate {
+#[template(path = "comms_inject.html")]
+pub struct CommsInjectTemplate {
     pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,

@@ -17,8 +17,8 @@
       <a class="navbar-brand" href="/">warren</a>
       {% if let Some(_) = nav %}
       <ul class="navbar-nav me-auto">
-        {% if nav == Some("agents") %}<li class="nav-item"><a class="nav-link active" href="/agents">Agents</a></li>{% endif %}
-        {% if nav == Some("messages") %}<li class="nav-item"><a class="nav-link active" href="/messages">Messages</a></li>{% endif %}
+        <li class="nav-item"><a class="nav-link {% if nav == Some("agents") %}active{% endif %}" href="/agents">Agents</a></li>
+        <li class="nav-item"><a class="nav-link {% if nav == Some("comms") %}active{% endif %}" href="/comms">Comms</a></li>
       </ul>
       <form method="post" action="/logout" class="d-flex">
         <button class="btn btn-outline-light btn-sm" type="submit">Sign out</button>
