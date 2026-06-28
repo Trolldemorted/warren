@@ -60,6 +60,12 @@ impl Related<super::agent::Entity> for Entity {
     }
 }
 
+impl Model {
+    pub fn status_label(&self) -> &'static str {
+        status_label(self.status)
+    }
+}
+
 impl ActiveModelBehavior for ActiveModel {}
 
 pub fn extra_indexes() -> Vec<IndexCreateStatement> {

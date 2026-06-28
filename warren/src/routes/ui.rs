@@ -8,7 +8,7 @@ use crate::templates::{
 use crate::{auth, AppState};
 use askama::Template;
 use axum::{
-    extract::{Query, State},
+    extract::State,
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -314,11 +314,6 @@ fn err_page(e: AppError) -> Response {
     (status, msg).into_response()
 }
 
-#[derive(Deserialize, Default)]
-struct CommsQuery {
-    status_req: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct InjectForm {
     target_class: String,
@@ -348,20 +343,11 @@ fn parse_payload(s: &str) -> serde_json::Value {
     serde_json::Value::String(s.to_string())
 }
 
-async fn comms_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<CommsQuery>,
-) -> Response {
+async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let status_req_label = q
-        .status_req
-        .unwrap_or_else(|| "pending_request_approval".into());
-    let status_req = parse_status_label(&status_req_label)
-        .unwrap_or(crate::entity::request::PENDING_REQUEST_APPROVAL);
-    let reqs = match crate::db_ops::list_all_requests(&state.db, Some(status_req), 200, 0).await {
+    let reqs = match crate::db_ops::list_all_requests(&state.db, None, 200, 0).await {
         Ok(r) => r,
         Err(e) => return err_page(e),
     };
@@ -370,26 +356,8 @@ async fn comms_page(
         nav: Some("comms"),
         flash: None,
         requests: reqs,
-        status_req: status_req_label,
-        req_statuses: vec![
-            "pending_request_approval".into(),
-            "pending_response_approval".into(),
-            "done".into(),
-            "rejected".into(),
-        ],
     };
     render(t)
-}
-
-fn parse_status_label(s: &str) -> Option<i16> {
-    use crate::entity::request as r;
-    match s {
-        "pending_request_approval" => Some(r::PENDING_REQUEST_APPROVAL),
-        "pending_response_approval" => Some(r::PENDING_RESPONSE_APPROVAL),
-        "done" => Some(r::DONE),
-        "rejected" => Some(r::REJECTED),
-        _ => None,
-    }
 }
 
 async fn inject_page_req(State(state): State<AppState>, headers: HeaderMap) -> Response {

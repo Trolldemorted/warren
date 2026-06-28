@@ -36,8 +36,6 @@ pub struct CommsTemplate {
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
     pub requests: Vec<crate::entity::request::Model>,
-    pub status_req: String,
-    pub req_statuses: Vec<String>,
 }
 
 #[derive(Template)]
