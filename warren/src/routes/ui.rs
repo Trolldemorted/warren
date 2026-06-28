@@ -11,7 +11,7 @@ use askama::Template;
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Form, Router,
 };
@@ -83,7 +83,13 @@ async fn login_form(State(state): State<AppState>, Form(form): Form<LoginForm>) 
             };
             (
                 StatusCode::UNAUTHORIZED,
-                [(header::SET_COOKIE, clear_cookie_value())],
+                [
+                    (header::SET_COOKIE, clear_cookie_value()),
+                    (
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/html; charset=utf-8"),
+                    ),
+                ],
                 render_to_string(t),
             )
                 .into_response()
@@ -280,6 +286,7 @@ async fn agent_delete(
 
 fn render<T: Template>(t: T) -> Response {
     t.render()
+        .map(Html)
         .map(IntoResponse::into_response)
         .unwrap_or_else(|e| {
             (
