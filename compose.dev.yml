@@ -1,12 +1,26 @@
 services:
-  warren:
+  warren-migrate:
     build: .
     image: warren:latest
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://warren:warren@db/warren
+      DATABASE_URL: postgres://warren:warren@db/warren?sslmode=disable
+      DD_ADMIN_PSK: ${DD_ADMIN_PSK:?set DD_ADMIN_PSK in .env or environment}
+      RUST_LOG: info
+    command: ["applyMigration"]
+    restart: on-failure
+  warren:
+    build: .
+    image: warren:latest
+    depends_on:
+      db:
+        condition: service_healthy
+      warren-migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://warren:warren@db/warren?sslmode=disable
       DD_ADMIN_PSK: ${DD_ADMIN_PSK:?set DD_ADMIN_PSK in .env or environment}
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: info

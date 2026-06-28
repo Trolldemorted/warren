@@ -17,8 +17,7 @@ COPY warren/templates warren/templates
 COPY warren/openapi.yml warren/openapi.yml
 COPY warren/static warren/static
 COPY warren-cli/src warren-cli/src
-RUN cargo build --release --bin warren --bin warren-cli \
- && strip target/release/warren target/release/warren-cli
+RUN cargo build --release --bin warren --bin warren-cli
 
 FROM debian:bookworm-slim AS swagger
 ARG SWAGGER_UI_VERSION=5.32.8
@@ -46,13 +45,15 @@ RUN apt-get update \
 FROM debian:bookworm-slim
 ENV RUST_BACKTRACE=1
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 \
+ && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 curl \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 1000 --create-home --shell /usr/sbin/nologin warren
+RUN curl -sSf https://atlasgo.sh | sh
 COPY --from=builder /build/target/release/warren /usr/local/bin/warren
 COPY --from=builder /build/target/release/warren-cli /usr/local/bin/warren-cli
 COPY --from=builder /build/warren/static /var/lib/warren/static
 COPY --from=swagger /tmp/swagger-ui /var/lib/warren/docs
+COPY warren/migrations_atlas warren/migrations_atlas
 USER warren
 ENV WARREN_STATIC_DIR=/var/lib/warren/static
 ENV WARREN_DOCS_DIR=/var/lib/warren/docs

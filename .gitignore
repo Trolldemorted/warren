@@ -6,3 +6,4 @@ Cargo.lock.bak
 *.swp
 .DS_Store
 /data
+/compose.yml
