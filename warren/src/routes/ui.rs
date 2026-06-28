@@ -308,7 +308,8 @@ fn err_page(e: AppError) -> Response {
         AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".into()),
         AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
         _ => {
-            tracing::error!(error = ?e, "request failed");
+            log::error!("request failed: {e:?}");
+            log::debug!("request failure detail: {e:#?}");
             (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
         }
     };

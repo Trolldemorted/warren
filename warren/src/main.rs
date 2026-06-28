@@ -20,7 +20,7 @@ use config::Config;
 use db::Db;
 use sea_orm_migration::MigratorTrait;
 use std::net::SocketAddr;
-use tower_http::{set_header::SetResponseHeaderLayer, trace::TraceLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -54,12 +54,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_server() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warren=debug,tower_http=info".into()),
-        )
-        .init();
+    simple_logger::init_with_env()?;
 
     let cfg = Config::from_env()?;
     let db = db::connect(&cfg.database_url).await?;
@@ -70,7 +65,7 @@ async fn run_server() -> anyhow::Result<()> {
     let app = build_router(state);
 
     let addr: SocketAddr = cfg.bind_addr.parse()?;
-    tracing::info!(%addr, "warren listening");
+    log::info!("warren listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
@@ -80,7 +75,7 @@ async fn run_apply_migrations() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     let db = db::connect(&cfg.database_url).await?;
     migration::Migrator::up(&db, None).await?;
-    tracing::info!("migrations applied");
+    log::info!("migrations applied");
     Ok(())
 }
 
@@ -102,7 +97,6 @@ fn build_router(state: AppState) -> Router {
         .merge(routes::docs::router(state.clone()))
         .route("/healthz", get(|| async { "ok" }))
         .nest("/static", routes::static_files::router(state.clone()))
-        .layer(TraceLayer::new_for_http())
         .layer(security_headers)
         .with_state(state)
 }

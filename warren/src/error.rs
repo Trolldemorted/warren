@@ -36,7 +36,8 @@ impl IntoResponse for AppError {
             AppError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.clone()),
             AppError::Db(e) => {
-                tracing::error!(error = ?e, "database error");
+                log::error!("database error: {e:?}");
+                log::debug!("database error detail: {e:#?}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal",
@@ -44,7 +45,8 @@ impl IntoResponse for AppError {
                 )
             }
             AppError::Internal(e) => {
-                tracing::error!(error = ?e, "internal error");
+                log::error!("internal error: {e:?}");
+                log::debug!("internal error detail: {e:#?}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal",
