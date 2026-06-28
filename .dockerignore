@@ -17,3 +17,5 @@ target
 Dockerfile
 .dockerignore
 compose.yml
+.env
+/data

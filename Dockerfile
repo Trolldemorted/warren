@@ -45,6 +45,7 @@ RUN apt-get update \
  && rm -f swagger-ui.css.map swagger-ui-bundle.js.map swagger-ui-standalone-preset.js.map
 
 FROM debian:bookworm-slim
+ENV RUST_BACKTRACE=1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates libgcc-s1 \
  && rm -rf /var/lib/apt/lists/* \

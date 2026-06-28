@@ -6,10 +6,10 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: host=db user=warren password=warren dbname=warren
+      DATABASE_URL: postgres://warren:warren@db/warren
       DD_ADMIN_PSK: ${DD_ADMIN_PSK:?set DD_ADMIN_PSK in .env or environment}
       RUST_LOG: info
-    command: ["warren", "applyMigrations"]
+    command: ["applyMigrations"]
     restart: on-failure
   warren:
     build: .
@@ -20,11 +20,11 @@ services:
       warren-migrate:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: host=db user=warren password=warren dbname=warren
+      DATABASE_URL: postgres://warren:warren@db/warren
       DD_ADMIN_PSK: ${DD_ADMIN_PSK:?set DD_ADMIN_PSK in .env or environment}
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: info
-    command: ["warren", "server"]
+    command: ["server"]
     ports:
       - "8080:8080"
     restart: unless-stopped
