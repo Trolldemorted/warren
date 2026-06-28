@@ -183,15 +183,9 @@ async fn api_incoming_requests(
     State(state): State<AppState>,
     ctx: AuthContext,
 ) -> AppResult<Json<Vec<request::Model>>> {
-    let (class, kind) = match &ctx {
-        AuthContext::Admin(_) => {
-            let rows =
-                crate::db_ops::list_all_requests(&state.db, Some("approved"), 500, 0).await?;
-            return Ok(Json(rows));
-        }
-        AuthContext::Agent(a) => (a.0.class.clone(), a.0.kind.clone()),
-    };
-    let rows = crate::db_ops::list_inbox(&state.db, &class, kind.as_deref()).await?;
+    let agent = ctx.require_agent()?;
+    let rows =
+        crate::db_ops::list_inbox(&state.db, &agent.0.class, agent.0.kind.as_deref()).await?;
     Ok(Json(rows))
 }
 
@@ -290,14 +284,14 @@ async fn api_incoming_memos(
     State(state): State<AppState>,
     ctx: AuthContext,
 ) -> AppResult<Json<Vec<memo::Model>>> {
-    let (class, kind, agent_id) = match &ctx {
-        AuthContext::Admin(_) => {
-            let rows = crate::db_ops::list_all_memos(&state.db, Some("approved"), 500, 0).await?;
-            return Ok(Json(rows));
-        }
-        AuthContext::Agent(a) => (a.0.class.clone(), a.0.kind.clone(), a.0.id),
-    };
-    let rows = crate::db_ops::list_memo_inbox(&state.db, &class, kind.as_deref(), agent_id).await?;
+    let agent = ctx.require_agent()?;
+    let rows = crate::db_ops::list_memo_inbox(
+        &state.db,
+        &agent.0.class,
+        agent.0.kind.as_deref(),
+        agent.0.id,
+    )
+    .await?;
     Ok(Json(rows))
 }
 

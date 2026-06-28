@@ -12,6 +12,7 @@ pub struct Model {
     #[serde(rename = "type")]
     pub kind: Option<String>,
     pub model: String,
+    pub prompt: String,
     pub authtoken: String,
     pub created_at: ChronoDateTimeUtc,
 }

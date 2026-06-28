@@ -10,6 +10,8 @@ pub struct AgentNew {
     #[serde(rename = "type", default)]
     pub kind: Option<String>,
     pub model: String,
+    #[serde(default)]
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -17,6 +19,7 @@ pub struct AgentPatch {
     pub name: Option<String>,
     pub class: Option<String>,
     pub model: Option<String>,
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

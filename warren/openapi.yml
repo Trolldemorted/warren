@@ -26,9 +26,10 @@ components:
         class: { type: string }
         type: { type: string, nullable: true }
         model: { type: string }
+        prompt: { type: string }
         authtoken: { type: string }
         created_at: { type: string, format: date-time }
-      required: [id, name, class, type, model, authtoken, created_at]
+      required: [id, name, class, type, model, prompt, authtoken, created_at]
     AgentNew:
       type: object
       properties:
@@ -36,6 +37,7 @@ components:
         class: { type: string }
         type: { type: string, nullable: true }
         model: { type: string }
+        prompt: { type: string, default: "" }
       required: [name, class, model]
     AgentPatch:
       type: object
@@ -43,6 +45,7 @@ components:
         name: { type: string }
         class: { type: string }
         model: { type: string }
+        prompt: { type: string }
     LoginReq:
       type: object
       properties:

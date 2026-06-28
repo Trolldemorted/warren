@@ -32,6 +32,7 @@ pub async fn insert_agent(db: &Db, new: &AgentNew, authtoken: &str) -> AppResult
         class: Set(new.class.clone()),
         kind: Set(new.kind.clone()),
         model: Set(new.model.clone()),
+        prompt: Set(new.prompt.clone()),
         authtoken: Set(authtoken.to_string()),
         ..Default::default()
     };
@@ -55,6 +56,9 @@ pub async fn update_agent(db: &Db, id: Uuid, patch: &AgentPatch) -> AppResult<()
     }
     if let Some(m) = &patch.model {
         am.model = Set(m.clone());
+    }
+    if let Some(p) = &patch.prompt {
+        am.prompt = Set(p.clone());
     }
     am.update(db).await?;
     Ok(())

@@ -160,6 +160,8 @@ struct AgentForm {
     #[serde(default)]
     kind: Option<String>,
     model: String,
+    #[serde(default)]
+    prompt: String,
 }
 
 async fn agents_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -207,6 +209,7 @@ async fn agent_create(
         class: form.class,
         kind: form.kind.filter(|s| !s.is_empty()),
         model: form.model,
+        prompt: form.prompt,
     };
     match crate::db_ops::create_agent(&state.db, &new).await {
         Ok(agent) => {
@@ -214,9 +217,7 @@ async fn agent_create(
             let t = AgentFormTemplate {
                 title: Some("Agent created"),
                 nav: Some("agents"),
-                flash: Some(Flash::success(
-                    "agent created; copy the token now — it will not be shown again",
-                )),
+                flash: Some(Flash::success("agent created")),
                 agent: Some(agent),
                 form_action: format!("/agents/{id}/edit"),
             };
@@ -263,6 +264,7 @@ async fn agent_update(
         name: Some(form.name),
         class: Some(form.class),
         model: Some(form.model),
+        prompt: Some(form.prompt),
     };
     match crate::db_ops::update_agent(&state.db, id, &patch).await {
         Ok(_) => Redirect::to("/agents").into_response(),
