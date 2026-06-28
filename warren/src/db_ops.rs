@@ -264,10 +264,16 @@ pub struct MigrationRow {
     pub applied_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn is_missing_relation(e: &sea_orm::DbErr) -> bool {
+fn is_candidate_skip(e: &sea_orm::DbErr) -> bool {
     use sea_orm::RuntimeErr;
     if let sea_orm::DbErr::Query(RuntimeErr::SqlxError(sqlx::Error::Database(db))) = e {
-        return matches!(db.code().as_deref(), Some("42P01") | Some("3F000"));
+        // 42P01: undefined_table, 3F000: invalid_schema_name,
+        // 42703: undefined_column — all mean "this candidate shape doesn't match
+        // the actual table layout, try the next one".
+        return matches!(
+            db.code().as_deref(),
+            Some("42P01") | Some("3F000") | Some("42703")
+        );
     }
     false
 }
@@ -292,7 +298,7 @@ pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
         let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
         match MigrationRow::find_by_statement(stmt).all(db).await {
             Ok(rows) => return Ok(rows),
-            Err(e) if is_missing_relation(&e) => {}
+            Err(e) if is_candidate_skip(&e) => {}
             Err(e) => return Err(AppError::Db(e)),
         }
         // Older atlas: applied is timestamptz already.
@@ -306,7 +312,7 @@ pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
         let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
         match MigrationRow::find_by_statement(stmt).all(db).await {
             Ok(rows) => return Ok(rows),
-            Err(e) if is_missing_relation(&e) => {}
+            Err(e) if is_candidate_skip(&e) => {}
             Err(e) => return Err(AppError::Db(e)),
         }
         // Also tolerate the column being named `applied_at` but already a timestamptz
@@ -321,7 +327,7 @@ pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
         let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
         match MigrationRow::find_by_statement(stmt).all(db).await {
             Ok(rows) => return Ok(rows),
-            Err(e) if is_missing_relation(&e) => {}
+            Err(e) if is_candidate_skip(&e) => {}
             Err(e) => return Err(AppError::Db(e)),
         }
     }
@@ -334,7 +340,7 @@ pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql.to_string());
     match MigrationRow::find_by_statement(stmt).all(db).await {
         Ok(rows) => return Ok(rows),
-        Err(e) if is_missing_relation(&e) => {}
+        Err(e) if is_candidate_skip(&e) => {}
         Err(e) => return Err(AppError::Db(e)),
     }
     Ok(vec![])
