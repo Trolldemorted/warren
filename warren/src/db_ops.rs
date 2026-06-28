@@ -265,7 +265,7 @@ pub async fn distinct_agent_kinds(db: &Db) -> AppResult<Vec<String>> {
 pub struct MigrationRow {
     pub version: String,
     pub description: Option<String>,
-    pub applied_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub applied_at: Option<String>,
 }
 
 fn is_candidate_skip(e: &sea_orm::DbErr) -> bool {
@@ -282,20 +282,21 @@ fn is_candidate_skip(e: &sea_orm::DbErr) -> bool {
     false
 }
 
+const TS_FMT: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'";
+
 pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
-    // Atlas revisions live in one of these tables and the timestamp column may be
-    // either `applied_at BIGINT` (nanoseconds since epoch, modern atlas) or
-    // `applied TIMESTAMPTZ` (older atlas). We try the modern shape first.
+    // Format timestamps as text in SQL — sidesteps all sqlx/chrono type-decoder
+    // issues across atlas / golang-migrate layout variants.
     let atlas_candidates: &[&str] = &[
         "atlas_schema_revisions.atlas_schema_revisions",
         "public.atlas_schema_revisions",
     ];
     for table in atlas_candidates {
-        // Modern: applied_at is bigint nanoseconds — convert to timestamptz in SQL.
+        // Modern atlas: applied_at is bigint nanoseconds since epoch.
         let sql = format!(
             "SELECT version::text AS version, \
                     description, \
-                    to_timestamp(applied_at::numeric / 1000000000) AS applied_at \
+                    to_char(to_timestamp(applied_at::double precision / 1e9) AT TIME ZONE 'UTC', {TS_FMT}) AS applied_at \
                FROM {table} \
               ORDER BY version"
         );
@@ -305,26 +306,11 @@ pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
             Err(e) if is_candidate_skip(&e) => {}
             Err(e) => return Err(AppError::Db(e)),
         }
-        // Older atlas: applied is timestamptz already.
+        // Older atlas: applied is timestamptz.
         let sql = format!(
             "SELECT version::text AS version, \
                     description, \
-                    applied AS applied_at \
-               FROM {table} \
-              ORDER BY version"
-        );
-        let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
-        match MigrationRow::find_by_statement(stmt).all(db).await {
-            Ok(rows) => return Ok(rows),
-            Err(e) if is_candidate_skip(&e) => {}
-            Err(e) => return Err(AppError::Db(e)),
-        }
-        // Also tolerate the column being named `applied_at` but already a timestamptz
-        // (e.g. someone manually created the table in that shape).
-        let sql = format!(
-            "SELECT version::text AS version, \
-                    description, \
-                    applied_at AS applied_at \
+                    to_char(applied AT TIME ZONE 'UTC', {TS_FMT}) AS applied_at \
                FROM {table} \
               ORDER BY version"
         );
@@ -336,11 +322,13 @@ pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
         }
     }
     // golang-migrate / sqlx-style: public.schema_migrations(installed_on TIMESTAMPTZ)
-    let sql = "SELECT version::text AS version, \
-                      NULL::text AS description, \
-                      installed_on AS applied_at \
-                 FROM public.schema_migrations \
-                ORDER BY version";
+    let sql = format!(
+        "SELECT version::text AS version, \
+                NULL::text AS description, \
+                to_char(installed_on AT TIME ZONE 'UTC', {TS_FMT}) AS applied_at \
+           FROM public.schema_migrations \
+          ORDER BY version"
+    );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql.to_string());
     match MigrationRow::find_by_statement(stmt).all(db).await {
         Ok(rows) => return Ok(rows),
