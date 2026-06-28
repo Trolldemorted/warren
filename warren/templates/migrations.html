@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block body %}
+<h1 class="h3 mb-3">Migrations</h1>
+<p class="text-muted">Migration history tracked by atlas. Run <code>warren applyMigration</code> to apply pending migrations.</p>
+
+{% if migrations.is_empty() %}
+  <div class="alert alert-warning" role="alert">
+    No migration tracking table found in this database. Either the schema was applied
+    by hand, <code>warren applyMigration</code> hasn't been run, or <code>atlas</code>
+    isn't installed on the host where migrations run.
+  </div>
+{% else %}
+  <table class="table table-sm align-middle">
+    <thead>
+      <tr>
+        <th>Version</th>
+        <th>Description</th>
+        <th>Applied at</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for m in migrations %}
+      <tr>
+        <td><code>{{ m.version }}</code></td>
+        <td>{{ m.description.as_deref().unwrap_or("—") }}</td>
+        <td><small>{% if let Some(t) = m.applied_at %}{{ t }}{% else %}—{% endif %}</small></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}

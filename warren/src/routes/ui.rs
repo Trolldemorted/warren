@@ -4,6 +4,7 @@ use crate::ids::new_session_token;
 use crate::models::{AgentNew, AgentPatch, RequestNew};
 use crate::templates::{
     AgentFormTemplate, AgentsTemplate, CommsInjectTemplate, CommsTemplate, Flash, LoginTemplate,
+    MigrationsTemplate,
 };
 use crate::{auth, AppState};
 use askama::Template;
@@ -47,6 +48,7 @@ pub fn router() -> Router<AppState> {
             "/comms/requests/:id/edit",
             get(message_edit_page).post(message_edit_save),
         )
+        .route("/admin/migrations", get(migrations_page))
 }
 
 async fn root() -> Redirect {
@@ -554,4 +556,20 @@ async fn message_edit_save(
         Ok(_) => Redirect::to("/comms").into_response(),
         Err(e) => err_page(e),
     }
+}
+
+async fn migrations_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let migrations = match crate::db_ops::list_migrations(&state.db).await {
+        Ok(m) => m,
+        Err(e) => return err_page(e),
+    };
+    render(MigrationsTemplate {
+        title: Some("Migrations"),
+        nav: Some("migrations"),
+        flash: None,
+        migrations,
+    })
 }

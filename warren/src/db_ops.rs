@@ -257,6 +257,41 @@ pub async fn distinct_agent_kinds(db: &Db) -> AppResult<Vec<String>> {
     Ok(rows.into_iter().filter_map(|r| r.kind).collect())
 }
 
+#[derive(FromQueryResult)]
+pub struct MigrationRow {
+    pub version: String,
+    pub description: Option<String>,
+    pub applied_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn is_missing_table(e: &sea_orm::DbErr) -> bool {
+    use sea_orm::RuntimeErr;
+    if let sea_orm::DbErr::Query(RuntimeErr::SqlxError(sqlx::Error::Database(db))) = e {
+        return db.code().as_deref() == Some("42P01");
+    }
+    false
+}
+
+pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
+    let candidates = [
+        ("atlas_schema_revisions", "applied"),
+        ("schema_migrations", "installed_on"),
+    ];
+    for (table, ts_col) in candidates {
+        let sql = format!(
+            "SELECT version::text AS version, description, {ts_col} AS applied_at \
+             FROM {table} ORDER BY version"
+        );
+        let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+        match MigrationRow::find_by_statement(stmt).all(db).await {
+            Ok(rows) => return Ok(rows),
+            Err(e) if is_missing_table(&e) => continue,
+            Err(e) => return Err(AppError::Db(e)),
+        }
+    }
+    Ok(vec![])
+}
+
 pub async fn update_request_payload(
     db: &Db,
     id: Uuid,

@@ -48,6 +48,15 @@ pub struct CommsInjectTemplate {
     pub target_kinds: Vec<String>,
 }
 
+#[derive(Template)]
+#[template(path = "migrations.html")]
+pub struct MigrationsTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub migrations: Vec<crate::db_ops::MigrationRow>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Flash {
     pub level: &'static str,

@@ -158,7 +158,33 @@ async fn run_apply_migration() -> anyhow::Result<()> {
             status.code().unwrap_or(-1)
         ));
     }
+    log_status(&cfg.database_url, &dir_url).await;
     Ok(())
+}
+
+async fn log_status(database_url: &str, dir_url: &str) {
+    let output = match std::process::Command::new("atlas")
+        .args(["migrate", "status", "--url", database_url, "--dir", dir_url])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("could not run `atlas migrate status` for logging: {e}");
+            return;
+        }
+    };
+    if !output.status.success() {
+        log::warn!(
+            "`atlas migrate status` exited with {} (stderr: {})",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return;
+    }
+    log::info!(
+        "applied migrations:\n{}",
+        String::from_utf8_lossy(&output.stdout).trim_end()
+    );
 }
 
 async fn run_dump_schema() -> anyhow::Result<()> {
