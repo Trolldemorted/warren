@@ -171,11 +171,15 @@ async fn api_create_request(
     ctx: AuthContext,
     Json(new): Json<RequestNew>,
 ) -> AppResult<Json<request::Model>> {
-    ctx.require_admin()?;
+    // Admin POSTs auto-skip request approval; agent POSTs go through review.
+    let initial_status = match &ctx {
+        AuthContext::Admin(_) => request::PENDING_RESPONSE_APPROVAL,
+        AuthContext::Agent(_) => request::PENDING_REQUEST_APPROVAL,
+    };
     if new.target_class.trim().is_empty() {
         return Err(AppError::BadRequest("target_class required".into()));
     }
-    let r = crate::db_ops::create_request(&state.db, &new).await?;
+    let r = crate::db_ops::create_request(&state.db, &new, initial_status).await?;
     Ok(Json(r))
 }
 

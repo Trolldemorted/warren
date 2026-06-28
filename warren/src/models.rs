@@ -28,8 +28,6 @@ pub struct RequestNew {
     #[serde(default)]
     pub target_type: Option<String>,
     pub payload: Value,
-    #[serde(default)]
-    pub approved: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

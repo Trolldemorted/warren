@@ -322,23 +322,6 @@ struct InjectForm {
     #[serde(default)]
     target_type: Option<String>,
     payload: String,
-    #[serde(default)]
-    approved: Option<StrictBool>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum StrictBool {
-    On,
-    True,
-    #[serde(rename = "1")]
-    One,
-}
-
-impl From<StrictBool> for bool {
-    fn from(_: StrictBool) -> bool {
-        true
-    }
 }
 
 fn parse_payload(s: &str) -> serde_json::Value {
@@ -395,9 +378,15 @@ async fn inject_create_req(
         target_class: form.target_class,
         target_type: form.target_type.filter(|s| !s.is_empty()),
         payload: parse_payload(&form.payload),
-        approved: form.approved.is_some(),
     };
-    if let Err(e) = crate::db_ops::create_request(&state.db, &new).await {
+    // UI inject is admin-only — auto-skip request approval.
+    if let Err(e) = crate::db_ops::create_request(
+        &state.db,
+        &new,
+        crate::entity::request::PENDING_RESPONSE_APPROVAL,
+    )
+    .await
+    {
         return err_page(e);
     }
     Redirect::to("/comms").into_response()

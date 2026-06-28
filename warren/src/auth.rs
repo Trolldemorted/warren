@@ -32,11 +32,9 @@ pub fn read_session_cookie(headers: &HeaderMap) -> Option<String> {
 pub struct AdminUser;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AgentAuth(pub agent::Model);
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum AuthContext {
     Admin(AdminUser),
     Agent(AgentAuth),
@@ -50,7 +48,6 @@ impl AuthContext {
         }
     }
 
-    #[allow(dead_code)]
     pub fn require_agent(&self) -> Result<&AgentAuth, AppError> {
         match self {
             AuthContext::Agent(a) => Ok(a),

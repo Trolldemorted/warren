@@ -232,9 +232,15 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/Request' }
     post:
-      tags: [admin]
-      summary: Create request in status=pending_request_approval (admin)
-      security: [{ adminSession: [] }]
+      tags: [admin, agent]
+      summary: Create request (admin or agent)
+      description: |
+        Admin POSTs auto-skip `pending_request_approval` and land directly in
+        `pending_response_approval` (status 1). Agent POSTs always go through
+        admin review first (status 0).
+      security:
+        - adminSession: []
+        - agentToken: []
       requestBody:
         required: true
         content:

@@ -77,12 +77,16 @@ pub async fn delete_agent(db: &Db, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn create_request(db: &Db, new: &RequestNew) -> AppResult<request::Model> {
+pub async fn create_request(
+    db: &Db,
+    new: &RequestNew,
+    initial_status: i16,
+) -> AppResult<request::Model> {
     let am = request::ActiveModel {
         target_class: Set(new.target_class.clone()),
         target_type: Set(new.target_type.clone()),
         payload: Set(new.payload.clone()),
-        status: Set(request::PENDING_REQUEST_APPROVAL),
+        status: Set(initial_status),
         ..Default::default()
     };
     Ok(am.insert(db).await?)
