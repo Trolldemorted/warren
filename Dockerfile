@@ -12,11 +12,10 @@ RUN mkdir -p warren/src warren-cli/src \
  && cargo build --release --bin warren --bin warren-cli \
  && rm -rf warren/src warren-cli/src
 COPY warren/src warren/src
-COPY warren/migrations warren/migrations
+COPY warren/migrations_atlas warren/migrations_atlas
 COPY warren/templates warren/templates
 COPY warren/openapi.yml warren/openapi.yml
 COPY warren/static warren/static
-COPY schema.hcl schema.hcl
 COPY warren-cli/src warren-cli/src
 RUN cargo build --release --bin warren --bin warren-cli \
  && strip target/release/warren target/release/warren-cli

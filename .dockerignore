@@ -16,6 +16,7 @@ target
 **/build
 Dockerfile
 .dockerignore
-compose.yml
+compose*.yml
 .env
 /data
+*.hcl
