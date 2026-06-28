@@ -5,6 +5,7 @@ mod db_ops;
 mod entity;
 mod error;
 mod ids;
+mod migrate;
 mod models;
 mod routes;
 mod templates;
@@ -38,6 +39,9 @@ struct Cli {
 enum Command {
     /// Start the HTTP server.
     Server,
+    /// Apply pending SQL migrations from migrations_atlas/ against DATABASE_URL.
+    #[command(name = "applyMigrations")]
+    ApplyMigrations,
     /// Emit CREATE TABLE SQL for every entity to stdout.
     DumpSchema,
 }
@@ -58,6 +62,7 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(async move {
         match cli.command {
             Command::Server => run_server().await,
+            Command::ApplyMigrations => run_apply_migrations().await,
             Command::DumpSchema => run_dump_schema().await,
         }
     })
@@ -88,6 +93,16 @@ async fn run_server() -> anyhow::Result<()> {
         log::debug!("server failure chain: {e:#?}");
         return Err(anyhow::Error::from(e).context("running HTTP server"));
     }
+    Ok(())
+}
+
+async fn run_apply_migrations() -> anyhow::Result<()> {
+    let cfg = Config::from_env().context("loading configuration")?;
+    log::info!("connecting to database");
+    let db = db::connect(&cfg.database_url)
+        .await
+        .context("connecting to database")?;
+    migrate::run(&db).await.context("applying migrations")?;
     Ok(())
 }
 
