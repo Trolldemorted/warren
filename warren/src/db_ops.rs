@@ -225,6 +225,38 @@ pub async fn delete_admin_session(db: &Db, token: &str) -> AppResult<()> {
     Ok(())
 }
 
+#[derive(FromQueryResult)]
+struct AgentClassRow {
+    class: String,
+}
+
+#[derive(FromQueryResult)]
+struct AgentKindRow {
+    #[sea_orm(from_alias = "kind")]
+    kind: Option<String>,
+}
+
+pub async fn distinct_agent_classes(db: &Db) -> AppResult<Vec<String>> {
+    let rows = AgentClassRow::find_by_statement(Statement::from_string(
+        DatabaseBackend::Postgres,
+        "SELECT DISTINCT class FROM agents ORDER BY class".to_string(),
+    ))
+    .all(db)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.class).collect())
+}
+
+pub async fn distinct_agent_kinds(db: &Db) -> AppResult<Vec<String>> {
+    let rows = AgentKindRow::find_by_statement(Statement::from_string(
+        DatabaseBackend::Postgres,
+        "SELECT DISTINCT \"type\" AS kind FROM agents WHERE \"type\" IS NOT NULL ORDER BY \"type\""
+            .to_string(),
+    ))
+    .all(db)
+    .await?;
+    Ok(rows.into_iter().filter_map(|r| r.kind).collect())
+}
+
 pub async fn update_request_payload(
     db: &Db,
     id: Uuid,

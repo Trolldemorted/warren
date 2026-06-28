@@ -4,14 +4,34 @@
 <form method="post" action="/comms/requests/new">
   <div class="mb-3">
     <label class="form-label">Target class</label>
-    <input class="form-control" name="target_class" required>
+    {% if target_classes.is_empty() %}
+      <input class="form-control" name="target_class" required>
+      <div class="form-text">No agents registered — type a class name.</div>
+    {% else %}
+      <select class="form-select" name="target_class" required>
+        <option value="" disabled selected>Select a class…</option>
+        {% for c in target_classes %}
+          <option value="{{ c }}">{{ c }}</option>
+        {% endfor %}
+      </select>
+    {% endif %}
   </div>
   <div class="mb-3">
     <label class="form-label">Target type (optional — empty = whole class)</label>
-    <input class="form-control" name="target_type">
+    {% if target_kinds.is_empty() %}
+      <input class="form-control" name="target_type">
+      <div class="form-text">No agent kinds registered — leave blank to target the whole class.</div>
+    {% else %}
+      <select class="form-select" name="target_type">
+        <option value="" selected>All kinds</option>
+        {% for k in target_kinds %}
+          <option value="{{ k }}">{{ k }}</option>
+        {% endfor %}
+      </select>
+    {% endif %}
   </div>
   <div class="mb-3">
-    <label class="form-label">Payload (JSON or text)</label>
+    <label class="form-label">Payload</label>
     <textarea class="form-control" name="payload" rows="6" required></textarea>
   </div>
   <div class="form-check mb-3">

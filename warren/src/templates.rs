@@ -46,6 +46,8 @@ pub struct CommsInjectTemplate {
     pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
+    pub target_classes: Vec<String>,
+    pub target_kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -345,7 +345,7 @@ impl From<StrictBool> for bool {
 }
 
 fn parse_payload(s: &str) -> serde_json::Value {
-    serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.to_string()))
+    serde_json::Value::String(s.to_string())
 }
 
 async fn comms_page(
@@ -396,10 +396,20 @@ async fn inject_page_req(State(state): State<AppState>, headers: HeaderMap) -> R
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
+    let (target_classes, target_kinds) =
+        match crate::db_ops::distinct_agent_classes(&state.db).await {
+            Ok(classes) => match crate::db_ops::distinct_agent_kinds(&state.db).await {
+                Ok(kinds) => (classes, kinds),
+                Err(e) => return err_page(e),
+            },
+            Err(e) => return err_page(e),
+        };
     render(CommsInjectTemplate {
         title: Some("Inject request"),
         nav: Some("comms"),
         flash: None,
+        target_classes,
+        target_kinds,
     })
 }
 
@@ -501,6 +511,8 @@ struct CommsEditTemplate {
     flash: Option<Flash>,
     target_class: String,
     target_type: Option<String>,
+    target_classes: Vec<String>,
+    target_kinds: Vec<String>,
     payload: String,
     form_action: String,
 }
@@ -513,19 +525,42 @@ async fn message_edit_page(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    match crate::db_ops::get_request(&state.db, id).await {
-        Ok(Some(r)) => render(CommsEditTemplate {
-            title: Some("Edit request"),
-            nav: Some("comms"),
-            flash: None,
-            target_class: r.target_class,
-            target_type: r.target_type,
-            payload: r.payload.to_string(),
-            form_action: format!("/comms/requests/{id}/edit"),
-        }),
-        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => err_page(e),
-    }
+    let req = match crate::db_ops::get_request(&state.db, id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => return err_page(e),
+    };
+    let target_classes = match crate::db_ops::distinct_agent_classes(&state.db).await {
+        Ok(mut v) => {
+            if !v.contains(&req.target_class) {
+                v.insert(0, req.target_class.clone());
+            }
+            v
+        }
+        Err(e) => return err_page(e),
+    };
+    let target_kinds = match crate::db_ops::distinct_agent_kinds(&state.db).await {
+        Ok(mut v) => {
+            if let Some(t) = &req.target_type {
+                if !v.contains(t) {
+                    v.insert(0, t.clone());
+                }
+            }
+            v
+        }
+        Err(e) => return err_page(e),
+    };
+    render(CommsEditTemplate {
+        title: Some("Edit request"),
+        nav: Some("comms"),
+        flash: None,
+        target_class: req.target_class,
+        target_type: req.target_type,
+        target_classes,
+        target_kinds,
+        payload: req.payload.to_string(),
+        form_action: format!("/comms/requests/{id}/edit"),
+    })
 }
 
 async fn message_edit_save(

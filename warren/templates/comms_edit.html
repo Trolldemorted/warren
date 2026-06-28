@@ -4,14 +4,33 @@
 <form method="post" action="{{ form_action }}">
   <div class="mb-3">
     <label class="form-label">Target class</label>
-    <input class="form-control" name="target_class" value="{{ target_class }}" required>
+    {% if target_classes.is_empty() %}
+      <input class="form-control" name="target_class" value="{{ target_class }}" required>
+      <div class="form-text">No agents registered — edit the class name directly.</div>
+    {% else %}
+      <select class="form-select" name="target_class" required>
+        {% for c in target_classes %}
+          <option value="{{ c }}" {% if c.as_str() == target_class.as_str() %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    {% endif %}
   </div>
   <div class="mb-3">
     <label class="form-label">Target type (optional — empty = whole class)</label>
-    <input class="form-control" name="target_type" value="{{ target_type.as_deref().unwrap_or("") }}">
+    {% if target_kinds.is_empty() %}
+      <input class="form-control" name="target_type" value="{{ target_type.as_deref().unwrap_or("") }}">
+      <div class="form-text">No agent kinds registered — leave blank to target the whole class.</div>
+    {% else %}
+      <select class="form-select" name="target_type">
+        <option value="" {% if target_type.is_none() %}selected{% endif %}>All kinds</option>
+        {% for k in target_kinds %}
+          <option value="{{ k }}" {% if target_type.as_deref() == Some(k.as_str()) %}selected{% endif %}>{{ k }}</option>
+        {% endfor %}
+      </select>
+    {% endif %}
   </div>
   <div class="mb-3">
-    <label class="form-label">Payload (JSON or text)</label>
+    <label class="form-label">Payload</label>
     <textarea class="form-control" name="payload" rows="10" required>{{ payload }}</textarea>
   </div>
   <button type="submit" class="btn btn-primary">Save</button>
