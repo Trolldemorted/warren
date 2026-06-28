@@ -9,6 +9,7 @@ mod models;
 mod routes;
 mod templates;
 
+use anyhow::Context;
 use axum::{
     http::{HeaderName, HeaderValue},
     routing::get,
@@ -41,30 +42,52 @@ enum Command {
     DumpSchema,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("panic: {info}");
+        log::error!("panic: {info}");
+    }));
+    simple_logger::init_with_env().context("initializing logger")?;
+
     let cli = Cli::parse();
-    match cli.command {
-        Command::Server => run_server().await,
-        Command::DumpSchema => run_dump_schema().await,
-    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    runtime.block_on(async move {
+        match cli.command {
+            Command::Server => run_server().await,
+            Command::DumpSchema => run_dump_schema().await,
+        }
+    })
 }
 
 async fn run_server() -> anyhow::Result<()> {
-    simple_logger::init_with_env()?;
-
-    let cfg = Config::from_env()?;
-    let db = db::connect(&cfg.database_url).await?;
+    let cfg = Config::from_env().context("loading configuration")?;
+    log::info!("connecting to database");
+    let db = db::connect(&cfg.database_url)
+        .await
+        .context("connecting to database")?;
     let state = AppState {
         db,
         config: cfg.clone(),
     };
     let app = build_router(state);
 
-    let addr: SocketAddr = cfg.bind_addr.parse()?;
+    let addr: SocketAddr = cfg
+        .bind_addr
+        .parse()
+        .context(format!("parsing BIND_ADDR {:?}", cfg.bind_addr))?;
     log::info!("warren listening on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service()).await?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .context(format!("binding TCP listener on {addr}"))?;
+    if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+        log::error!("server stopped with error: {e:?}");
+        log::debug!("server failure chain: {e:#?}");
+        return Err(anyhow::Error::from(e).context("running HTTP server"));
+    }
     Ok(())
 }
 
