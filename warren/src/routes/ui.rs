@@ -1,7 +1,7 @@
 use crate::auth::SESSION_COOKIE;
 use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
-use crate::models::{AgentNew, AgentPatch, MemoNew, RequestNew};
+use crate::models::{AgentNew, AgentPatch, RequestNew};
 use crate::templates::{
     AgentFormTemplate, AgentsTemplate, Flash, LoginTemplate, MessageInjectTemplate,
     MessagesTemplate,
@@ -35,10 +35,6 @@ pub fn router() -> Router<AppState> {
             get(inject_page_req).post(inject_create_req),
         )
         .route(
-            "/messages/memos/new",
-            get(inject_page_memo).post(inject_create_memo),
-        )
-        .route(
             "/messages/requests/:id/approve",
             post(message_approve_request),
         )
@@ -46,8 +42,18 @@ pub fn router() -> Router<AppState> {
             "/messages/requests/:id/reject",
             post(message_reject_request),
         )
-        .route("/messages/memos/:id/approve", post(message_approve_memo))
-        .route("/messages/memos/:id/reject", post(message_reject_memo))
+        .route(
+            "/messages/requests/:id/approve-response",
+            post(message_approve_response),
+        )
+        .route(
+            "/messages/requests/:id/reject-response",
+            post(message_reject_response),
+        )
+        .route(
+            "/messages/requests/:id/edit",
+            get(message_edit_page).post(message_edit_save),
+        )
 }
 
 async fn root() -> Redirect {
@@ -321,7 +327,6 @@ fn err_page(e: AppError) -> Response {
 #[derive(Deserialize, Default)]
 struct MessagesQuery {
     status_req: Option<String>,
-    status_memo: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -361,14 +366,13 @@ async fn messages_page(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let status_req = q.status_req.unwrap_or_else(|| "pending".into());
-    let status_memo = q.status_memo.unwrap_or_else(|| "pending".into());
-    let reqs = match crate::db_ops::list_all_requests(&state.db, Some(&status_req), 200, 0).await {
+    let status_req_label = q
+        .status_req
+        .unwrap_or_else(|| "pending_request_approval".into());
+    let status_req = parse_status_label(&status_req_label)
+        .unwrap_or(crate::entity::request::PENDING_REQUEST_APPROVAL);
+    let reqs = match crate::db_ops::list_all_requests(&state.db, Some(status_req), 200, 0).await {
         Ok(r) => r,
-        Err(e) => return err_page(e),
-    };
-    let memos = match crate::db_ops::list_all_memos(&state.db, Some(&status_memo), 200, 0).await {
-        Ok(m) => m,
         Err(e) => return err_page(e),
     };
     let t = MessagesTemplate {
@@ -376,18 +380,26 @@ async fn messages_page(
         nav: Some("messages"),
         flash: None,
         requests: reqs,
-        memos,
-        status_req,
-        status_memo,
+        status_req: status_req_label,
         req_statuses: vec![
-            "pending".into(),
-            "approved".into(),
-            "responded".into(),
+            "pending_request_approval".into(),
+            "pending_response_approval".into(),
+            "done".into(),
             "rejected".into(),
         ],
-        memo_statuses: vec!["pending".into(), "approved".into(), "rejected".into()],
     };
     render(t)
+}
+
+fn parse_status_label(s: &str) -> Option<i16> {
+    use crate::entity::request as r;
+    match s {
+        "pending_request_approval" => Some(r::PENDING_REQUEST_APPROVAL),
+        "pending_response_approval" => Some(r::PENDING_RESPONSE_APPROVAL),
+        "done" => Some(r::DONE),
+        "rejected" => Some(r::REJECTED),
+        _ => None,
+    }
 }
 
 async fn inject_page_req(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -398,19 +410,6 @@ async fn inject_page_req(State(state): State<AppState>, headers: HeaderMap) -> R
         title: Some("Inject request"),
         nav: Some("messages"),
         flash: None,
-        kind: "requests".into(),
-    })
-}
-
-async fn inject_page_memo(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
-    }
-    render(MessageInjectTemplate {
-        title: Some("Inject memo"),
-        nav: Some("messages"),
-        flash: None,
-        kind: "memos".into(),
     })
 }
 
@@ -434,26 +433,6 @@ async fn inject_create_req(
     Redirect::to("/messages").into_response()
 }
 
-async fn inject_create_memo(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Form(form): Form<InjectForm>,
-) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
-    }
-    let new = MemoNew {
-        target_class: form.target_class,
-        target_type: form.target_type.filter(|s| !s.is_empty()),
-        payload: parse_payload(&form.payload),
-        approved: form.approved.is_some(),
-    };
-    if let Err(e) = crate::db_ops::create_memo(&state.db, &new).await {
-        return err_page(e);
-    }
-    Redirect::to("/messages").into_response()
-}
-
 async fn message_approve_request(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -462,7 +441,14 @@ async fn message_approve_request(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    match crate::db_ops::set_request_status(&state.db, id, "pending", "approved").await {
+    match crate::db_ops::set_request_status(
+        &state.db,
+        id,
+        crate::entity::request::PENDING_REQUEST_APPROVAL,
+        crate::entity::request::PENDING_RESPONSE_APPROVAL,
+    )
+    .await
+    {
         Ok(_) => Redirect::to("/messages").into_response(),
         Err(e) => err_page(e),
     }
@@ -476,13 +462,20 @@ async fn message_reject_request(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    match crate::db_ops::set_request_status(&state.db, id, "pending", "rejected").await {
+    match crate::db_ops::set_request_status(
+        &state.db,
+        id,
+        crate::entity::request::PENDING_REQUEST_APPROVAL,
+        crate::entity::request::REJECTED,
+    )
+    .await
+    {
         Ok(_) => Redirect::to("/messages").into_response(),
         Err(e) => err_page(e),
     }
 }
 
-async fn message_approve_memo(
+async fn message_approve_response(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
@@ -490,13 +483,13 @@ async fn message_approve_memo(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    match crate::db_ops::set_memo_status(&state.db, id, "pending", "approved").await {
+    match crate::db_ops::accept_request_response(&state.db, id).await {
         Ok(_) => Redirect::to("/messages").into_response(),
         Err(e) => err_page(e),
     }
 }
 
-async fn message_reject_memo(
+async fn message_reject_response(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
@@ -504,7 +497,67 @@ async fn message_reject_memo(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    match crate::db_ops::set_memo_status(&state.db, id, "pending", "rejected").await {
+    match crate::db_ops::reject_request_response(&state.db, id).await {
+        Ok(_) => Redirect::to("/messages").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "message_edit.html")]
+struct MessageEditTemplate {
+    title: Option<&'static str>,
+    nav: Option<&'static str>,
+    flash: Option<Flash>,
+    target_class: String,
+    target_type: Option<String>,
+    payload: String,
+    form_action: String,
+}
+
+async fn message_edit_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    match crate::db_ops::get_request(&state.db, id).await {
+        Ok(Some(r)) => render(MessageEditTemplate {
+            title: Some("Edit request"),
+            nav: Some("messages"),
+            flash: None,
+            target_class: r.target_class,
+            target_type: r.target_type,
+            payload: r.payload.to_string(),
+            form_action: format!("/messages/requests/{id}/edit"),
+        }),
+        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn message_edit_save(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Form(form): Form<InjectForm>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let target_type = form.target_type.filter(|s| !s.is_empty());
+    let payload = parse_payload(&form.payload);
+    match crate::db_ops::update_request_payload(
+        &state.db,
+        id,
+        &form.target_class,
+        target_type.as_deref(),
+        &payload,
+    )
+    .await
+    {
         Ok(_) => Redirect::to("/messages").into_response(),
         Err(e) => err_page(e),
     }

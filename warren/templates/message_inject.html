@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block body %}
-<h1 class="h3 mb-3">{{ kind }} inject</h1>
-<form method="post" action="/messages/{{ kind }}/new">
+<h1 class="h3 mb-3">Inject request</h1>
+<form method="post" action="/messages/requests/new">
   <div class="mb-3">
     <label class="form-label">Target class</label>
     <input class="form-control" name="target_class" required>

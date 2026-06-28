@@ -5,7 +5,6 @@ mod db_ops;
 mod entity;
 mod error;
 mod ids;
-mod migration;
 mod models;
 mod routes;
 mod templates;
@@ -18,7 +17,6 @@ use axum::{
 use clap::{Parser, Subcommand};
 use config::Config;
 use db::Db;
-use sea_orm_migration::MigratorTrait;
 use std::net::SocketAddr;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -39,9 +37,8 @@ struct Cli {
 enum Command {
     /// Start the HTTP server.
     Server,
-    /// Apply pending database migrations and exit.
-    #[command(name = "applyMigrations")]
-    ApplyMigrations,
+    /// Emit CREATE TABLE SQL for every entity to stdout.
+    DumpSchema,
 }
 
 #[tokio::main]
@@ -49,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Server => run_server().await,
-        Command::ApplyMigrations => run_apply_migrations().await,
+        Command::DumpSchema => run_dump_schema().await,
     }
 }
 
@@ -71,11 +68,59 @@ async fn run_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_apply_migrations() -> anyhow::Result<()> {
-    let cfg = Config::from_env()?;
-    let db = db::connect(&cfg.database_url).await?;
-    migration::Migrator::up(&db, None).await?;
-    log::info!("migrations applied");
+async fn run_dump_schema() -> anyhow::Result<()> {
+    use entity::{admin_session, agent, request};
+    use sea_orm::sea_query::PostgresQueryBuilder;
+    use sea_orm::{DatabaseBackend, Schema};
+
+    let schema = Schema::new(DatabaseBackend::Postgres);
+    let tables = [
+        schema.create_table_from_entity(agent::Entity),
+        schema.create_table_from_entity(request::Entity),
+        schema.create_table_from_entity(admin_session::Entity),
+    ];
+    for table in tables {
+        println!(
+            "{};",
+            table.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in schema.create_index_from_entity(agent::Entity) {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in schema.create_index_from_entity(request::Entity) {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in schema.create_index_from_entity(admin_session::Entity) {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in agent::extra_indexes() {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in request::extra_indexes() {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in admin_session::extra_indexes() {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
     Ok(())
 }
 

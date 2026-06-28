@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block body %}
+<h1 class="h3 mb-3">Edit request</h1>
+<form method="post" action="{{ form_action }}">
+  <div class="mb-3">
+    <label class="form-label">Target class</label>
+    <input class="form-control" name="target_class" value="{{ target_class }}" required>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Target type (optional — empty = whole class)</label>
+    <input class="form-control" name="target_type" value="{{ target_type.as_deref().unwrap_or("") }}">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Payload (JSON or text)</label>
+    <textarea class="form-control" name="payload" rows="10" required>{{ payload }}</textarea>
+  </div>
+  <button type="submit" class="btn btn-primary">Save</button>
+  <a href="/messages" class="btn btn-link">Cancel</a>
+</form>
+{% endblock %}

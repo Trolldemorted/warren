@@ -26,7 +26,7 @@ enum Cmd {
     /// Show the current authenticated principal (uses /api/agents/me).
     Whoami,
 
-    /// List all agents (admin only).
+    /// List, create, or delete agents.
     #[command(subcommand)]
     Agents(AgentsCmd),
 
@@ -34,14 +34,8 @@ enum Cmd {
     #[command(subcommand)]
     Requests(RequestsCmd),
 
-    /// List, create, approve, or reject memos.
-    #[command(subcommand)]
-    Memos(MemosCmd),
-
     /// Agent inbox: list unclaimed approved requests matching your class+type.
     InboxRequests,
-    /// Agent inbox: list unacknowledged approved memos matching your class+type.
-    InboxMemos,
     /// Atomically claim a request.
     Claim { id: String },
     /// Respond to a request you previously claimed.
@@ -52,8 +46,6 @@ enum Cmd {
         #[arg(short, long, conflicts_with = "file")]
         payload: Option<String>,
     },
-    /// Acknowledge a memo addressed to you.
-    Ack { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -76,32 +68,6 @@ enum AgentsCmd {
 
 #[derive(Subcommand, Debug)]
 enum RequestsCmd {
-    List {
-        #[arg(long)]
-        status: Option<String>,
-    },
-    Create {
-        #[arg(long)]
-        class: String,
-        #[arg(long = "type")]
-        kind: Option<String>,
-        #[arg(short, long, conflicts_with = "payload")]
-        file: Option<PathBuf>,
-        #[arg(short, long, conflicts_with = "file")]
-        payload: Option<String>,
-        #[arg(long)]
-        approve: bool,
-    },
-    Approve {
-        id: String,
-    },
-    Reject {
-        id: String,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum MemosCmd {
     List {
         #[arg(long)]
         status: Option<String>,
@@ -194,45 +160,13 @@ fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
             cli.post(agent, &format!("/api/requests/{id}/reject"), "")
         }
 
-        Cmd::Memos(MemosCmd::List { status }) => {
-            let q = status
-                .as_deref()
-                .map(|s| format!("?status={}", urlencode(s)))
-                .unwrap_or_default();
-            cli.get(agent, &format!("/api/memos{q}"))
-        }
-        Cmd::Memos(MemosCmd::Create {
-            class,
-            kind,
-            file,
-            payload,
-            approve,
-        }) => {
-            let payload = read_payload(file.as_deref(), payload.as_deref());
-            let body = serde_json::json!({
-                "target_class": class,
-                "target_type": kind,
-                "payload": payload,
-                "approved": approve,
-            });
-            cli.post(agent, "/api/memos", &body.to_string())
-        }
-        Cmd::Memos(MemosCmd::Approve { id }) => {
-            cli.post(agent, &format!("/api/memos/{id}/approve"), "")
-        }
-        Cmd::Memos(MemosCmd::Reject { id }) => {
-            cli.post(agent, &format!("/api/memos/{id}/reject"), "")
-        }
-
         Cmd::InboxRequests => cli.get(agent, "/api/requests/incoming"),
-        Cmd::InboxMemos => cli.get(agent, "/api/memos/incoming"),
         Cmd::Claim { id } => cli.post(agent, &format!("/api/requests/{id}/claim"), ""),
         Cmd::Respond { id, file, payload } => {
             let payload = read_payload(file.as_deref(), payload.as_deref());
             let body = serde_json::json!({ "response": payload }).to_string();
             cli.post(agent, &format!("/api/requests/{id}/respond"), &body)
         }
-        Cmd::Ack { id } => cli.post(agent, &format!("/api/memos/{id}/acknowledge"), ""),
     }
 }
 

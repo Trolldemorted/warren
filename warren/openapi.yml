@@ -4,10 +4,15 @@ info:
   version: 0.1.0
   description: |
     Coordination hub for LLM agents. Admin (PSK-authenticated) injects
-    requests and memos; agents (Bearer-token-authenticated) claim
-    requests, respond, and acknowledge memos.
+    requests; agents (Bearer-token-authenticated) claim requests and
+    respond.
 servers:
   - url: http://localhost:8080
+tags:
+  - name: admin
+    description: Endpoints usable by an admin (warren_session cookie).
+  - name: agent
+    description: Endpoints usable by an agent (Bearer authtoken).
 components:
   securitySchemes:
     adminSession:
@@ -64,7 +69,14 @@ components:
         target_type: { type: string, nullable: true }
         payload: {}
         response: { nullable: true }
-        status: { type: string, enum: [pending, approved, responded, rejected] }
+        status:
+          type: integer
+          description: |
+            0 = pending_request_approval (admin has not approved yet)
+            1 = pending_response_approval (visible to recipient, awaiting response or admin acceptance)
+            2 = done
+            3 = rejected
+          enum: [0, 1, 2, 3]
         claimed_by: { type: string, format: uuid, nullable: true }
         claimed_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
@@ -76,31 +88,12 @@ components:
         target_class: { type: string }
         target_type: { type: string, nullable: true }
         payload: {}
-        approved: { type: boolean, default: false }
       required: [target_class, payload]
     RequestRespond:
       type: object
       properties:
         response: {}
       required: [response]
-    Memo:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        target_class: { type: string }
-        target_type: { type: string, nullable: true }
-        payload: {}
-        status: { type: string, enum: [pending, approved, rejected] }
-        created_at: { type: string, format: date-time }
-      required: [id, target_class, target_type, payload, status, created_at]
-    MemoNew:
-      type: object
-      properties:
-        target_class: { type: string }
-        target_type: { type: string, nullable: true }
-        payload: {}
-        approved: { type: boolean, default: false }
-      required: [target_class, payload]
     Error:
       type: object
       properties:
@@ -109,6 +102,7 @@ components:
 paths:
   /api/login:
     post:
+      tags: [admin]
       summary: Log in as admin (sets warren_session cookie)
       requestBody:
         required: true
@@ -125,11 +119,13 @@ paths:
           description: Bad PSK
   /api/logout:
     post:
+      tags: [admin]
       summary: Log out (clears session)
       responses:
         '204': { description: OK }
   /api/agents:
     get:
+      tags: [admin]
       summary: List agents (admin)
       security:
         - adminSession: []
@@ -143,9 +139,9 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/Agent' }
     post:
+      tags: [admin]
       summary: Create agent (admin); returns server-generated authtoken
-      security:
-        - adminSession: []
+      security: [{ adminSession: [] }]
       requestBody:
         required: true
         content:
@@ -159,6 +155,7 @@ paths:
               schema: { $ref: '#/components/schemas/Agent' }
   /api/agents/me:
     get:
+      tags: [admin, agent]
       summary: Whoami (agent or admin)
       security:
         - adminSession: []
@@ -178,6 +175,7 @@ paths:
         required: true
         schema: { type: string, format: uuid }
     get:
+      tags: [admin]
       summary: Get agent (admin)
       security: [{ adminSession: [] }]
       responses:
@@ -188,6 +186,7 @@ paths:
               schema: { $ref: '#/components/schemas/Agent' }
         '404': { description: Not found }
     put:
+      tags: [admin]
       summary: Patch agent (admin)
       security: [{ adminSession: [] }]
       requestBody:
@@ -202,18 +201,22 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Agent' }
     delete:
+      tags: [admin]
       summary: Delete agent (admin)
       security: [{ adminSession: [] }]
       responses:
         '204': { description: OK }
   /api/requests:
     get:
+      tags: [admin]
       summary: List requests (admin); ?status= ?limit= ?offset=
       security: [{ adminSession: [] }]
       parameters:
         - in: query
           name: status
-          schema: { type: string }
+          schema:
+            type: string
+            enum: [pending_request_approval, pending_response_approval, done, rejected]
         - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
@@ -229,7 +232,8 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/Request' }
     post:
-      summary: Create request (admin)
+      tags: [admin]
+      summary: Create request in status=pending_request_approval (admin)
       security: [{ adminSession: [] }]
       requestBody:
         required: true
@@ -244,6 +248,7 @@ paths:
               schema: { $ref: '#/components/schemas/Request' }
   /api/requests/incoming:
     get:
+      tags: [agent]
       summary: "Agent inbox: approved+unclaimed requests matching your class+type"
       security: [{ agentToken: [] }]
       responses:
@@ -261,6 +266,7 @@ paths:
         required: true
         schema: { type: string, format: uuid }
     get:
+      tags: [admin, agent]
       summary: Get request (admin or owning agent)
       security:
         - adminSession: []
@@ -274,6 +280,7 @@ paths:
         '403': { description: Forbidden }
   /api/requests/{id}/claim:
     post:
+      tags: [agent]
       summary: "Atomically claim a request (agent; must match class+type)"
       security: [{ agentToken: [] }]
       parameters:
@@ -290,6 +297,7 @@ paths:
         '409': { description: Not in inbox or already claimed }
   /api/requests/{id}/respond:
     post:
+      tags: [agent]
       summary: Respond to your claimed request (agent)
       security: [{ agentToken: [] }]
       parameters:
@@ -311,7 +319,8 @@ paths:
         '409': { description: Not claimed by you }
   /api/requests/{id}/approve:
     post:
-      summary: Approve a pending request (admin)
+      tags: [admin]
+      summary: "Approve a pending_request_approval request: 0 -> 1 (admin)"
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -320,9 +329,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204': { description: OK }
+        '409': { description: Not in pending_request_approval }
   /api/requests/{id}/reject:
     post:
-      summary: Reject a pending request (admin)
+      tags: [admin]
+      summary: "Reject a pending_request_approval request: 0 -> 3 (admin)"
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -331,87 +342,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204': { description: OK }
-  /api/memos:
-    get:
-      summary: List memos (admin); ?status= ?limit= ?offset=
-      security: [{ adminSession: [] }]
-      parameters:
-        - in: query
-          name: status
-          schema: { type: string }
-        - in: query
-          name: limit
-          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
-        - in: query
-          name: offset
-          schema: { type: integer, minimum: 0, default: 0 }
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Memo' }
+        '409': { description: Not in pending_request_approval }
+  /api/requests/{id}/accept-response:
     post:
-      summary: Create memo (admin)
-      security: [{ adminSession: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/MemoNew' }
-      responses:
-        '200':
-          description: Created
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Memo' }
-  /api/memos/incoming:
-    get:
-      summary: "Agent inbox: unacknowledged approved memos matching your class+type"
-      security: [{ agentToken: [] }]
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Memo' }
-  /api/memos/{id}:
-    parameters:
-      - in: path
-        name: id
-        required: true
-        schema: { type: string, format: uuid }
-    get:
-      summary: Get memo (admin, or agent if in inbox)
-      security:
-        - adminSession: []
-        - agentToken: []
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Memo' }
-        '403': { description: Forbidden }
-  /api/memos/{id}/acknowledge:
-    post:
-      summary: Acknowledge a memo addressed to you (agent)
-      security: [{ agentToken: [] }]
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '204': { description: OK }
-        '409': { description: Memo not approved }
-  /api/memos/{id}/approve:
-    post:
-      summary: Approve a pending memo (admin)
+      tags: [admin]
+      summary: "Accept a response: 1 -> 2 (admin). Requires response to be set."
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -420,9 +355,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204': { description: OK }
-  /api/memos/{id}/reject:
+        '409': { description: No response to accept }
+  /api/requests/{id}/reject-response:
     post:
-      summary: Reject a pending memo (admin)
+      tags: [admin]
+      summary: "Reject a response: clear response and claim, stay at status 1 (admin)"
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -431,3 +368,4 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204': { description: OK }
+        '409': { description: No response to reject }

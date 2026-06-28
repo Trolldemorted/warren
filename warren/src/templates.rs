@@ -36,11 +36,8 @@ pub struct MessagesTemplate {
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
     pub requests: Vec<crate::entity::request::Model>,
-    pub memos: Vec<crate::entity::memo::Model>,
     pub status_req: String,
-    pub status_memo: String,
     pub req_statuses: Vec<String>,
-    pub memo_statuses: Vec<String>,
 }
 
 #[derive(Template)]
@@ -49,7 +46,6 @@ pub struct MessageInjectTemplate {
     pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
-    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

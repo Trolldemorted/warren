@@ -1,10 +1,8 @@
 use crate::auth::{AuthContext, SESSION_COOKIE};
-use crate::entity::{agent, memo, request};
+use crate::entity::{agent, request};
 use crate::error::{AppError, AppResult};
 use crate::ids::{new_agent_token, new_session_token};
-use crate::models::{
-    AgentNew, AgentPatch, LoginReq, LoginRes, MemoNew, RequestNew, RequestRespond,
-};
+use crate::models::{AgentNew, AgentPatch, LoginReq, LoginRes, RequestNew, RequestRespond};
 use crate::{auth, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -38,12 +36,14 @@ pub fn router() -> Router<AppState> {
         .route("/api/requests/:id/respond", post(api_respond_request))
         .route("/api/requests/:id/approve", post(api_approve_request))
         .route("/api/requests/:id/reject", post(api_reject_request))
-        .route("/api/memos", get(api_list_memos).post(api_create_memo))
-        .route("/api/memos/incoming", get(api_incoming_memos))
-        .route("/api/memos/:id", get(api_get_memo))
-        .route("/api/memos/:id/acknowledge", post(api_ack_memo))
-        .route("/api/memos/:id/approve", post(api_approve_memo))
-        .route("/api/memos/:id/reject", post(api_reject_memo))
+        .route(
+            "/api/requests/:id/accept-response",
+            post(api_accept_response),
+        )
+        .route(
+            "/api/requests/:id/reject-response",
+            post(api_reject_response),
+        )
 }
 
 async fn api_login(
@@ -161,8 +161,8 @@ async fn api_list_requests(
     ctx.require_admin()?;
     let limit = q.limit.unwrap_or(50).clamp(1, 500) as u64;
     let offset = q.offset.unwrap_or(0).max(0) as u64;
-    let rows =
-        crate::db_ops::list_all_requests(&state.db, q.status.as_deref(), limit, offset).await?;
+    let status = parse_request_status(q.status.as_deref())?;
+    let rows = crate::db_ops::list_all_requests(&state.db, status, limit, offset).await?;
     Ok(Json(rows))
 }
 
@@ -201,7 +201,7 @@ async fn api_get_request(
         AuthContext::Admin(_) => Ok(Json(r)),
         AuthContext::Agent(a) => {
             let claims_self = r.claimed_by.map(|cb| cb == a.0.id).unwrap_or(false);
-            let in_inbox = r.status == "approved"
+            let in_inbox = r.status == request::PENDING_RESPONSE_APPROVAL
                 && r.claimed_by.is_none()
                 && r.target_class == a.0.class
                 && (r.target_type.is_none() || r.target_type.as_deref() == a.0.kind.as_deref());
@@ -241,7 +241,13 @@ async fn api_approve_request(
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     ctx.require_admin()?;
-    crate::db_ops::set_request_status(&state.db, id, "pending", "approved").await?;
+    crate::db_ops::set_request_status(
+        &state.db,
+        id,
+        request::PENDING_REQUEST_APPROVAL,
+        request::PENDING_RESPONSE_APPROVAL,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -251,110 +257,43 @@ async fn api_reject_request(
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     ctx.require_admin()?;
-    crate::db_ops::set_request_status(&state.db, id, "pending", "rejected").await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn api_list_memos(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Query(q): Query<ListQuery>,
-) -> AppResult<Json<Vec<memo::Model>>> {
-    ctx.require_admin()?;
-    let limit = q.limit.unwrap_or(50).clamp(1, 500) as u64;
-    let offset = q.offset.unwrap_or(0).max(0) as u64;
-    let rows = crate::db_ops::list_all_memos(&state.db, q.status.as_deref(), limit, offset).await?;
-    Ok(Json(rows))
-}
-
-async fn api_create_memo(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Json(new): Json<MemoNew>,
-) -> AppResult<Json<memo::Model>> {
-    ctx.require_admin()?;
-    if new.target_class.trim().is_empty() {
-        return Err(AppError::BadRequest("target_class required".into()));
-    }
-    let m = crate::db_ops::create_memo(&state.db, &new).await?;
-    Ok(Json(m))
-}
-
-async fn api_incoming_memos(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-) -> AppResult<Json<Vec<memo::Model>>> {
-    let agent = ctx.require_agent()?;
-    let rows = crate::db_ops::list_memo_inbox(
+    crate::db_ops::set_request_status(
         &state.db,
-        &agent.0.class,
-        agent.0.kind.as_deref(),
-        agent.0.id,
+        id,
+        request::PENDING_REQUEST_APPROVAL,
+        request::REJECTED,
     )
     .await?;
-    Ok(Json(rows))
-}
-
-async fn api_get_memo(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(id): Path<Uuid>,
-) -> AppResult<Json<memo::Model>> {
-    let m = crate::db_ops::get_memo(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    match &ctx {
-        AuthContext::Admin(_) => Ok(Json(m)),
-        AuthContext::Agent(a) => {
-            let in_inbox = m.status == "approved"
-                && m.target_class == a.0.class
-                && (m.target_type.is_none() || m.target_type.as_deref() == a.0.kind.as_deref());
-            if in_inbox {
-                Ok(Json(m))
-            } else {
-                Err(AppError::Forbidden)
-            }
-        }
-    }
-}
-
-async fn api_ack_memo(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(id): Path<Uuid>,
-) -> AppResult<StatusCode> {
-    let agent = ctx.require_agent()?;
-    let m = crate::db_ops::get_memo(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    if m.status != "approved" {
-        return Err(AppError::Conflict("memo not approved".into()));
-    }
-    if m.target_class != agent.0.class
-        || (m.target_type.is_some() && m.target_type.as_deref() != agent.0.kind.as_deref())
-    {
-        return Err(AppError::Forbidden);
-    }
-    crate::db_ops::acknowledge_memo(&state.db, id, agent.0.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn api_approve_memo(
+async fn api_accept_response(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     ctx.require_admin()?;
-    crate::db_ops::set_memo_status(&state.db, id, "pending", "approved").await?;
+    crate::db_ops::accept_request_response(&state.db, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn api_reject_memo(
+async fn api_reject_response(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     ctx.require_admin()?;
-    crate::db_ops::set_memo_status(&state.db, id, "pending", "rejected").await?;
+    crate::db_ops::reject_request_response(&state.db, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn parse_request_status(s: Option<&str>) -> AppResult<Option<i16>> {
+    match s {
+        None => Ok(None),
+        Some("pending_request_approval") => Ok(Some(request::PENDING_REQUEST_APPROVAL)),
+        Some("pending_response_approval") => Ok(Some(request::PENDING_RESPONSE_APPROVAL)),
+        Some("done") => Ok(Some(request::DONE)),
+        Some("rejected") => Ok(Some(request::REJECTED)),
+        Some(other) => Err(AppError::BadRequest(format!("unknown status '{other}'"))),
+    }
 }

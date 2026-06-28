@@ -22,26 +22,6 @@ pub struct AgentPatch {
     pub prompt: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Status {
-    Pending,
-    Approved,
-    Rejected,
-    Responded,
-}
-
-impl Status {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Status::Pending => "pending",
-            Status::Approved => "approved",
-            Status::Rejected => "rejected",
-            Status::Responded => "responded",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct RequestNew {
     pub target_class: String,
@@ -55,16 +35,6 @@ pub struct RequestNew {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RequestRespond {
     pub response: Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MemoNew {
-    pub target_class: String,
-    #[serde(default)]
-    pub target_type: Option<String>,
-    pub payload: Value,
-    #[serde(default)]
-    pub approved: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
