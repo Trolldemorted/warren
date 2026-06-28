@@ -18,6 +18,7 @@ use axum::{
 use clap::{Parser, Subcommand};
 use config::Config;
 use db::Db;
+use std::io::Write;
 use std::net::SocketAddr;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -45,31 +46,56 @@ enum Command {
     DumpSchema,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("panic: {info}");
+        let bt = std::backtrace::Backtrace::force_capture();
+        eprintln!("panic: {info}\n{bt}");
         log::error!("panic: {info}");
+        log::error!("backtrace:\n{bt}");
     }));
-    simple_logger::init_with_env().context("initializing logger")?;
+    if let Err(e) = simple_logger::init_with_env() {
+        eprintln!("error: failed to initialize logger: {e:?}");
+    }
 
     let cli = Cli::parse();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("building tokio runtime")?;
-    runtime.block_on(async move {
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            log_error_and_exit("failed to build tokio runtime", e.into());
+        }
+    };
+
+    let result = runtime.block_on(async move {
         match cli.command {
             Command::Server => run_server().await,
             Command::ApplyMigration => run_apply_migration().await,
             Command::DumpSchema => run_dump_schema().await,
         }
-    })
+    });
+
+    if let Err(e) = result {
+        log_error_and_exit("warren failed", e);
+    }
+}
+
+fn log_error_and_exit(context: &str, e: anyhow::Error) -> ! {
+    log::error!("{context}: {e:?}");
+    log::debug!("{context} chain: {e:#?}");
+    eprintln!("error: {context}: {e:?}");
+    std::io::stderr().flush().ok();
+    std::process::exit(1);
 }
 
 async fn run_server() -> anyhow::Result<()> {
     let cfg = Config::from_env().context("loading configuration")?;
-    log::info!("connecting to database");
+    log::info!(
+        "connecting to database at {}",
+        redact_url(&cfg.database_url)
+    );
     let db = db::connect(&cfg.database_url)
         .await
         .context("connecting to database")?;
@@ -95,13 +121,26 @@ async fn run_server() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn redact_url(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        let after = &url[scheme_end + 3..];
+        if let Some(at) = after.find('@') {
+            return format!("{}://***:***@{}", &url[..scheme_end], &after[at + 1..]);
+        }
+    }
+    url.to_string()
+}
+
 async fn run_apply_migration() -> anyhow::Result<()> {
     let cfg = Config::from_env().context("loading configuration")?;
     let migrations_dir = std::env::current_dir()
         .context("getting current directory")?
         .join("warren/migrations_atlas");
     let dir_url = format!("file://{}", migrations_dir.display());
-    log::info!("running atlas migrate apply against {}", cfg.database_url);
+    log::info!(
+        "running atlas migrate apply against {}",
+        redact_url(&cfg.database_url)
+    );
     let status = std::process::Command::new("atlas")
         .args([
             "migrate",

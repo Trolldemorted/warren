@@ -310,16 +310,13 @@ fn render_to_string<T: Template>(t: T) -> String {
 }
 
 fn err_page(e: AppError) -> Response {
+    e.log();
     let (status, msg) = match &e {
         AppError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
         AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".into()),
         AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".into()),
         AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
-        _ => {
-            log::error!("request failed: {e:?}");
-            log::debug!("request failure detail: {e:#?}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
-        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into()),
     };
     (status, msg).into_response()
 }

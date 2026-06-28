@@ -23,8 +23,25 @@ pub enum AppError {
     Internal(#[from] anyhow::Error),
 }
 
+impl AppError {
+    pub fn log(&self) {
+        match self {
+            AppError::Db(e) => {
+                log::error!("database error: {e}");
+                log::debug!("database error detail: {e:?}");
+            }
+            AppError::Internal(e) => {
+                log::error!("internal error: {e:?}");
+                log::debug!("internal error detail: {e:#?}");
+            }
+            _ => {}
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        self.log();
         let (status, code, msg) = match &self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", "not found".to_string()),
             AppError::Unauthorized => (
@@ -35,24 +52,16 @@ impl IntoResponse for AppError {
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "forbidden".to_string()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.clone()),
-            AppError::Db(e) => {
-                log::error!("database error: {e:?}");
-                log::debug!("database error detail: {e:#?}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal",
-                    "internal error".to_string(),
-                )
-            }
-            AppError::Internal(e) => {
-                log::error!("internal error: {e:?}");
-                log::debug!("internal error detail: {e:#?}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal",
-                    "internal error".to_string(),
-                )
-            }
+            AppError::Db(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "internal error".to_string(),
+            ),
+            AppError::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "internal error".to_string(),
+            ),
         };
         (status, Json(json!({"error": msg, "code": code}))).into_response()
     }
