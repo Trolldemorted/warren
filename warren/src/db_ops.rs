@@ -268,74 +268,139 @@ pub struct MigrationRow {
     pub applied_at: Option<String>,
 }
 
-fn is_candidate_skip(e: &sea_orm::DbErr) -> bool {
-    use sea_orm::RuntimeErr;
-    if let sea_orm::DbErr::Query(RuntimeErr::SqlxError(sqlx::Error::Database(db))) = e {
-        // 42P01: undefined_table, 3F000: invalid_schema_name,
-        // 42703: undefined_column — all mean "this candidate shape doesn't match
-        // the actual table layout, try the next one".
-        return matches!(
-            db.code().as_deref(),
-            Some("42P01") | Some("3F000") | Some("42703")
-        );
-    }
-    false
+#[derive(FromQueryResult)]
+struct ColumnInfoRow {
+    table_schema: String,
+    table_name: String,
+    column_name: String,
+    data_type: String,
 }
 
 const TS_FMT: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'";
 
-pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
-    // Format timestamps as text in SQL — sidesteps all sqlx/chrono type-decoder
-    // issues across atlas / golang-migrate layout variants.
-    let atlas_candidates: &[&str] = &[
-        "atlas_schema_revisions.atlas_schema_revisions",
-        "public.atlas_schema_revisions",
-    ];
-    for table in atlas_candidates {
-        // Modern atlas: applied_at is bigint nanoseconds since epoch.
-        let sql = format!(
-            "SELECT version::text AS version, \
-                    description, \
-                    to_char(to_timestamp(applied_at::double precision / 1e9) AT TIME ZONE 'UTC', {TS_FMT}) AS applied_at \
-               FROM {table} \
-              ORDER BY version"
-        );
-        let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
-        match MigrationRow::find_by_statement(stmt).all(db).await {
-            Ok(rows) => return Ok(rows),
-            Err(e) if is_candidate_skip(&e) => {}
-            Err(e) => return Err(AppError::Db(e)),
-        }
-        // Older atlas: applied is timestamptz.
-        let sql = format!(
-            "SELECT version::text AS version, \
-                    description, \
-                    to_char(applied AT TIME ZONE 'UTC', {TS_FMT}) AS applied_at \
-               FROM {table} \
-              ORDER BY version"
-        );
-        let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
-        match MigrationRow::find_by_statement(stmt).all(db).await {
-            Ok(rows) => return Ok(rows),
-            Err(e) if is_candidate_skip(&e) => {}
-            Err(e) => return Err(AppError::Db(e)),
+/// Locate the revision table and its timestamp column, returning
+/// (qualified_table, column_name, data_type).
+async fn discover_revision_column(
+    db: &Db,
+    schemas: &[&str],
+    column_candidates: &[&str],
+) -> AppResult<Option<(String, String, String)>> {
+    // schemata/columns come from a hardcoded allowlist (no user input), so
+    // string-formatting into ARRAY[...] is safe.
+    let schema_arr = format!(
+        "ARRAY[{}]",
+        schemas
+            .iter()
+            .map(|s| format!("'{}'", s.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let table_arr = "ARRAY['atlas_schema_revisions','schema_migrations','public']".to_string();
+    let col_arr = format!(
+        "ARRAY[{}]",
+        column_candidates
+            .iter()
+            .map(|c| format!("'{}'", c.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let sql = format!(
+        "SELECT table_schema, table_name, column_name, data_type \
+           FROM information_schema.columns \
+          WHERE table_schema = ANY({schema_arr}) \
+            AND table_name = ANY({table_arr}::text[]) \
+            AND column_name = ANY({col_arr})"
+    );
+    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+    let rows: Vec<ColumnInfoRow> = ColumnInfoRow::find_by_statement(stmt).all(db).await?;
+    for schema in schemas {
+        for col in column_candidates {
+            if let Some(r) = rows
+                .iter()
+                .find(|r| r.table_schema == *schema && r.column_name == *col)
+            {
+                let qualified = format!("{}.{}", r.table_schema, r.table_name);
+                return Ok(Some((
+                    qualified,
+                    r.column_name.clone(),
+                    r.data_type.clone(),
+                )));
+            }
         }
     }
-    // golang-migrate / sqlx-style: public.schema_migrations(installed_on TIMESTAMPTZ)
-    let sql = format!(
-        "SELECT version::text AS version, \
-                NULL::text AS description, \
-                to_char(installed_on AT TIME ZONE 'UTC', {TS_FMT}) AS applied_at \
-           FROM public.schema_migrations \
-          ORDER BY version"
-    );
-    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql.to_string());
-    match MigrationRow::find_by_statement(stmt).all(db).await {
-        Ok(rows) => return Ok(rows),
-        Err(e) if is_candidate_skip(&e) => {}
-        Err(e) => return Err(AppError::Db(e)),
+    Ok(None)
+}
+
+pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
+    // 1) Atlas — modern `executed_at TIMESTAMPTZ` is the canonical timestamp.
+    //    Older atlases used `applied_at BIGINT` (nanoseconds) or
+    //    `applied TIMESTAMPTZ`. `applied` (bigint count) is NOT a timestamp.
+    let schemas = ["atlas_schema_revisions", "public"];
+    let columns = ["executed_at", "applied_at", "applied"];
+    let info = discover_revision_column(db, &schemas, &columns).await?;
+    if let Some((table, col, data_type)) = info {
+        return query_atlas_migrations(db, &table, &col, &data_type).await;
+    }
+    // 2) golang-migrate / sqlx-style fallback.
+    let info = discover_revision_column(db, &["public"], &["installed_on"]).await?;
+    if let Some((table, col, data_type)) = info {
+        return query_schema_migrations(db, &table, &col, &data_type).await;
     }
     Ok(vec![])
+}
+
+async fn query_atlas_migrations(
+    db: &Db,
+    table: &str,
+    col: &str,
+    data_type: &str,
+) -> AppResult<Vec<MigrationRow>> {
+    let sql = match data_type {
+        "bigint" | "integer" | "smallint" => format!(
+            "SELECT version::text AS version, \
+                    description, \
+                    to_char(timezone('UTC', to_timestamp({col}::double precision / 1e9)), {TS_FMT}) AS applied_at \
+               FROM {table} \
+              ORDER BY version"
+        ),
+        "timestamp with time zone" | "timestamp without time zone" => format!(
+            "SELECT version::text AS version, \
+                    description, \
+                    to_char(timezone('UTC', {col}), {TS_FMT}) AS applied_at \
+               FROM {table} \
+              ORDER BY version"
+        ),
+        _ => return Ok(vec![]),
+    };
+    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+    Ok(MigrationRow::find_by_statement(stmt).all(db).await?)
+}
+
+async fn query_schema_migrations(
+    db: &Db,
+    table: &str,
+    col: &str,
+    data_type: &str,
+) -> AppResult<Vec<MigrationRow>> {
+    let sql = match data_type {
+        "bigint" | "integer" | "smallint" => format!(
+            "SELECT version::text AS version, \
+                    NULL::text AS description, \
+                    to_char(timezone('UTC', to_timestamp({col}::double precision / 1e9)), {TS_FMT}) AS applied_at \
+               FROM {table} \
+              ORDER BY version"
+        ),
+        "timestamp with time zone" | "timestamp without time zone" => format!(
+            "SELECT version::text AS version, \
+                    NULL::text AS description, \
+                    to_char(timezone('UTC', {col}), {TS_FMT}) AS applied_at \
+               FROM {table} \
+              ORDER BY version"
+        ),
+        _ => return Ok(vec![]),
+    };
+    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+    Ok(MigrationRow::find_by_statement(stmt).all(db).await?)
 }
 
 pub async fn update_request_payload(
