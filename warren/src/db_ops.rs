@@ -264,28 +264,49 @@ pub struct MigrationRow {
     pub applied_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn is_missing_table(e: &sea_orm::DbErr) -> bool {
+fn is_missing_relation(e: &sea_orm::DbErr) -> bool {
     use sea_orm::RuntimeErr;
     if let sea_orm::DbErr::Query(RuntimeErr::SqlxError(sqlx::Error::Database(db))) = e {
-        return db.code().as_deref() == Some("42P01");
+        return matches!(db.code().as_deref(), Some("42P01") | Some("3F000"));
     }
     false
 }
 
 pub async fn list_migrations(db: &Db) -> AppResult<Vec<MigrationRow>> {
-    let candidates = [
-        ("atlas_schema_revisions", "applied"),
-        ("schema_migrations", "installed_on"),
+    // Each candidate is (schema-qualified-table, version-col, description-expr, timestamp-col).
+    // Order matches likelihood for the current setup (atlas with a dedicated schema first).
+    let candidates: &[(&str, &str, &str, &str)] = &[
+        (
+            "atlas_schema_revisions.atlas_schema_revisions",
+            "version",
+            "description",
+            "applied",
+        ),
+        (
+            "public.atlas_schema_revisions",
+            "version",
+            "description",
+            "applied",
+        ),
+        (
+            "public.schema_migrations",
+            "version",
+            "NULL",
+            "installed_on",
+        ),
     ];
-    for (table, ts_col) in candidates {
+    for (table, version_col, desc_expr, ts_col) in candidates {
         let sql = format!(
-            "SELECT version::text AS version, description, {ts_col} AS applied_at \
-             FROM {table} ORDER BY version"
+            "SELECT {version_col}::text AS version, \
+                    {desc_expr} AS description, \
+                    {ts_col} AS applied_at \
+               FROM {table} \
+              ORDER BY {version_col}"
         );
         let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
         match MigrationRow::find_by_statement(stmt).all(db).await {
             Ok(rows) => return Ok(rows),
-            Err(e) if is_missing_table(&e) => continue,
+            Err(e) if is_missing_relation(&e) => continue,
             Err(e) => return Err(AppError::Db(e)),
         }
     }
