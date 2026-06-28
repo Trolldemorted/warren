@@ -27,3 +27,9 @@ jobs:
           context: .
           push: true
           tags: ghcr.io/trolldemorted/warren:latest
+
+      - name: Trigger downstream CI
+        env:
+          GH_TOKEN: ${{ secrets.DOWNSTREAM_PAT }}
+        run: |
+          gh workflow run nightly.yml --repo Trolldemorted/claude-reversing
