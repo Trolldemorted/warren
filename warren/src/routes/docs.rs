@@ -51,7 +51,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/docs/",
             Router::new()
                 .route("/", get(docs_index))
-                .route("swagger-initializer.js", get(docs_initializer))
+                .route("/swagger-initializer.js", get(docs_initializer))
                 .fallback_service(ServeDir::new(docs_dir)),
         )
 }
