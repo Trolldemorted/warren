@@ -75,13 +75,13 @@ components:
         payload: {}
         response: { nullable: true }
         status:
-          type: integer
+          type: string
           description: |
-            0 = pending_request_approval (admin has not approved yet)
-            1 = pending_response_approval (visible to recipient, awaiting response or admin acceptance)
-            2 = done
-            3 = rejected
-          enum: [0, 1, 2, 3]
+            pending_request_approval — admin has not approved the request yet
+            pending_response_approval — visible to recipient, awaiting response or admin acceptance
+            done — response accepted by admin
+            rejected — admin rejected the request or its response
+          enum: [pending_request_approval, pending_response_approval, done, rejected]
         sender_agent_id: { type: string, format: uuid, nullable: true }
         claimed_by: { type: string, format: uuid, nullable: true }
         claimed_at: { type: string, format: date-time, nullable: true }

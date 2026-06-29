@@ -13,10 +13,10 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let admin_psk =
-            env::var("DD_ADMIN_PSK").map_err(|_| anyhow::anyhow!("DD_ADMIN_PSK must be set"))?;
+        let admin_psk = env::var("WARREN_ADMIN_PSK")
+            .map_err(|_| anyhow::anyhow!("WARREN_ADMIN_PSK must be set"))?;
         if admin_psk.is_empty() {
-            anyhow::bail!("DD_ADMIN_PSK must not be empty");
+            anyhow::bail!("WARREN_ADMIN_PSK must not be empty");
         }
         let static_dir = env::var("WARREN_STATIC_DIR")
             .map(PathBuf::from)

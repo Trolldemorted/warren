@@ -91,6 +91,12 @@ enum RequestsCmd {
     Reject {
         id: String,
     },
+    AcceptResponse {
+        id: String,
+    },
+    RejectResponse {
+        id: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -159,6 +165,12 @@ fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
         }
         Cmd::Requests(RequestsCmd::Reject { id }) => {
             cli.post(agent, &format!("/api/requests/{id}/reject"), "")
+        }
+        Cmd::Requests(RequestsCmd::AcceptResponse { id }) => {
+            cli.post(agent, &format!("/api/requests/{id}/accept-response"), "")
+        }
+        Cmd::Requests(RequestsCmd::RejectResponse { id }) => {
+            cli.post(agent, &format!("/api/requests/{id}/reject-response"), "")
         }
 
         Cmd::InboxRequests => cli.get(agent, "/api/requests"),

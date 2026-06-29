@@ -1,6 +1,6 @@
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{ConditionalStatement, Expr, Index, IndexCreateStatement, IndexOrder};
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value as Json;
 
 pub const PENDING_REQUEST_APPROVAL: i16 = 0;
@@ -16,6 +16,26 @@ pub fn status_label(s: i16) -> &'static str {
         REJECTED => "rejected",
         _ => "unknown",
     }
+}
+
+fn label_to_status(label: &str) -> Option<i16> {
+    match label {
+        "pending_request_approval" => Some(PENDING_REQUEST_APPROVAL),
+        "pending_response_approval" => Some(PENDING_RESPONSE_APPROVAL),
+        "done" => Some(DONE),
+        "rejected" => Some(REJECTED),
+        _ => None,
+    }
+}
+
+fn serialize_status<S: Serializer>(s: &i16, ser: S) -> Result<S::Ok, S::Error> {
+    ser.serialize_str(status_label(*s))
+}
+
+fn deserialize_status<'de, D: Deserializer<'de>>(de: D) -> Result<i16, D::Error> {
+    let label = String::deserialize(de)?;
+    label_to_status(&label)
+        .ok_or_else(|| D::Error::custom(format!("unknown request status '{label}'")))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
@@ -36,6 +56,10 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub response: Option<Json>,
     #[sea_orm(default_expr = "0")]
+    #[serde(
+        serialize_with = "serialize_status",
+        deserialize_with = "deserialize_status"
+    )]
     pub status: i16,
     pub sender_agent_id: Option<Uuid>,
     pub claimed_by: Option<Uuid>,
