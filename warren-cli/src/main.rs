@@ -144,7 +144,10 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
     match &cli.cmd {
-        Cmd::Whoami => cli.get(agent, "/api/agents/me"),
+        Cmd::Whoami => {
+            let body = cli.get(agent, "/api/agents/me")?;
+            Ok(strip_authtoken(&body))
+        }
 
         Cmd::Agents(AgentsCmd::List) => cli.get(agent, "/api/agents"),
         Cmd::Agents(AgentsCmd::Create {
@@ -247,6 +250,16 @@ fn read_payload(file: Option<&Path>, payload: Option<&str>) -> Value {
 }
 
 use std::path::Path;
+
+fn strip_authtoken(body: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(body) else {
+        return body.to_string();
+    };
+    if let Some(agent) = v.get_mut("agent").and_then(|a| a.as_object_mut()) {
+        agent.remove("authtoken");
+    }
+    serde_json::to_string_pretty(&v).unwrap_or_else(|_| body.to_string())
+}
 
 fn urlencode(s: &str) -> String {
     s.chars()
