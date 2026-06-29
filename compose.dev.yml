@@ -7,7 +7,6 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://warren:warren@db/warren?sslmode=disable
-      WARREN_ADMIN_PSK: ${WARREN_ADMIN_PSK:?set WARREN_ADMIN_PSK in .env or environment}
       RUST_LOG: info
     command: ["applyMigration"]
     restart: on-failure
