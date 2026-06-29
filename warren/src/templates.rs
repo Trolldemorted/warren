@@ -74,6 +74,12 @@ pub struct ChannelFormTemplate {
     pub flash: Option<Flash>,
     pub channel: Option<crate::entity::channel::Model>,
     pub form_action: String,
+    pub classes: Vec<String>,
+    pub kinds: Vec<String>,
+    pub selected_sender_class: Option<String>,
+    pub selected_sender_kind: Option<String>,
+    pub selected_receiver_class: Option<String>,
+    pub selected_receiver_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

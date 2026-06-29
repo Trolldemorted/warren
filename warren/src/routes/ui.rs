@@ -23,29 +23,35 @@ pub fn router() -> Router<AppState> {
         .route("/login", get(login_page).post(login_form))
         .route("/logout", post(logout))
         .route("/", get(root))
-        .route("/agents", get(agents_page))
-        .route("/agents/new", get(agent_new_page))
-        .route("/agents", post(agent_create))
-        .route("/agents/:id/edit", get(agent_edit_page))
-        .route("/agents/:id", post(agent_update))
-        .route("/agents/:id/delete", post(agent_delete))
-        .route("/comms", get(comms_page))
+        .route("/admin/agents", get(agents_page))
+        .route("/admin/agents/new", get(agent_new_page))
+        .route("/admin/agents", post(agent_create))
+        .route("/admin/agents/:id/edit", get(agent_edit_page))
+        .route("/admin/agents/:id", post(agent_update))
+        .route("/admin/agents/:id/delete", post(agent_delete))
+        .route("/admin/comms", get(comms_page))
         .route(
-            "/comms/requests/new",
+            "/admin/comms/requests/new",
             get(inject_page_req).post(inject_create_req),
         )
-        .route("/comms/requests/:id/approve", post(message_approve_request))
-        .route("/comms/requests/:id/reject", post(message_reject_request))
         .route(
-            "/comms/requests/:id/approve-response",
+            "/admin/comms/requests/:id/approve",
+            post(message_approve_request),
+        )
+        .route(
+            "/admin/comms/requests/:id/reject",
+            post(message_reject_request),
+        )
+        .route(
+            "/admin/comms/requests/:id/approve-response",
             post(message_approve_response),
         )
         .route(
-            "/comms/requests/:id/reject-response",
+            "/admin/comms/requests/:id/reject-response",
             post(message_reject_response),
         )
         .route(
-            "/comms/requests/:id/edit",
+            "/admin/comms/requests/:id/edit",
             get(message_edit_page).post(message_edit_save),
         )
         .route("/admin/migrations", get(migrations_page))
@@ -58,12 +64,12 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn root() -> Redirect {
-    Redirect::to("/agents")
+    Redirect::to("/admin/agents")
 }
 
 async fn login_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if is_admin(&headers, &state).await {
-        return Redirect::to("/agents").into_response();
+        return Redirect::to("/admin/agents").into_response();
     }
     let t = LoginTemplate {
         title: None,
@@ -77,7 +83,7 @@ async fn login_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
 async fn login_form(State(state): State<AppState>, Form(form): Form<LoginForm>) -> Response {
     match try_login(&state, &form.password).await {
         Ok(cookie) => {
-            let mut resp = Redirect::to("/agents").into_response();
+            let mut resp = Redirect::to("/admin/agents").into_response();
             resp.headers_mut().insert(header::SET_COOKIE, cookie);
             resp
         }
@@ -198,7 +204,7 @@ async fn agent_new_page(State(state): State<AppState>, headers: HeaderMap) -> Re
         nav: Some("agents"),
         flash: None,
         agent: None,
-        form_action: "/agents".into(),
+        form_action: "/admin/agents".into(),
     };
     render(t)
 }
@@ -226,7 +232,7 @@ async fn agent_create(
                 nav: Some("agents"),
                 flash: Some(Flash::success("agent created")),
                 agent: Some(agent),
-                form_action: format!("/agents/{id}/edit"),
+                form_action: format!("/admin/agents/{id}/edit"),
             };
             render(t)
         }
@@ -249,7 +255,7 @@ async fn agent_edit_page(
                 nav: Some("agents"),
                 flash: None,
                 agent: Some(agent),
-                form_action: format!("/agents/{id}"),
+                form_action: format!("/admin/agents/{id}"),
             };
             render(t)
         }
@@ -275,7 +281,7 @@ async fn agent_update(
         prompt: Some(form.prompt),
     };
     match crate::db_ops::update_agent(&state.db, id, &patch).await {
-        Ok(_) => Redirect::to("/agents").into_response(),
+        Ok(_) => Redirect::to("/admin/agents").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -289,7 +295,7 @@ async fn agent_delete(
         return redirect_to_login();
     }
     match crate::db_ops::delete_agent(&state.db, id).await {
-        Ok(_) => Redirect::to("/agents").into_response(),
+        Ok(_) => Redirect::to("/admin/agents").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -398,7 +404,7 @@ async fn inject_create_req(
     {
         return err_page(e);
     }
-    Redirect::to("/comms").into_response()
+    Redirect::to("/admin/comms").into_response()
 }
 
 async fn message_approve_request(
@@ -417,7 +423,7 @@ async fn message_approve_request(
     )
     .await
     {
-        Ok(_) => Redirect::to("/comms").into_response(),
+        Ok(_) => Redirect::to("/admin/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -438,7 +444,7 @@ async fn message_reject_request(
     )
     .await
     {
-        Ok(_) => Redirect::to("/comms").into_response(),
+        Ok(_) => Redirect::to("/admin/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -452,7 +458,7 @@ async fn message_approve_response(
         return redirect_to_login();
     }
     match crate::db_ops::accept_request_response(&state.db, id).await {
-        Ok(_) => Redirect::to("/comms").into_response(),
+        Ok(_) => Redirect::to("/admin/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -466,7 +472,7 @@ async fn message_reject_response(
         return redirect_to_login();
     }
     match crate::db_ops::reject_request_response(&state.db, id).await {
-        Ok(_) => Redirect::to("/comms").into_response(),
+        Ok(_) => Redirect::to("/admin/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -527,7 +533,7 @@ async fn message_edit_page(
         target_classes,
         target_kinds,
         payload: req.payload.to_string(),
-        form_action: format!("/comms/requests/{id}/edit"),
+        form_action: format!("/admin/comms/requests/{id}/edit"),
     })
 }
 
@@ -551,7 +557,7 @@ async fn message_edit_save(
     )
     .await
     {
-        Ok(_) => Redirect::to("/comms").into_response(),
+        Ok(_) => Redirect::to("/admin/comms").into_response(),
         Err(e) => err_page(e),
     }
 }
@@ -605,12 +611,22 @@ async fn channel_new_page(State(state): State<AppState>, headers: HeaderMap) -> 
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
+    let (classes, kinds) = match load_class_kinds(&state.db).await {
+        Ok(p) => p,
+        Err(e) => return err_page(e),
+    };
     render(ChannelFormTemplate {
         title: Some("New channel"),
         nav: Some("channels"),
         flash: None,
         channel: None,
         form_action: "/admin/channels".into(),
+        classes,
+        kinds,
+        selected_sender_class: None,
+        selected_sender_kind: None,
+        selected_receiver_class: None,
+        selected_receiver_kind: None,
     })
 }
 
@@ -621,6 +637,13 @@ async fn channel_create(
 ) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
+    }
+    let (classes, kinds) = match load_class_kinds(&state.db).await {
+        Ok(p) => p,
+        Err(e) => return err_page(e),
+    };
+    if let Err(e) = validate_channel_form(&form, &classes, &kinds) {
+        return err_page(e);
     }
     let new = ChannelNew {
         sender_class: form.sender_class,
@@ -643,14 +666,24 @@ async fn channel_edit_page(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
+    let (classes, kinds) = match load_class_kinds(&state.db).await {
+        Ok(p) => p,
+        Err(e) => return err_page(e),
+    };
     match crate::db_ops::get_channel(&state.db, id).await {
         Ok(Some(channel)) => {
             let t = ChannelFormTemplate {
                 title: Some("Edit channel"),
                 nav: Some("channels"),
                 flash: None,
-                channel: Some(channel),
+                channel: Some(channel.clone()),
                 form_action: format!("/admin/channels/{id}"),
+                classes,
+                kinds,
+                selected_sender_class: Some(channel.sender_class.clone()),
+                selected_sender_kind: channel.sender_kind.clone(),
+                selected_receiver_class: Some(channel.receiver_class.clone()),
+                selected_receiver_kind: channel.receiver_kind.clone(),
             };
             render(t)
         }
@@ -667,6 +700,13 @@ async fn channel_update(
 ) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
+    }
+    let (classes, kinds) = match load_class_kinds(&state.db).await {
+        Ok(p) => p,
+        Err(e) => return err_page(e),
+    };
+    if let Err(e) = validate_channel_form(&form, &classes, &kinds) {
+        return err_page(e);
     }
     let new = ChannelNew {
         sender_class: form.sender_class,
@@ -686,6 +726,45 @@ async fn channel_update(
         Ok(_) => Redirect::to("/admin/channels").into_response(),
         Err(e) => err_page(e),
     }
+}
+
+async fn load_class_kinds(db: &crate::db::Db) -> AppResult<(Vec<String>, Vec<String>)> {
+    let classes = crate::db_ops::distinct_agent_classes(db).await?;
+    let kinds = crate::db_ops::distinct_agent_kinds(db).await?;
+    Ok((classes, kinds))
+}
+
+fn validate_channel_form(
+    form: &ChannelForm,
+    classes: &[String],
+    kinds: &[String],
+) -> AppResult<()> {
+    if form.description.trim().is_empty() {
+        return Err(AppError::BadRequest("description required".into()));
+    }
+    if !classes.iter().any(|c| c == &form.sender_class) {
+        return Err(AppError::BadRequest(format!(
+            "unknown sender_class '{}'",
+            form.sender_class
+        )));
+    }
+    if !classes.iter().any(|c| c == &form.receiver_class) {
+        return Err(AppError::BadRequest(format!(
+            "unknown receiver_class '{}'",
+            form.receiver_class
+        )));
+    }
+    if let Some(k) = &form.sender_kind {
+        if !k.is_empty() && !kinds.iter().any(|x| x == k) {
+            return Err(AppError::BadRequest(format!("unknown sender_kind '{k}'")));
+        }
+    }
+    if let Some(k) = &form.receiver_kind {
+        if !k.is_empty() && !kinds.iter().any(|x| x == k) {
+            return Err(AppError::BadRequest(format!("unknown receiver_kind '{k}'")));
+        }
+    }
+    Ok(())
 }
 
 async fn channel_delete(

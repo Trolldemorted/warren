@@ -1,29 +1,50 @@
 {% extends "base.html" %}
 {% block body %}
 <h1 class="h3 mb-3">{% if let Some(c) = channel %}Edit channel{% else %}New channel{% endif %}</h1>
+{% if classes.is_empty() %}
+  <div class="alert alert-warning">
+    No agents registered. Create at least one agent before defining channels.
+  </div>
+{% else %}
 <form method="post" action="{{ form_action }}" class="col-md-8">
   <div class="row">
     <div class="col-md-6 mb-3">
       <label class="form-label">Sender class</label>
-      <input type="text" name="sender_class" class="form-control" required
-        {% if let Some(c) = channel %}value="{{ c.sender_class }}"{% endif %}>
+      <select class="form-select" name="sender_class" required>
+        <option value="" disabled {% if selected_sender_class.is_none() %}selected{% endif %}>Select…</option>
+        {% for c in classes %}
+          <option value="{{ c }}" {% if selected_sender_class.as_deref() == Some(c.as_str()) %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
     </div>
     <div class="col-md-6 mb-3">
-      <label class="form-label">Sender kind (blank = any)</label>
-      <input type="text" name="sender_kind" class="form-control"
-        {% if let Some(c) = channel %}{% if let Some(k) = c.sender_kind %}value="{{ k }}"{% endif %}{% endif %}>
+      <label class="form-label">Sender kind</label>
+      <select class="form-select" name="sender_kind">
+        <option value="" {% if selected_sender_kind.is_none() %}selected{% endif %}>(any kind)</option>
+        {% for k in kinds %}
+          <option value="{{ k }}" {% if selected_sender_kind.as_deref() == Some(k.as_str()) %}selected{% endif %}>{{ k }}</option>
+        {% endfor %}
+      </select>
     </div>
   </div>
   <div class="row">
     <div class="col-md-6 mb-3">
       <label class="form-label">Receiver class</label>
-      <input type="text" name="receiver_class" class="form-control" required
-        {% if let Some(c) = channel %}value="{{ c.receiver_class }}"{% endif %}>
+      <select class="form-select" name="receiver_class" required>
+        <option value="" disabled {% if selected_receiver_class.is_none() %}selected{% endif %}>Select…</option>
+        {% for c in classes %}
+          <option value="{{ c }}" {% if selected_receiver_class.as_deref() == Some(c.as_str()) %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
     </div>
     <div class="col-md-6 mb-3">
-      <label class="form-label">Receiver kind (blank = any)</label>
-      <input type="text" name="receiver_kind" class="form-control"
-        {% if let Some(c) = channel %}{% if let Some(k) = c.receiver_kind %}value="{{ k }}"{% endif %}{% endif %}>
+      <label class="form-label">Receiver kind</label>
+      <select class="form-select" name="receiver_kind">
+        <option value="" {% if selected_receiver_kind.is_none() %}selected{% endif %}>(any kind)</option>
+        {% for k in kinds %}
+          <option value="{{ k }}" {% if selected_receiver_kind.as_deref() == Some(k.as_str()) %}selected{% endif %}>{{ k }}</option>
+        {% endfor %}
+      </select>
     </div>
   </div>
   <div class="mb-3">
@@ -33,4 +54,5 @@
   <button type="submit" class="btn btn-primary">Save</button>
   <a href="/admin/channels" class="btn btn-link">Cancel</a>
 </form>
+{% endif %}
 {% endblock %}

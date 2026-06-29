@@ -13,7 +13,7 @@
       {% if let Some(a) = agent %}value="{{ a.class }}"{% endif %}>
   </div>
   <div class="mb-3">
-    <label class="form-label">Type (optional)</label>
+    <label class="form-label">Kind (optional)</label>
     <input type="text" name="kind" class="form-control"
       {% if let Some(a) = agent %}{% if let Some(k) = a.kind %}value="{{ k }}"{% endif %}{% endif %}>
   </div>
@@ -27,7 +27,7 @@
     <textarea name="prompt" class="form-control" rows="6">{% if let Some(a) = agent %}{{ a.prompt }}{% endif %}</textarea>
   </div>
   <button type="submit" class="btn btn-primary">Save</button>
-  <a href="/agents" class="btn btn-link">Cancel</a>
+  <a href="/admin/agents" class="btn btn-link">Cancel</a>
 </form>
 
 {% if let Some(a) = agent %}

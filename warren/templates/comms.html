@@ -6,7 +6,7 @@
 <section class="mb-5">
   <div class="d-flex align-items-center mb-3">
     <h2 class="h5 mb-0">Requests</h2>
-    <a class="btn btn-sm btn-primary ms-2" href="/comms/requests/new">Inject</a>
+    <a class="btn btn-sm btn-primary ms-2" href="/admin/comms/requests/new">Inject</a>
   </div>
   {% if requests.is_empty() %}
     <p class="text-muted">No requests.</p>
@@ -27,20 +27,20 @@
           <td><small class="text-muted">{% if let Some(c) = r.claimed_by %}{{ c }}{% else %}—{% endif %}</small></td>
           <td>{% if let Some(resp) = r.response %}<pre class="payload mb-0">{{ resp }}</pre>{% else %}—{% endif %}</td>
           <td class="text-end">
-            <a class="btn btn-sm btn-outline-secondary" href="/comms/requests/{{ r.id }}/edit">Edit</a>
+            <a class="btn btn-sm btn-outline-secondary" href="/admin/comms/requests/{{ r.id }}/edit">Edit</a>
             {% if r.status == 0 %}
-            <form method="post" action="/comms/requests/{{ r.id }}/approve" class="d-inline">
+            <form method="post" action="/admin/comms/requests/{{ r.id }}/approve" class="d-inline">
               <button class="btn btn-sm btn-success" type="submit">Approve</button>
             </form>
-            <form method="post" action="/comms/requests/{{ r.id }}/reject" class="d-inline">
+            <form method="post" action="/admin/comms/requests/{{ r.id }}/reject" class="d-inline">
               <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
             </form>
             {% endif %}
             {% if r.status == 1 && r.response.is_some() %}
-            <form method="post" action="/comms/requests/{{ r.id }}/approve-response" class="d-inline">
+            <form method="post" action="/admin/comms/requests/{{ r.id }}/approve-response" class="d-inline">
               <button class="btn btn-sm btn-success" type="submit">Accept</button>
             </form>
-            <form method="post" action="/comms/requests/{{ r.id }}/reject-response" class="d-inline">
+            <form method="post" action="/admin/comms/requests/{{ r.id }}/reject-response" class="d-inline">
               <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
             </form>
             {% endif %}
