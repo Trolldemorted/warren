@@ -14,8 +14,6 @@ pub struct Model {
     #[sea_orm(unique)]
     pub name: String,
     pub class: String,
-    #[sea_orm(column_name = "type")]
-    #[serde(rename = "type")]
     pub kind: Option<String>,
     pub model: String,
     #[sea_orm(default_value = "")]
@@ -42,7 +40,7 @@ impl ActiveModelBehavior for ActiveModel {}
 
 pub fn extra_indexes() -> Vec<IndexCreateStatement> {
     vec![Index::create()
-        .name("agents_class_type_idx")
+        .name("agents_class_kind_idx")
         .table(Entity)
         .col(Column::Class)
         .col(Column::Kind)

@@ -29,18 +29,18 @@ components:
         id: { type: string, format: uuid }
         name: { type: string }
         class: { type: string }
-        type: { type: string, nullable: true }
+        kind: { type: string, nullable: true }
         model: { type: string }
         prompt: { type: string }
         authtoken: { type: string }
         created_at: { type: string, format: date-time }
-      required: [id, name, class, type, model, prompt, authtoken, created_at]
+      required: [id, name, class, kind, model, prompt, authtoken, created_at]
     AgentNew:
       type: object
       properties:
         name: { type: string }
         class: { type: string }
-        type: { type: string, nullable: true }
+        kind: { type: string, nullable: true }
         model: { type: string }
         prompt: { type: string, default: "" }
       required: [name, class, model]
@@ -49,7 +49,7 @@ components:
       properties:
         name: { type: string }
         class: { type: string }
-        type:
+        kind:
           type: string
           nullable: true
           description: |

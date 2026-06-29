@@ -12,7 +12,7 @@ CREATE TABLE "public"."agents" (
   "id" uuid NOT NULL DEFAULT gen_random_uuid(),
   "name" character varying NOT NULL,
   "class" character varying NOT NULL,
-  "type" character varying NULL,
+  "kind" character varying NULL,
   "model" character varying NOT NULL,
   "prompt" character varying NOT NULL DEFAULT '',
   "authtoken" character varying NOT NULL,
@@ -21,8 +21,8 @@ CREATE TABLE "public"."agents" (
   CONSTRAINT "agents_authtoken_key" UNIQUE ("authtoken"),
   CONSTRAINT "agents_name_key" UNIQUE ("name")
 );
--- Create index "agents_class_type_idx" to table: "agents"
-CREATE INDEX "agents_class_type_idx" ON "public"."agents" ("class", "type");
+-- Create index "agents_class_kind_idx" to table: "agents"
+CREATE INDEX "agents_class_kind_idx" ON "public"."agents" ("class", "kind");
 -- Create "requests" table
 CREATE TABLE "public"."requests" (
   "id" uuid NOT NULL DEFAULT gen_random_uuid(),

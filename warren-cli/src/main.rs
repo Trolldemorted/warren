@@ -34,7 +34,8 @@ enum Cmd {
     #[command(subcommand)]
     Requests(RequestsCmd),
 
-    /// Agent inbox: list unclaimed approved requests matching your class+type.
+    /// Agent inbox: list requests sent by, claimable by, claimed by, or
+    /// responded by you.
     InboxRequests,
     /// Atomically claim a request.
     Claim { id: String },
@@ -56,7 +57,7 @@ enum AgentsCmd {
         name: String,
         #[arg(long)]
         class: String,
-        #[arg(long = "type")]
+        #[arg(long)]
         kind: Option<String>,
         #[arg(long)]
         model: String,
@@ -123,7 +124,7 @@ fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
             let body = serde_json::json!({
                 "name": name,
                 "class": class,
-                "type": kind,
+                "kind": kind,
                 "model": model,
             });
             cli.post(agent, "/api/agents", &body.to_string())
@@ -160,7 +161,7 @@ fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
             cli.post(agent, &format!("/api/requests/{id}/reject"), "")
         }
 
-        Cmd::InboxRequests => cli.get(agent, "/api/requests/incoming"),
+        Cmd::InboxRequests => cli.get(agent, "/api/requests"),
         Cmd::Claim { id } => cli.post(agent, &format!("/api/requests/{id}/claim"), ""),
         Cmd::Respond { id, file, payload } => {
             let payload = read_payload(file.as_deref(), payload.as_deref());

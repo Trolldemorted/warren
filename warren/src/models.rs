@@ -43,7 +43,7 @@ where
 pub struct AgentNew {
     pub name: String,
     pub class: String,
-    #[serde(rename = "type", default)]
+    #[serde(default)]
     pub kind: Option<String>,
     pub model: String,
     #[serde(default)]

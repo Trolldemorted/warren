@@ -112,7 +112,7 @@ pub async fn list_all_requests(
 
 /// All requests an agent should see at `/api/requests`:
 /// - sent by them (regardless of status)
-/// - claimable now (matching class+type, pending, unclaimed)
+/// - claimable now (matching class+kind, pending, unclaimed)
 /// - claimed by them (any status where they hold the claim)
 /// - responded by them (response set, may still be waiting for admin approval)
 pub async fn list_requests_for_agent(
@@ -152,7 +152,7 @@ pub async fn get_request(db: &Db, id: Uuid) -> AppResult<Option<request::Model>>
 pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<request::Model> {
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT type FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, created_at, responded_at"
+        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, created_at, responded_at"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let row = db.query_one(stmt).await?;
@@ -255,7 +255,6 @@ struct AgentClassRow {
 
 #[derive(FromQueryResult)]
 struct AgentKindRow {
-    #[sea_orm(from_alias = "kind")]
     kind: Option<String>,
 }
 
@@ -272,8 +271,7 @@ pub async fn distinct_agent_classes(db: &Db) -> AppResult<Vec<String>> {
 pub async fn distinct_agent_kinds(db: &Db) -> AppResult<Vec<String>> {
     let rows = AgentKindRow::find_by_statement(Statement::from_string(
         DatabaseBackend::Postgres,
-        "SELECT DISTINCT \"type\" AS kind FROM agents WHERE \"type\" IS NOT NULL ORDER BY \"type\""
-            .to_string(),
+        "SELECT DISTINCT kind FROM agents WHERE kind IS NOT NULL ORDER BY kind".to_string(),
     ))
     .all(db)
     .await?;
