@@ -52,10 +52,6 @@ fn build_cli() -> Command {
             ),
     );
     requests = requests.subcommand(
-        Command::new("inbox")
-            .about("List requests sent by, claimable by, claimed by, or responded by you"),
-    );
-    requests = requests.subcommand(
         Command::new("claim")
             .about("Atomically claim a request")
             .arg(Arg::new("id").num_args(1).required(true)),
@@ -286,7 +282,6 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                     "",
                 )
             }
-            Some(("inbox", _)) => http_get(agent, &url, &token, "/api/requests"),
             Some(("claim", sc)) => {
                 let id = sc.get_one::<String>("id").unwrap();
                 http_post(
