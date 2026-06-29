@@ -127,7 +127,7 @@ pub async fn list_requests_for_agent(
         Some(k) => format!("'{k}'"),
         None => "NULL".to_string(),
     };
-    let pending = request::PENDING_RESPONSE_APPROVAL;
+    let pending = request::AWAITING_RESPONSE;
     let ack = request::ACKNOWLEDGED;
     let sent_branch = if include_acknowledged {
         format!("sender_agent_id = '{agent_id}'")
@@ -171,7 +171,7 @@ pub async fn delete_request(db: &Db, id: Uuid) -> AppResult<()> {
 }
 
 pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<request::Model> {
-    let pending = request::PENDING_RESPONSE_APPROVAL;
+    let pending = request::AWAITING_RESPONSE;
     let sql = format!(
         "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at"
     );
@@ -192,7 +192,7 @@ pub async fn respond_to_request(
     response: &Value,
 ) -> AppResult<request::Model> {
     let response_json = serde_json::to_string(response).unwrap_or_else(|_| "null".to_string());
-    let pending = request::PENDING_RESPONSE_APPROVAL;
+    let pending = request::AWAITING_RESPONSE;
     let sql = format!(
         "UPDATE requests SET response = '{response_json}'::jsonb, responded_at = NOW() WHERE id = '{id}' AND claimed_by = '{agent_id}' AND status = {pending} RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at"
     );
@@ -224,7 +224,7 @@ pub async fn accept_request_response(db: &Db, id: Uuid) -> AppResult<()> {
     let res = request::Entity::update_many()
         .col_expr(request::Column::Status, Expr::value(request::DONE))
         .filter(request::Column::Id.eq(id))
-        .filter(request::Column::Status.eq(request::PENDING_RESPONSE_APPROVAL))
+        .filter(request::Column::Status.eq(request::AWAITING_RESPONSE))
         .filter(request::Column::Response.is_not_null())
         .exec(db)
         .await?;
@@ -250,7 +250,7 @@ pub async fn reject_request_response(db: &Db, id: Uuid) -> AppResult<()> {
             Expr::value(None as Option<chrono::DateTime<chrono::Utc>>),
         )
         .filter(request::Column::Id.eq(id))
-        .filter(request::Column::Status.eq(request::PENDING_RESPONSE_APPROVAL))
+        .filter(request::Column::Status.eq(request::AWAITING_RESPONSE))
         .filter(request::Column::Response.is_not_null())
         .exec(db)
         .await?;

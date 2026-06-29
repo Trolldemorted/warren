@@ -115,11 +115,11 @@ components:
           type: string
           description: |
             pending_request_approval — admin has not approved the request yet
-            pending_response_approval — visible to recipient, awaiting response or admin acceptance
+            awaiting_response — admin has approved; waiting for a recipient agent to claim and respond
             done — response accepted by admin
             rejected — admin rejected the request or its response
             acknowledged — agent has marked the accepted response as consumed
-          enum: [pending_request_approval, pending_response_approval, done, rejected, acknowledged]
+          enum: [pending_request_approval, awaiting_response, done, rejected, acknowledged]
         sender_agent_id: { type: string, format: uuid, nullable: true }
         claimed_by: { type: string, format: uuid, nullable: true }
         claimed_at: { type: string, format: date-time, nullable: true }
@@ -346,7 +346,7 @@ paths:
           name: status
           schema:
             type: string
-            enum: [pending_request_approval, pending_response_approval, done, rejected, acknowledged]
+            enum: [pending_request_approval, awaiting_response, done, rejected, acknowledged]
         - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
@@ -372,7 +372,7 @@ paths:
       summary: Create request (admin or agent)
       description: |
         Admin POSTs auto-skip `pending_request_approval` and land directly in
-        `pending_response_approval` (status 1). Agent POSTs always go through
+        `awaiting_response` (status 1). Agent POSTs always go through
         admin review first (status 0) and record the sender as the agent.
       security:
         - adminSession: []

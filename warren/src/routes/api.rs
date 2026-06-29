@@ -218,7 +218,7 @@ async fn api_create_request(
 ) -> AppResult<Json<request::Model>> {
     // Admin POSTs auto-skip request approval; agent POSTs go through review.
     let (initial_status, sender_agent_id) = match &ctx {
-        AuthContext::Admin(_) => (request::PENDING_RESPONSE_APPROVAL, None),
+        AuthContext::Admin(_) => (request::AWAITING_RESPONSE, None),
         AuthContext::Agent(a) => (request::PENDING_REQUEST_APPROVAL, Some(a.0.id)),
     };
     if new.target_class.trim().is_empty() {
@@ -255,7 +255,7 @@ async fn api_get_request(
         AuthContext::Agent(a) => {
             let sent_self = r.sender_agent_id.map(|s| s == a.0.id).unwrap_or(false);
             let claims_self = r.claimed_by.map(|cb| cb == a.0.id).unwrap_or(false);
-            let in_inbox = r.status == request::PENDING_RESPONSE_APPROVAL
+            let in_inbox = r.status == request::AWAITING_RESPONSE
                 && r.claimed_by.is_none()
                 && r.target_class == a.0.class
                 && (r.target_type.is_none() || r.target_type.as_deref() == a.0.kind.as_deref());
@@ -309,7 +309,7 @@ async fn api_approve_request(
         &state.db,
         id,
         request::PENDING_REQUEST_APPROVAL,
-        request::PENDING_RESPONSE_APPROVAL,
+        request::AWAITING_RESPONSE,
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -378,7 +378,7 @@ fn parse_request_status(s: Option<&str>) -> AppResult<Option<i16>> {
     match s {
         None => Ok(None),
         Some("pending_request_approval") => Ok(Some(request::PENDING_REQUEST_APPROVAL)),
-        Some("pending_response_approval") => Ok(Some(request::PENDING_RESPONSE_APPROVAL)),
+        Some("awaiting_response") => Ok(Some(request::AWAITING_RESPONSE)),
         Some("done") => Ok(Some(request::DONE)),
         Some("rejected") => Ok(Some(request::REJECTED)),
         Some("acknowledged") => Ok(Some(request::ACKNOWLEDGED)),

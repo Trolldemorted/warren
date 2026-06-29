@@ -4,7 +4,7 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value as Json;
 
 pub const PENDING_REQUEST_APPROVAL: i16 = 0;
-pub const PENDING_RESPONSE_APPROVAL: i16 = 1;
+pub const AWAITING_RESPONSE: i16 = 1;
 pub const DONE: i16 = 2;
 pub const REJECTED: i16 = 3;
 pub const ACKNOWLEDGED: i16 = 4;
@@ -12,7 +12,7 @@ pub const ACKNOWLEDGED: i16 = 4;
 pub fn status_label(s: i16) -> &'static str {
     match s {
         PENDING_REQUEST_APPROVAL => "pending_request_approval",
-        PENDING_RESPONSE_APPROVAL => "pending_response_approval",
+        AWAITING_RESPONSE => "awaiting_response",
         DONE => "done",
         REJECTED => "rejected",
         ACKNOWLEDGED => "acknowledged",
@@ -23,7 +23,7 @@ pub fn status_label(s: i16) -> &'static str {
 fn label_to_status(label: &str) -> Option<i16> {
     match label {
         "pending_request_approval" => Some(PENDING_REQUEST_APPROVAL),
-        "pending_response_approval" => Some(PENDING_RESPONSE_APPROVAL),
+        "awaiting_response" => Some(AWAITING_RESPONSE),
         "done" => Some(DONE),
         "rejected" => Some(REJECTED),
         "acknowledged" => Some(ACKNOWLEDGED),
@@ -143,7 +143,7 @@ pub fn extra_indexes() -> Vec<IndexCreateStatement> {
             .table(Entity)
             .col(Column::TargetClass)
             .col(Column::TargetType)
-            .and_where(Expr::col(Column::Status).eq(PENDING_RESPONSE_APPROVAL))
+            .and_where(Expr::col(Column::Status).eq(AWAITING_RESPONSE))
             .and_where(Expr::col(Column::ClaimedBy).is_null())
             .to_owned(),
         Index::create()

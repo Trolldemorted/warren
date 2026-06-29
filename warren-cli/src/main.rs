@@ -20,7 +20,7 @@ fn build_requests_cmd(admin: bool) -> Command {
                 .about("List requests")
                 .arg(Arg::new("status").long("status").num_args(1).value_parser([
                     "pending_request_approval",
-                    "pending_response_approval",
+                    "awaiting_response",
                     "done",
                     "rejected",
                     "acknowledged",
