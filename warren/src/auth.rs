@@ -7,10 +7,7 @@ use axum::{
     http::{header, request::Parts, HeaderMap},
 };
 use chrono::{Duration, Utc};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Set,
-    Statement,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use subtle::ConstantTimeEq;
 
 pub const SESSION_COOKIE: &str = "warren_session";
@@ -125,11 +122,13 @@ pub async fn create_admin_session(db: &Db, token: &str, ttl_hours: i64) -> Resul
 }
 
 pub async fn validate_admin_session(db: &Db, token: &str) -> Result<bool, AppError> {
-    let sql =
-        format!("SELECT 1 FROM admin_sessions WHERE token = '{token}' AND expires_at > now()");
-    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
-    let row = db.query_one(stmt).await?;
-    Ok(row.is_some())
+    use crate::entity::admin_session;
+    let found = admin_session::Entity::find()
+        .filter(admin_session::Column::Token.eq(token.to_string()))
+        .filter(admin_session::Column::ExpiresAt.gt(Utc::now()))
+        .one(db)
+        .await?;
+    Ok(found.is_some())
 }
 
 pub async fn lookup_agent_by_token(db: &Db, token: &str) -> Result<Option<agent::Model>, AppError> {

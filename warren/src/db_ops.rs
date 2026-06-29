@@ -2,9 +2,9 @@ use crate::db::Db;
 use crate::entity::{agent, channel, request};
 use crate::error::{map_unique_conflict, AppError, AppResult};
 use crate::models::{AgentNew, AgentPatch, ChannelNew, ChannelPatch, RequestNew};
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::{Expr, IntoCondition, Order, Query};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, FromQueryResult,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, FromQueryResult,
     IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
 };
 use serde_json::Value;
@@ -123,56 +123,34 @@ pub async fn list_requests_for_agent(
     kind: Option<&str>,
     include_acknowledged: bool,
 ) -> AppResult<Vec<request::Model>> {
-    let pending = request::AWAITING_RESPONSE;
-    let ack = request::ACKNOWLEDGED;
-    let (sql, values): (String, Vec<sea_orm::Value>) = if include_acknowledged {
-        let target_type_value: sea_orm::Value = match kind {
-            Some(k) => k.to_string().into(),
-            None => sea_orm::Value::String(None),
-        };
-        let sql = "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at \
-             FROM requests \
-            WHERE sender_agent_id = $1 \
-               OR (status = $2 AND claimed_by IS NULL AND target_class = $3 \
-                   AND (target_type IS NULL OR target_type = $4)) \
-               OR claimed_by = $1 \
-            ORDER BY created_at ASC"
-            .to_string();
-        let values = vec![
-            agent_id.into(),
-            pending.into(),
-            class.to_string().into(),
-            target_type_value,
-        ];
-        (sql, values)
-    } else {
-        let target_type_value: sea_orm::Value = match kind {
-            Some(k) => k.to_string().into(),
-            None => sea_orm::Value::String(None),
-        };
-        let sql = "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at \
-             FROM requests \
-            WHERE (sender_agent_id = $1 AND status <> $2) \
-               OR (status = $3 AND claimed_by IS NULL AND target_class = $4 \
-                   AND (target_type IS NULL OR target_type = $5) AND status <> $2) \
-               OR (claimed_by = $1 AND status <> $2) \
-            ORDER BY created_at ASC"
-            .to_string();
-        let values = vec![
-            agent_id.into(),
-            ack.into(),
-            pending.into(),
-            class.to_string().into(),
-            target_type_value,
-        ];
-        (sql, values)
-    };
-    let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, &sql, values);
-    let rows = db.query_all(stmt).await?;
-    rows.into_iter()
-        .map(|r| request::Model::from_query_result(&r, ""))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(AppError::from)
+    let mut sent = Condition::all().add(request::Column::SenderAgentId.eq(agent_id));
+    let mut claimed = Condition::all().add(request::Column::ClaimedBy.eq(agent_id));
+    let mut inbox = Condition::all()
+        .add(request::Column::Status.eq(request::AWAITING_RESPONSE))
+        .add(request::Column::ClaimedBy.is_null())
+        .add(request::Column::TargetClass.eq(class.to_string()));
+    match kind {
+        Some(k) => {
+            inbox = inbox
+                .add(request::Column::TargetType.is_null())
+                .add(request::Column::TargetType.eq(k));
+        }
+        None => {
+            inbox = inbox.add(request::Column::TargetType.is_null());
+        }
+    }
+    if !include_acknowledged {
+        let not_ack = request::Column::Status.ne(request::ACKNOWLEDGED);
+        sent = sent.add(not_ack.clone());
+        claimed = claimed.add(not_ack.clone());
+        inbox = inbox.add(not_ack);
+    }
+    let where_clause = Condition::any().add(sent).add(inbox).add(claimed);
+    Ok(request::Entity::find()
+        .filter(where_clause)
+        .order_by_asc(request::Column::CreatedAt)
+        .all(db)
+        .await?)
 }
 
 pub async fn get_request(db: &Db, id: Uuid) -> AppResult<Option<request::Model>> {
@@ -188,22 +166,36 @@ pub async fn delete_request(db: &Db, id: Uuid) -> AppResult<()> {
 }
 
 pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<request::Model> {
-    let stmt = Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        r"UPDATE requests SET claimed_by = $1, claimed_at = NOW()
-          WHERE id = $2 AND status = $3 AND claimed_by IS NULL
-            AND target_class = (SELECT class FROM agents WHERE id = $1)
-            AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = $1))
-          RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at",
-        [agent_id.into(), id.into(), request::AWAITING_RESPONSE.into()],
-    );
-    let row = db.query_one(stmt).await?;
-    match row {
-        Some(r) => Ok(request::Model::from_query_result(&r, "")?),
-        None => Err(AppError::Conflict(
-            "request not in inbox or already claimed".into(),
-        )),
-    }
+    let class_subquery = Query::select()
+        .column(agent::Column::Class)
+        .from(agent::Entity)
+        .and_where(agent::Column::Id.eq(agent_id))
+        .to_owned();
+    let kind_subquery = Query::select()
+        .column(agent::Column::Kind)
+        .from(agent::Entity)
+        .and_where(agent::Column::Id.eq(agent_id))
+        .to_owned();
+    let target_type_match = request::Column::TargetType
+        .is_null()
+        .or(request::Column::TargetType.in_subquery(kind_subquery))
+        .into_condition();
+    let rows = request::Entity::update_many()
+        .col_expr(request::Column::ClaimedBy, Expr::value(Some(agent_id)))
+        .col_expr(
+            request::Column::ClaimedAt,
+            Expr::value(Some(chrono::Utc::now())),
+        )
+        .filter(request::Column::Id.eq(id))
+        .filter(request::Column::Status.eq(request::AWAITING_RESPONSE))
+        .filter(request::Column::ClaimedBy.is_null())
+        .filter(request::Column::TargetClass.in_subquery(class_subquery))
+        .filter(target_type_match)
+        .exec_with_returning(db)
+        .await?;
+    rows.into_iter()
+        .next()
+        .ok_or_else(|| AppError::Conflict("request not in inbox or already claimed".into()))
 }
 
 pub async fn respond_to_request(
@@ -296,26 +288,25 @@ pub async fn acknowledge_request(
     caller_id: Uuid,
     by_admin: bool,
 ) -> AppResult<request::Model> {
-    let owner_clause = if by_admin {
-        String::new()
-    } else {
-        format!(" AND (sender_agent_id = '{caller_id}' OR claimed_by = '{caller_id}')")
-    };
-    let done = request::DONE;
-    let ack = request::ACKNOWLEDGED;
-    let sql = format!(
-        "UPDATE requests SET status = {ack}, acknowledged_at = NOW() \
-         WHERE id = '{id}' AND status = {done}{owner_clause} \
-         RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at"
-    );
-    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
-    let row = db.query_one(stmt).await?;
-    match row {
-        Some(r) => Ok(request::Model::from_query_result(&r, "")?),
-        None => Err(AppError::Conflict(
-            "request not done yet or not owned by caller".into(),
-        )),
+    let mut q = request::Entity::update_many()
+        .col_expr(request::Column::Status, Expr::value(request::ACKNOWLEDGED))
+        .col_expr(
+            request::Column::AcknowledgedAt,
+            Expr::value(chrono::Utc::now()),
+        )
+        .filter(request::Column::Id.eq(id))
+        .filter(request::Column::Status.eq(request::DONE));
+    if !by_admin {
+        let owned = request::Column::SenderAgentId
+            .eq(caller_id)
+            .or(request::Column::ClaimedBy.eq(caller_id))
+            .into_condition();
+        q = q.filter(owned);
     }
+    let rows = q.exec_with_returning(db).await?;
+    rows.into_iter()
+        .next()
+        .ok_or_else(|| AppError::Conflict("request not done yet or not owned by caller".into()))
 }
 
 /// Admin-only: revert an `acknowledged` request back to `done`.
@@ -356,22 +347,27 @@ struct AgentKindRow {
 }
 
 pub async fn distinct_agent_classes(db: &Db) -> AppResult<Vec<String>> {
-    let rows = AgentClassRow::find_by_statement(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT DISTINCT class FROM agents ORDER BY class".to_string(),
-    ))
-    .all(db)
-    .await?;
+    let rows: Vec<AgentClassRow> = agent::Entity::find()
+        .select_only()
+        .column(agent::Column::Class)
+        .distinct()
+        .order_by(agent::Column::Class, Order::Asc)
+        .into_model()
+        .all(db)
+        .await?;
     Ok(rows.into_iter().map(|r| r.class).collect())
 }
 
 pub async fn distinct_agent_kinds(db: &Db) -> AppResult<Vec<String>> {
-    let rows = AgentKindRow::find_by_statement(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT DISTINCT kind FROM agents WHERE kind IS NOT NULL ORDER BY kind".to_string(),
-    ))
-    .all(db)
-    .await?;
+    let rows: Vec<AgentKindRow> = agent::Entity::find()
+        .select_only()
+        .column(agent::Column::Kind)
+        .distinct()
+        .filter(agent::Column::Kind.is_not_null())
+        .order_by(agent::Column::Kind, Order::Asc)
+        .into_model()
+        .all(db)
+        .await?;
     Ok(rows.into_iter().filter_map(|r| r.kind).collect())
 }
 
@@ -616,23 +612,18 @@ pub async fn channels_for_sender(
     class: &str,
     kind: Option<&str>,
 ) -> AppResult<Vec<channel::Model>> {
-    let kind_sql = match kind {
-        Some(k) => format!("'{k}'"),
-        None => "NULL".to_string(),
+    let mut q = channel::Entity::find()
+        .filter(channel::Column::SenderClass.eq(class.to_string()))
+        .order_by_asc(channel::Column::CreatedAt);
+    q = match kind {
+        Some(k) => q.filter(
+            channel::Column::SenderKind
+                .is_null()
+                .or(channel::Column::SenderKind.eq(k)),
+        ),
+        None => q.filter(channel::Column::SenderKind.is_null()),
     };
-    let sql = format!(
-        "SELECT id, sender_class, sender_kind, receiver_class, receiver_kind, description, created_at \
-           FROM channels \
-          WHERE sender_class = '{class}' \
-            AND (sender_kind IS NULL OR sender_kind = {kind_sql}) \
-          ORDER BY created_at ASC"
-    );
-    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
-    let rows = db.query_all(stmt).await?;
-    rows.into_iter()
-        .map(|r| channel::Model::from_query_result(&r, ""))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(AppError::from)
+    Ok(q.all(db).await?)
 }
 
 /// Returns Ok(()) iff the channel allows
