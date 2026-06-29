@@ -128,16 +128,14 @@ pub async fn list_requests_for_agent(
         .add(request::Column::Status.eq(request::AWAITING_AGENT_REQUEST_CLAIM))
         .add(request::Column::ClaimedBy.is_null())
         .add(request::Column::TargetClass.eq(class.to_string()));
-    match kind {
-        Some(k) => {
-            inbox = inbox
-                .add(request::Column::TargetType.is_null())
-                .add(request::Column::TargetType.eq(k));
-        }
-        None => {
-            inbox = inbox.add(request::Column::TargetType.is_null());
-        }
-    }
+    let target_type_match = match kind {
+        Some(k) => request::Column::TargetType
+            .is_null()
+            .or(request::Column::TargetType.eq(k.to_string()))
+            .into_condition(),
+        None => request::Column::TargetType.is_null().into_condition(),
+    };
+    inbox = inbox.add(target_type_match);
     if !include_done {
         let not_done = request::Column::Status.ne(request::DONE);
         sent = sent.add(not_done.clone());
