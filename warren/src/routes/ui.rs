@@ -54,6 +54,10 @@ pub fn router() -> Router<AppState> {
             "/admin/comms/requests/:id/edit",
             get(message_edit_page).post(message_edit_save),
         )
+        .route(
+            "/admin/comms/requests/:id/delete",
+            post(message_delete_request),
+        )
         .route("/admin/migrations", get(migrations_page))
         .route("/admin/channels", get(channels_page))
         .route("/admin/channels/new", get(channel_new_page))
@@ -557,6 +561,20 @@ async fn message_edit_save(
     )
     .await
     {
+        Ok(_) => Redirect::to("/admin/comms").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn message_delete_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    match crate::db_ops::delete_request(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/comms").into_response(),
         Err(e) => err_page(e),
     }

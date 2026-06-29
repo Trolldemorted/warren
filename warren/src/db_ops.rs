@@ -162,6 +162,14 @@ pub async fn get_request(db: &Db, id: Uuid) -> AppResult<Option<request::Model>>
     Ok(request::Entity::find_by_id(id).one(db).await?)
 }
 
+pub async fn delete_request(db: &Db, id: Uuid) -> AppResult<()> {
+    let res = request::Entity::delete_by_id(id).exec(db).await?;
+    if res.rows_affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
 pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<request::Model> {
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(

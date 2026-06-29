@@ -32,7 +32,10 @@ pub fn router() -> Router<AppState> {
             "/api/requests",
             get(api_list_requests).post(api_create_request),
         )
-        .route("/api/requests/:id", get(api_get_request))
+        .route(
+            "/api/requests/:id",
+            get(api_get_request).delete(api_delete_request),
+        )
         .route("/api/requests/:id/claim", post(api_claim_request))
         .route("/api/requests/:id/respond", post(api_respond_request))
         .route("/api/requests/:id/approve", post(api_approve_request))
@@ -263,6 +266,16 @@ async fn api_get_request(
             }
         }
     }
+}
+
+async fn api_delete_request(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ctx.require_admin()?;
+    crate::db_ops::delete_request(&state.db, id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn api_claim_request(

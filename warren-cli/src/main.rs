@@ -1,129 +1,138 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::Value;
 use std::fs;
+use std::io::Write;
 use std::process::ExitCode;
 
 fn is_admin() -> bool {
     std::env::var("WARREN_ADMIN").ok().as_deref() == Some("1")
 }
 
-fn build_cli() -> Command {
-    let admin = is_admin();
-
-    let mut requests = Command::new("requests").about(if admin {
-        "List, create, claim, respond to, ack, or approve/reject requests"
+fn build_requests_cmd(admin: bool) -> Command {
+    let mut c = Command::new("requests").about(if admin {
+        "List, create, delete, claim, respond to, ack, or approve/reject requests"
     } else {
         "List, create, claim, respond to, or acknowledge requests"
     });
-    requests = requests.subcommand(
-        Command::new("list")
-            .about("List requests")
-            .arg(Arg::new("status").long("status").num_args(1).value_parser([
-                "pending_request_approval",
-                "pending_response_approval",
-                "done",
-                "rejected",
-                "acknowledged",
-            ]))
-            .arg(
-                Arg::new("all")
-                    .long("all")
-                    .help("Include acknowledged rows in the listing")
-                    .action(ArgAction::SetTrue),
-            ),
-    );
-    requests = requests.subcommand(
-        Command::new("create")
-            .about("Create a request")
-            .arg(Arg::new("class").long("class").num_args(1).required(true))
-            .arg(Arg::new("kind").long("type").num_args(1).value_name("KIND"))
-            .arg(
-                Arg::new("file")
-                    .short('f')
-                    .long("file")
-                    .num_args(1)
-                    .conflicts_with("payload"),
-            )
-            .arg(
-                Arg::new("payload")
-                    .short('p')
-                    .long("payload")
-                    .num_args(1)
-                    .conflicts_with("file"),
-            )
-            .arg(
-                Arg::new("approve")
-                    .long("approve")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(
-                Arg::new("channel")
-                    .long("channel")
-                    .num_args(1)
-                    .value_name("CHANNEL_ID"),
-            ),
-    );
-    requests = requests.subcommand(
-        Command::new("claim")
-            .about("Atomically claim a request")
-            .arg(Arg::new("id").num_args(1).required(true)),
-    );
-    requests = requests.subcommand(
-        Command::new("respond")
-            .about("Respond to a request you previously claimed")
-            .arg(Arg::new("id").num_args(1).required(true))
-            .arg(
-                Arg::new("file")
-                    .short('f')
-                    .long("file")
-                    .num_args(1)
-                    .conflicts_with("payload"),
-            )
-            .arg(
-                Arg::new("payload")
-                    .short('p')
-                    .long("payload")
-                    .num_args(1)
-                    .conflicts_with("file"),
-            ),
-    );
-    requests = requests.subcommand(
-        Command::new("acknowledge")
-            .about("Mark an accepted response as consumed (status 4)")
-            .arg(Arg::new("id").num_args(1).required(true)),
-    );
-    requests = requests.subcommand(
-        Command::new("unacknowledge")
-            .about("Revert acknowledged back to done (admin)")
-            .hide(!admin)
-            .arg(Arg::new("id").num_args(1).required(true)),
-    );
-    requests = requests.subcommand(
-        Command::new("approve")
-            .about("Approve a pending request (admin)")
-            .hide(!admin)
-            .arg(Arg::new("id").num_args(1).required(true)),
-    );
-    requests = requests.subcommand(
-        Command::new("reject")
-            .about("Reject a pending request (admin)")
-            .hide(!admin)
-            .arg(Arg::new("id").num_args(1).required(true)),
-    );
-    requests = requests.subcommand(
-        Command::new("accept-response")
-            .about("Accept a response (admin)")
-            .hide(!admin)
-            .arg(Arg::new("id").num_args(1).required(true)),
-    );
-    requests = requests.subcommand(
-        Command::new("reject-response")
-            .about("Reject a response (admin)")
-            .hide(!admin)
-            .arg(Arg::new("id").num_args(1).required(true)),
-    );
+    c = c
+        .subcommand(
+            Command::new("list")
+                .about("List requests")
+                .arg(Arg::new("status").long("status").num_args(1).value_parser([
+                    "pending_request_approval",
+                    "pending_response_approval",
+                    "done",
+                    "rejected",
+                    "acknowledged",
+                ]))
+                .arg(
+                    Arg::new("all")
+                        .long("all")
+                        .help("Include acknowledged rows in the listing")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            Command::new("create")
+                .about("Create a request")
+                .arg(Arg::new("class").long("class").num_args(1).required(true))
+                .arg(Arg::new("kind").long("type").num_args(1).value_name("KIND"))
+                .arg(
+                    Arg::new("file")
+                        .short('f')
+                        .long("file")
+                        .num_args(1)
+                        .conflicts_with("payload"),
+                )
+                .arg(
+                    Arg::new("payload")
+                        .short('p')
+                        .long("payload")
+                        .num_args(1)
+                        .conflicts_with("file"),
+                )
+                .arg(
+                    Arg::new("approve")
+                        .long("approve")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("channel")
+                        .long("channel")
+                        .num_args(1)
+                        .value_name("CHANNEL_ID"),
+                ),
+        )
+        .subcommand(
+            Command::new("delete")
+                .about("Delete a request (admin)")
+                .hide(!admin)
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("claim")
+                .about("Atomically claim a request")
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("respond")
+                .about("Respond to a request you previously claimed")
+                .arg(Arg::new("id").num_args(1).required(true))
+                .arg(
+                    Arg::new("file")
+                        .short('f')
+                        .long("file")
+                        .num_args(1)
+                        .conflicts_with("payload"),
+                )
+                .arg(
+                    Arg::new("payload")
+                        .short('p')
+                        .long("payload")
+                        .num_args(1)
+                        .conflicts_with("file"),
+                ),
+        )
+        .subcommand(
+            Command::new("acknowledge")
+                .about("Mark an accepted response as consumed (status 4)")
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("unacknowledge")
+                .about("Revert acknowledged back to done (admin)")
+                .hide(!admin)
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("approve")
+                .about("Approve a pending request (admin)")
+                .hide(!admin)
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("reject")
+                .about("Reject a pending request (admin)")
+                .hide(!admin)
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("accept-response")
+                .about("Accept a response (admin)")
+                .hide(!admin)
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("reject-response")
+                .about("Reject a response (admin)")
+                .hide(!admin)
+                .arg(Arg::new("id").num_args(1).required(true)),
+        );
+    c
+}
 
-    let agents = Command::new("agents")
+fn build_agents_cmd(admin: bool) -> Command {
+    Command::new("agents")
         .about("List, create, or delete agents (admin)")
         .subcommand(Command::new("list").about("List agents"))
         .subcommand(
@@ -139,9 +148,11 @@ fn build_cli() -> Command {
                 .about("Delete an agent")
                 .arg(Arg::new("id").num_args(1).required(true)),
         )
-        .hide(!admin);
+        .hide(!admin)
+}
 
-    let channels = Command::new("channels")
+fn build_channels_cmd(admin: bool) -> Command {
+    Command::new("channels")
         .about("List, create, or delete channels (admin)")
         .subcommand(Command::new("list").about("List channels"))
         .subcommand(
@@ -173,8 +184,11 @@ fn build_cli() -> Command {
                 .about("Delete a channel")
                 .arg(Arg::new("id").num_args(1).required(true)),
         )
-        .hide(!admin);
+        .hide(!admin)
+}
 
+fn build_cli() -> Command {
+    let admin = is_admin();
     Command::new("warren-cli")
         .about("warren admin + agent CLI")
         .version(env!("CARGO_PKG_VERSION"))
@@ -193,9 +207,9 @@ fn build_cli() -> Command {
                 .required(true)
                 .help("Admin session token (from /api/login) OR agent authtoken"),
         )
-        .subcommand(requests)
-        .subcommand(agents)
-        .subcommand(channels)
+        .subcommand(build_requests_cmd(admin))
+        .subcommand(build_agents_cmd(admin))
+        .subcommand(build_channels_cmd(admin))
 }
 
 fn main() -> ExitCode {
@@ -215,9 +229,18 @@ fn main() -> ExitCode {
     }
 }
 
+fn print_cmd_help(mut cmd: Command) -> Result<String, String> {
+    let mut buf = Vec::new();
+    cmd.write_help(&mut buf).map_err(|e| format!("{e}"))?;
+    let s = String::from_utf8(buf).map_err(|e| format!("{e}"))?;
+    let _ = std::io::stdout().write_all(s.as_bytes());
+    Ok(String::new())
+}
+
 fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
     let url = cli.get_one::<String>("url").unwrap().clone();
     let token = cli.get_one::<String>("token").unwrap().clone();
+    let admin = is_admin();
 
     match cli.subcommand() {
         None => {
@@ -240,7 +263,7 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                 let id = sc.get_one::<String>("id").unwrap();
                 http_delete(agent, &url, &token, &format!("/api/agents/{id}"))
             }
-            _ => unreachable!(),
+            _ => print_cmd_help(build_agents_cmd(admin)),
         },
 
         Some(("requests", m)) => match m.subcommand() {
@@ -272,6 +295,10 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                     "channel_id": sc.get_one::<String>("channel").map(String::as_str),
                 });
                 http_post(agent, &url, &token, "/api/requests", &body.to_string())
+            }
+            Some(("delete", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_delete(agent, &url, &token, &format!("/api/requests/{id}"))
             }
             Some(("approve", sc)) => {
                 let id = sc.get_one::<String>("id").unwrap();
@@ -358,7 +385,7 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                     "",
                 )
             }
-            _ => unreachable!(),
+            _ => print_cmd_help(build_requests_cmd(admin)),
         },
 
         Some(("channels", m)) => match m.subcommand() {
@@ -377,10 +404,10 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                 let id = sc.get_one::<String>("id").unwrap();
                 http_delete(agent, &url, &token, &format!("/api/channels/{id}"))
             }
-            _ => unreachable!(),
+            _ => print_cmd_help(build_channels_cmd(admin)),
         },
 
-        _ => unreachable!(),
+        _ => Err("unknown subcommand".to_string()),
     }
 }
 

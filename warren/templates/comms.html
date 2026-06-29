@@ -35,6 +35,10 @@
             <form method="post" action="/admin/comms/requests/{{ r.id }}/reject" class="d-inline">
               <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
             </form>
+            <form method="post" action="/admin/comms/requests/{{ r.id }}/delete" class="d-inline"
+                  onsubmit="return confirm('Delete this pending request?')">
+              <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+            </form>
             {% endif %}
             {% if r.status == 1 && r.response.is_some() %}
             <form method="post" action="/admin/comms/requests/{{ r.id }}/approve-response" class="d-inline">

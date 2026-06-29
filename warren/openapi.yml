@@ -407,6 +407,13 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Request' }
         '403': { description: Forbidden }
+    delete:
+      tags: [admin]
+      summary: Delete a request (admin)
+      security: [{ adminSession: [] }]
+      responses:
+        '204': { description: Deleted }
+        '404': { description: Not found }
   /api/requests/{id}/claim:
     post:
       tags: [agent]
