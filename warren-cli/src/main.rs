@@ -146,10 +146,6 @@ fn build_cli() -> Command {
                 .help("Admin session token (from /api/login) OR agent authtoken"),
         )
         .subcommand(
-            Command::new("whoami")
-                .about("Show the current authenticated principal (uses /api/agents/me)"),
-        )
-        .subcommand(
             Command::new("inbox-requests")
                 .about("List requests sent by, claimable by, claimed by, or responded by you"),
         )
@@ -204,7 +200,7 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
     let token = cli.get_one::<String>("token").unwrap().clone();
 
     match cli.subcommand() {
-        Some(("whoami", _)) => {
+        None => {
             let body = http_get(agent, &url, &token, "/api/agents/me")?;
             Ok(strip_authtoken(&body))
         }
