@@ -11,18 +11,27 @@ fn build_cli() -> Command {
     let admin = is_admin();
 
     let mut requests = Command::new("requests").about(if admin {
-        "List, create, claim, respond to, or approve/reject requests"
+        "List, create, claim, respond to, ack, or approve/reject requests"
     } else {
-        "List, create, claim, or respond to requests"
+        "List, create, claim, respond to, or acknowledge requests"
     });
-    requests = requests.subcommand(Command::new("list").about("List requests").arg(
-        Arg::new("status").long("status").num_args(1).value_parser([
-            "pending_request_approval",
-            "pending_response_approval",
-            "done",
-            "rejected",
-        ]),
-    ));
+    requests = requests.subcommand(
+        Command::new("list")
+            .about("List requests")
+            .arg(Arg::new("status").long("status").num_args(1).value_parser([
+                "pending_request_approval",
+                "pending_response_approval",
+                "done",
+                "rejected",
+                "acknowledged",
+            ]))
+            .arg(
+                Arg::new("all")
+                    .long("all")
+                    .help("Include acknowledged rows in the listing")
+                    .action(ArgAction::SetTrue),
+            ),
+    );
     requests = requests.subcommand(
         Command::new("create")
             .about("Create a request")
@@ -77,6 +86,17 @@ fn build_cli() -> Command {
                     .num_args(1)
                     .conflicts_with("file"),
             ),
+    );
+    requests = requests.subcommand(
+        Command::new("acknowledge")
+            .about("Mark an accepted response as consumed (status 4)")
+            .arg(Arg::new("id").num_args(1).required(true)),
+    );
+    requests = requests.subcommand(
+        Command::new("unacknowledge")
+            .about("Revert acknowledged back to done (admin)")
+            .hide(!admin)
+            .arg(Arg::new("id").num_args(1).required(true)),
     );
     requests = requests.subcommand(
         Command::new("approve")
@@ -225,11 +245,19 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
 
         Some(("requests", m)) => match m.subcommand() {
             Some(("list", sc)) => {
-                let q = sc
-                    .get_one::<String>("status")
-                    .map(|s| format!("?status={}", urlencode(s)))
-                    .unwrap_or_default();
-                http_get(agent, &url, &token, &format!("/api/requests{q}"))
+                let mut q: Vec<String> = Vec::new();
+                if let Some(s) = sc.get_one::<String>("status") {
+                    q.push(format!("status={}", urlencode(s)));
+                }
+                if sc.get_flag("all") {
+                    q.push("include_acknowledged=true".to_string());
+                }
+                let qs = if q.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{}", q.join("&"))
+                };
+                http_get(agent, &url, &token, &format!("/api/requests{qs}"))
             }
             Some(("create", sc)) => {
                 let payload = read_payload(
@@ -308,6 +336,26 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                     &token,
                     &format!("/api/requests/{id}/respond"),
                     &body,
+                )
+            }
+            Some(("acknowledge", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_post(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/requests/{id}/acknowledge"),
+                    "",
+                )
+            }
+            Some(("unacknowledge", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_post(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/requests/{id}/unacknowledge"),
+                    "",
                 )
             }
             _ => unreachable!(),

@@ -112,7 +112,7 @@ pub async fn list_all_requests(
 }
 
 /// All requests an agent should see at `/api/requests`:
-/// - sent by them (regardless of status)
+/// - sent by them (regardless of status, unless `include_acknowledged = false`)
 /// - claimable now (matching class+kind, pending, unclaimed)
 /// - claimed by them (any status where they hold the claim)
 /// - responded by them (response set, may still be waiting for admin approval)
@@ -121,21 +121,33 @@ pub async fn list_requests_for_agent(
     agent_id: Uuid,
     class: &str,
     kind: Option<&str>,
+    include_acknowledged: bool,
 ) -> AppResult<Vec<request::Model>> {
     let target_type_sql = match kind {
         Some(k) => format!("'{k}'"),
         None => "NULL".to_string(),
     };
     let pending = request::PENDING_RESPONSE_APPROVAL;
+    let ack = request::ACKNOWLEDGED;
+    let sent_branch = if include_acknowledged {
+        format!("sender_agent_id = '{agent_id}'")
+    } else {
+        format!("sender_agent_id = '{agent_id}' AND status <> {ack}")
+    };
+    let claimed_branch = if include_acknowledged {
+        format!("claimed_by = '{agent_id}'")
+    } else {
+        format!("claimed_by = '{agent_id}' AND status <> {ack}")
+    };
     let sql = format!(
-        "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at \
+        "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at \
            FROM requests \
-          WHERE sender_agent_id = '{agent_id}' \
+          WHERE {sent_branch} \
              OR (status = {pending} \
                  AND claimed_by IS NULL \
                  AND target_class = '{class}' \
                  AND (target_type IS NULL OR target_type = {target_type_sql})) \
-             OR claimed_by = '{agent_id}' \
+             OR {claimed_branch} \
           ORDER BY created_at ASC"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
@@ -153,7 +165,7 @@ pub async fn get_request(db: &Db, id: Uuid) -> AppResult<Option<request::Model>>
 pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<request::Model> {
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at"
+        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let row = db.query_one(stmt).await?;
@@ -174,7 +186,7 @@ pub async fn respond_to_request(
     let response_json = serde_json::to_string(response).unwrap_or_else(|_| "null".to_string());
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "UPDATE requests SET response = '{response_json}'::jsonb, responded_at = NOW() WHERE id = '{id}' AND claimed_by = '{agent_id}' AND status = {pending} RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at"
+        "UPDATE requests SET response = '{response_json}'::jsonb, responded_at = NOW() WHERE id = '{id}' AND claimed_by = '{agent_id}' AND status = {pending} RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let row = db.query_one(stmt).await?;
@@ -236,6 +248,57 @@ pub async fn reject_request_response(db: &Db, id: Uuid) -> AppResult<()> {
         .await?;
     if res.rows_affected == 0 {
         return Err(AppError::Conflict("no response to reject".into()));
+    }
+    Ok(())
+}
+
+/// Mark a `done` request as acknowledged by an agent (or by an admin on
+/// the agent's behalf). Sets `status = ACKNOWLEDGED` and stamps
+/// `acknowledged_at`. Atomic; if the row is not in `done` state, or
+/// `by_admin = false` and the caller is neither sender nor claimer,
+/// returns `Conflict`.
+pub async fn acknowledge_request(
+    db: &Db,
+    id: Uuid,
+    caller_id: Uuid,
+    by_admin: bool,
+) -> AppResult<request::Model> {
+    let owner_clause = if by_admin {
+        String::new()
+    } else {
+        format!(" AND (sender_agent_id = '{caller_id}' OR claimed_by = '{caller_id}')")
+    };
+    let done = request::DONE;
+    let ack = request::ACKNOWLEDGED;
+    let sql = format!(
+        "UPDATE requests SET status = {ack}, acknowledged_at = NOW() \
+         WHERE id = '{id}' AND status = {done}{owner_clause} \
+         RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at"
+    );
+    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+    let row = db.query_one(stmt).await?;
+    match row {
+        Some(r) => Ok(request::Model::from_query_result(&r, "")?),
+        None => Err(AppError::Conflict(
+            "request not done yet or not owned by caller".into(),
+        )),
+    }
+}
+
+/// Admin-only: revert an `acknowledged` request back to `done`.
+pub async fn unacknowledge_request(db: &Db, id: Uuid) -> AppResult<()> {
+    let res = request::Entity::update_many()
+        .col_expr(request::Column::Status, Expr::value(request::DONE))
+        .col_expr(
+            request::Column::AcknowledgedAt,
+            Expr::value(None as Option<chrono::DateTime<chrono::Utc>>),
+        )
+        .filter(request::Column::Id.eq(id))
+        .filter(request::Column::Status.eq(request::ACKNOWLEDGED))
+        .exec(db)
+        .await?;
+    if res.rows_affected == 0 {
+        return Err(AppError::Conflict("request not acknowledged".into()));
     }
     Ok(())
 }

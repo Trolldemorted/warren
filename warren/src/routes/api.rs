@@ -46,6 +46,14 @@ pub fn router() -> Router<AppState> {
             post(api_reject_response),
         )
         .route(
+            "/api/requests/:id/acknowledge",
+            post(api_acknowledge_request),
+        )
+        .route(
+            "/api/requests/:id/unacknowledge",
+            post(api_unacknowledge_request),
+        )
+        .route(
             "/api/channels",
             get(api_list_channels).post(api_create_channel),
         )
@@ -168,6 +176,7 @@ struct ListQuery {
     status: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    include_acknowledged: Option<bool>,
 }
 
 async fn api_list_requests(
@@ -185,11 +194,13 @@ async fn api_list_requests(
         }
         AuthContext::Agent(a) => {
             let _ = (q.limit, q.offset);
+            let include_acknowledged = q.include_acknowledged.unwrap_or(false);
             let rows = crate::db_ops::list_requests_for_agent(
                 &state.db,
                 a.0.id,
                 &a.0.class,
                 a.0.kind.as_deref(),
+                include_acknowledged,
             )
             .await?;
             Ok(Json(rows))
@@ -327,6 +338,29 @@ async fn api_reject_response(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn api_acknowledge_request(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<request::Model>> {
+    let (caller_id, by_admin) = match &ctx {
+        AuthContext::Admin(_) => (Uuid::nil(), true),
+        AuthContext::Agent(a) => (a.0.id, false),
+    };
+    let r = crate::db_ops::acknowledge_request(&state.db, id, caller_id, by_admin).await?;
+    Ok(Json(r))
+}
+
+async fn api_unacknowledge_request(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ctx.require_admin()?;
+    crate::db_ops::unacknowledge_request(&state.db, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn parse_request_status(s: Option<&str>) -> AppResult<Option<i16>> {
     match s {
         None => Ok(None),
@@ -334,6 +368,7 @@ fn parse_request_status(s: Option<&str>) -> AppResult<Option<i16>> {
         Some("pending_response_approval") => Ok(Some(request::PENDING_RESPONSE_APPROVAL)),
         Some("done") => Ok(Some(request::DONE)),
         Some("rejected") => Ok(Some(request::REJECTED)),
+        Some("acknowledged") => Ok(Some(request::ACKNOWLEDGED)),
         Some(other) => Err(AppError::BadRequest(format!("unknown status '{other}'"))),
     }
 }

@@ -7,6 +7,7 @@ pub const PENDING_REQUEST_APPROVAL: i16 = 0;
 pub const PENDING_RESPONSE_APPROVAL: i16 = 1;
 pub const DONE: i16 = 2;
 pub const REJECTED: i16 = 3;
+pub const ACKNOWLEDGED: i16 = 4;
 
 pub fn status_label(s: i16) -> &'static str {
     match s {
@@ -14,6 +15,7 @@ pub fn status_label(s: i16) -> &'static str {
         PENDING_RESPONSE_APPROVAL => "pending_response_approval",
         DONE => "done",
         REJECTED => "rejected",
+        ACKNOWLEDGED => "acknowledged",
         _ => "unknown",
     }
 }
@@ -24,6 +26,7 @@ fn label_to_status(label: &str) -> Option<i16> {
         "pending_response_approval" => Some(PENDING_RESPONSE_APPROVAL),
         "done" => Some(DONE),
         "rejected" => Some(REJECTED),
+        "acknowledged" => Some(ACKNOWLEDGED),
         _ => None,
     }
 }
@@ -68,6 +71,7 @@ pub struct Model {
     #[sea_orm(default_expr = "Expr::cust(\"now()\")")]
     pub created_at: ChronoDateTimeUtc,
     pub responded_at: Option<ChronoDateTimeUtc>,
+    pub acknowledged_at: Option<ChronoDateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

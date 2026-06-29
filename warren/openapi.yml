@@ -118,13 +118,15 @@ components:
             pending_response_approval — visible to recipient, awaiting response or admin acceptance
             done — response accepted by admin
             rejected — admin rejected the request or its response
-          enum: [pending_request_approval, pending_response_approval, done, rejected]
+            acknowledged — agent has marked the accepted response as consumed
+          enum: [pending_request_approval, pending_response_approval, done, rejected, acknowledged]
         sender_agent_id: { type: string, format: uuid, nullable: true }
         claimed_by: { type: string, format: uuid, nullable: true }
         claimed_at: { type: string, format: date-time, nullable: true }
         channel_id: { type: string, format: uuid, nullable: true }
         created_at: { type: string, format: date-time }
         responded_at: { type: string, format: date-time, nullable: true }
+        acknowledged_at: { type: string, format: date-time, nullable: true }
       required: [id, target_class, target_type, payload, status, created_at]
     RequestNew:
       type: object
@@ -344,13 +346,19 @@ paths:
           name: status
           schema:
             type: string
-            enum: [pending_request_approval, pending_response_approval, done, rejected]
+            enum: [pending_request_approval, pending_response_approval, done, rejected, acknowledged]
         - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
         - in: query
           name: offset
           schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: include_acknowledged
+          description: |
+            Agent-only. When true, `acknowledged` rows surface in the listing.
+            Defaults to false so the inbox stays focused on actionable rows.
+          schema: { type: boolean, default: false }
       responses:
         '200':
           description: OK
@@ -490,3 +498,40 @@ paths:
       responses:
         '204': { description: OK }
         '409': { description: No response to reject }
+  /api/requests/{id}/acknowledge:
+    post:
+      tags: [agent, admin]
+      summary: "Mark an accepted response as consumed (status 2 -> 4)"
+      description: |
+        Agents may acknowledge a `done` request they sent or claimed.
+        Admins may acknowledge any `done` request on the agent's behalf.
+        No-op (409) if the row is not currently `done`.
+      security:
+        - adminSession: []
+        - agentToken: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '409':
+          description: Request not done yet, or (for agents) not owned by caller.
+  /api/requests/{id}/unacknowledge:
+    post:
+      tags: [admin]
+      summary: "Revert a request from acknowledged back to done (admin)"
+      security: [{ adminSession: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: OK }
+        '409': { description: Request not acknowledged }
