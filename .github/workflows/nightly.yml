@@ -23,7 +23,7 @@ jobs:
 
       - name: Build and push image
         run: |
-          dockerk build -t ghcr.io/trolldemorted/warren:latest .
+          docker build -t ghcr.io/trolldemorted/warren:latest .
           docker push ghcr.io/trolldemorted/warren:latest
 
       - name: Trigger downstream CI
