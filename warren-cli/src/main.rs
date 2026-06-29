@@ -413,17 +413,17 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
     }
 }
 
-fn read_payload(file: Option<&String>, payload: Option<&String>) -> Value {
+fn read_payload(file: Option<&String>, payload: Option<&String>) -> String {
     match (file, payload) {
         (Some(p), _) => match fs::read_to_string(p) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
+            Ok(s) => s,
             Err(e) => {
                 eprintln!("read {p}: {e}");
-                Value::Null
+                String::new()
             }
         },
-        (None, Some(s)) => serde_json::from_str(s).unwrap_or(Value::String(s.to_string())),
-        (None, None) => Value::Null,
+        (None, Some(s)) => s.clone(),
+        (None, None) => String::new(),
     }
 }
 

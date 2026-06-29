@@ -7,7 +7,6 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, FromQueryResult,
     IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
 };
-use serde_json::Value;
 use uuid::Uuid;
 
 pub async fn list_agents(db: &Db) -> AppResult<Vec<agent::Model>> {
@@ -206,10 +205,10 @@ pub async fn respond_to_request(
     db: &Db,
     id: Uuid,
     agent_id: Uuid,
-    response: &Value,
+    response: &str,
 ) -> AppResult<request::Model> {
     let rows = request::Entity::update_many()
-        .col_expr(request::Column::Response, Expr::value(response.clone()))
+        .col_expr(request::Column::Response, Expr::value(response.to_string()))
         .col_expr(
             request::Column::RespondedAt,
             Expr::value(chrono::Utc::now()),
@@ -264,7 +263,7 @@ pub async fn accept_request_response(db: &Db, id: Uuid) -> AppResult<()> {
 
 pub async fn reject_request_response(db: &Db, id: Uuid) -> AppResult<()> {
     let res = request::Entity::update_many()
-        .col_expr(request::Column::Response, Expr::value(Value::Null))
+        .col_expr(request::Column::Response, Expr::value(None::<String>))
         .col_expr(
             request::Column::ClaimedBy,
             Expr::value(None as Option<Uuid>),
@@ -535,7 +534,7 @@ pub async fn update_request_payload(
     id: Uuid,
     target_class: &str,
     target_type: Option<&str>,
-    payload: &Value,
+    payload: &str,
 ) -> AppResult<()> {
     let res = request::Entity::update_many()
         .col_expr(
@@ -546,7 +545,7 @@ pub async fn update_request_payload(
             request::Column::TargetType,
             Expr::value(target_type.map(str::to_string)),
         )
-        .col_expr(request::Column::Payload, Expr::value(payload.clone()))
+        .col_expr(request::Column::Payload, Expr::value(payload.to_string()))
         .filter(request::Column::Id.eq(id))
         .exec(db)
         .await?;

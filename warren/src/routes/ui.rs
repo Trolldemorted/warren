@@ -341,10 +341,6 @@ struct InjectForm {
     payload: String,
 }
 
-fn parse_payload(s: &str) -> serde_json::Value {
-    serde_json::Value::String(s.to_string())
-}
-
 async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
@@ -394,7 +390,7 @@ async fn inject_create_req(
     let new = RequestNew {
         target_class: form.target_class,
         target_type: form.target_type.filter(|s| !s.is_empty()),
-        payload: parse_payload(&form.payload),
+        payload: form.payload,
         channel_id: None,
     };
     // UI inject is admin-only — auto-skip request approval.
@@ -536,7 +532,7 @@ async fn message_edit_page(
         target_type: req.target_type,
         target_classes,
         target_kinds,
-        payload: req.payload.to_string(),
+        payload: req.payload.clone(),
         form_action: format!("/admin/comms/requests/{id}/edit"),
     })
 }
@@ -551,13 +547,12 @@ async fn message_edit_save(
         return redirect_to_login();
     }
     let target_type = form.target_type.filter(|s| !s.is_empty());
-    let payload = parse_payload(&form.payload);
     match crate::db_ops::update_request_payload(
         &state.db,
         id,
         &form.target_class,
         target_type.as_deref(),
-        &payload,
+        &form.payload,
     )
     .await
     {

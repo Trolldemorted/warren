@@ -36,14 +36,19 @@
     a.payload-link:focus pre.payload { background: #e9ecef; }
     .modal { display: none; position: fixed; inset: 0; z-index: 1050; overflow: auto; padding: 1rem; }
     .modal:target { display: block; }
-    .modal-backdrop { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.5); }
+    .modal-bg { display: block; position: fixed; inset: 0; z-index: 0; cursor: default; }
     .modal-dialog {
       position: relative;
+      z-index: 1;
+      pointer-events: auto;
       background: #fff;
       border-radius: .5rem;
       max-width: 60rem;
       margin: 2rem auto;
       box-shadow: 0 .5rem 1rem rgba(0,0,0,.15);
+      max-height: calc(100vh - 4rem);
+      display: flex;
+      flex-direction: column;
     }
     .modal-header {
       display: flex;
@@ -51,13 +56,12 @@
       align-items: center;
       padding: .75rem 1rem;
       border-bottom: 1px solid #dee2e6;
-      position: sticky;
-      top: 0;
       background: #fff;
-      z-index: 1;
+      border-top-left-radius: .5rem;
+      border-top-right-radius: .5rem;
     }
     .modal-title { font-size: 1rem; margin: 0; overflow-wrap: anywhere; }
-    .modal-body { padding: 1rem; }
+    .modal-body { padding: 1rem; overflow: auto; flex: 1 1 auto; }
     .modal-close {
       font-size: 1.5rem;
       line-height: 1;

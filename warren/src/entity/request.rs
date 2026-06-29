@@ -1,7 +1,6 @@
 use sea_orm::entity::prelude::*;
 use sea_orm::sea_query::{ConditionalStatement, Expr, Index, IndexCreateStatement, IndexOrder};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value as Json;
 
 pub const AWAITING_ADMIN_REQUEST_APPROVAL: i16 = 0;
 pub const AWAITING_AGENT_REQUEST_CLAIM: i16 = 1;
@@ -60,10 +59,8 @@ pub struct Model {
     #[sea_orm(column_name = "target_type")]
     #[serde(rename = "target_type")]
     pub target_type: Option<String>,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub payload: Json,
-    #[sea_orm(column_type = "JsonBinary")]
-    pub response: Option<Json>,
+    pub payload: String,
+    pub response: Option<String>,
     #[sea_orm(default_expr = "0")]
     #[serde(
         serialize_with = "serialize_status",
@@ -120,27 +117,26 @@ impl Model {
     }
 
     pub fn payload_preview(&self) -> String {
-        preview_json(&self.payload, 120)
+        preview_str(&self.payload, 120)
+    }
+
+    pub fn payload_full(&self) -> &str {
+        &self.payload
     }
 
     pub fn response_preview(&self) -> Option<String> {
-        self.response.as_ref().map(|r| preview_json(r, 120))
+        self.response.as_deref().map(|s| preview_str(s, 120))
     }
 
-    pub fn payload_full(&self) -> String {
-        self.payload.to_string()
-    }
-
-    pub fn response_full(&self) -> Option<String> {
-        self.response.as_ref().map(|r| r.to_string())
+    pub fn response_full(&self) -> Option<&str> {
+        self.response.as_deref()
     }
 }
 
-fn preview_json(v: &Json, max_chars: usize) -> String {
-    let s = v.to_string();
+fn preview_str(s: &str, max_chars: usize) -> String {
     let n = s.chars().count();
     if n <= max_chars {
-        s
+        s.to_string()
     } else {
         let mut out: String = s.chars().take(max_chars).collect();
         out.push('…');

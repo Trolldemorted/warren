@@ -71,7 +71,7 @@
 
     {% for r in requests %}
     <div id="payload-{{ r.id }}" class="modal" role="dialog" aria-labelledby="payload-title-{{ r.id }}">
-      <a class="modal-backdrop" href="#" aria-label="Close"></a>
+      <a class="modal-bg" href="#" aria-label="Close"></a>
       <div class="modal-dialog" role="document">
         <div class="modal-header">
           <h5 class="modal-title" id="payload-title-{{ r.id }}">Payload · <code>{{ r.id }}</code></h5>
@@ -84,14 +84,14 @@
     </div>
     {% if r.response.is_some() %}
     <div id="response-{{ r.id }}" class="modal" role="dialog" aria-labelledby="response-title-{{ r.id }}">
-      <a class="modal-backdrop" href="#" aria-label="Close"></a>
+      <a class="modal-bg" href="#" aria-label="Close"></a>
       <div class="modal-dialog" role="document">
         <div class="modal-header">
           <h5 class="modal-title" id="response-title-{{ r.id }}">Response · <code>{{ r.id }}</code></h5>
           <a class="modal-close" href="#" aria-label="Close">×</a>
         </div>
         <div class="modal-body">
-          <pre class="payload mb-0">{{ r.response_full().as_deref().unwrap_or("") }}</pre>
+          <pre class="payload mb-0">{{ r.response_full().unwrap_or("") }}</pre>
         </div>
       </div>
     </div>

@@ -109,8 +109,8 @@ components:
         id: { type: string, format: uuid }
         target_class: { type: string }
         target_type: { type: string, nullable: true }
-        payload: {}
-        response: { nullable: true }
+        payload: { type: string }
+        response: { type: string, nullable: true }
         status:
           type: string
           description: |
@@ -135,7 +135,7 @@ components:
       properties:
         target_class: { type: string }
         target_type: { type: string, nullable: true }
-        payload: {}
+        payload: { type: string }
         channel_id:
           type: string
           format: uuid
@@ -148,7 +148,7 @@ components:
     RequestRespond:
       type: object
       properties:
-        response: {}
+        response: { type: string }
       required: [response]
     Error:
       type: object

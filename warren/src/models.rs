@@ -2,7 +2,6 @@
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 use std::fmt;
 use uuid::Uuid;
 
@@ -70,14 +69,14 @@ pub struct RequestNew {
     pub target_class: String,
     #[serde(default)]
     pub target_type: Option<String>,
-    pub payload: Value,
+    pub payload: String,
     #[serde(default)]
     pub channel_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RequestRespond {
-    pub response: Value,
+    pub response: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
