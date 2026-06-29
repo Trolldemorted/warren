@@ -7,7 +7,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY warren/Cargo.toml warren/
 COPY warren-cli/Cargo.toml warren-cli/
 RUN mkdir -p warren/src warren-cli/src \
- && echo "fn main(){}" > warren/src/main.rs \
+ && echo 'fn main(){println!("fake main")}' > warren/src/main.rs \
  && echo "fn main(){}" > warren-cli/src/main.rs \
  && cargo build --release --bin warren --bin warren-cli \
  && rm -rf warren/src warren-cli/src
