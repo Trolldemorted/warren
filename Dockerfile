@@ -8,7 +8,7 @@ COPY warren/Cargo.toml warren/
 COPY warren-cli/Cargo.toml warren-cli/
 RUN mkdir -p warren/src warren-cli/src \
  && echo 'fn main(){println!("fake main")}' > warren/src/main.rs \
- && echo "fn main(){}" > warren-cli/src/main.rs \
+ && echo "fn main(){println!("fake main")}" > warren-cli/src/main.rs \
  && cargo build --release --bin warren --bin warren-cli \
  && rm -rf warren/src warren-cli/src
 COPY warren/src warren/src
@@ -17,7 +17,7 @@ COPY warren/templates warren/templates
 COPY warren/openapi.yml warren/openapi.yml
 COPY warren/static warren/static
 COPY warren-cli/src warren-cli/src
-RUN cargo build --release --bin warren --bin warren-cli
+RUN touch warren/src/main.rs warren-cli/src/main.rs && cargo build --release --bin warren --bin warren-cli
 
 FROM debian:bookworm-slim AS swagger
 ARG SWAGGER_UI_VERSION=5.32.8
