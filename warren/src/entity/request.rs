@@ -108,6 +108,26 @@ impl Model {
     pub fn status_label(&self) -> &'static str {
         status_label(self.status)
     }
+
+    pub fn payload_preview(&self) -> String {
+        preview_json(&self.payload, 120)
+    }
+
+    pub fn response_preview(&self) -> Option<String> {
+        self.response.as_ref().map(|r| preview_json(r, 120))
+    }
+}
+
+fn preview_json(v: &Json, max_chars: usize) -> String {
+    let s = v.to_string();
+    let n = s.chars().count();
+    if n <= max_chars {
+        s
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
 }
 
 impl ActiveModelBehavior for ActiveModel {}

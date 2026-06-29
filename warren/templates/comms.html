@@ -22,10 +22,10 @@
         <tr>
           <td><small>{{ r.created_at }}</small></td>
           <td>{{ r.target_class }}{% if let Some(t) = r.target_type %}/{{ t }}{% endif %}</td>
-          <td><pre class="payload mb-0">{{ r.payload }}</pre></td>
+          <td><pre class="payload mb-0">{{ r.payload_preview() }}</pre></td>
           <td><small>{{ r.status_label() }}</small></td>
           <td><small class="text-muted">{% if let Some(c) = r.claimed_by %}{{ c }}{% else %}—{% endif %}</small></td>
-          <td>{% if let Some(resp) = r.response %}<pre class="payload mb-0">{{ resp }}</pre>{% else %}—{% endif %}</td>
+          <td>{% match r.response_preview() %}{% when Some(resp) %}<pre class="payload mb-0">{{ resp }}</pre>{% when None %}—{% endmatch %}</td>
           <td class="text-end">
             <a class="btn btn-sm btn-outline-secondary" href="/admin/comms/requests/{{ r.id }}/edit">Edit</a>
             {% if r.status == 0 %}

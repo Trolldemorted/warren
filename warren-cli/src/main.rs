@@ -10,8 +10,11 @@ fn is_admin() -> bool {
 fn build_cli() -> Command {
     let admin = is_admin();
 
-    let mut requests = Command::new("requests")
-        .about("List, create, claim, respond to, or approve/reject requests");
+    let mut requests = Command::new("requests").about(if admin {
+        "List, create, claim, respond to, or approve/reject requests"
+    } else {
+        "List, create, claim, or respond to requests"
+    });
     requests = requests.subcommand(Command::new("list").about("List requests").arg(
         Arg::new("status").long("status").num_args(1).value_parser([
             "pending_request_approval",
