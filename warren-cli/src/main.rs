@@ -1,132 +1,189 @@
-use clap::{Parser, Subcommand};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
 use std::process::ExitCode;
 
-#[derive(Parser, Debug)]
-#[command(name = "warren-cli", about = "warren admin + agent CLI", version)]
-struct Cli {
-    #[arg(long, env = "WARREN_URL")]
-    url: String,
-
-    #[arg(
-        long,
-        env = "WARREN_TOKEN",
-        help = "Admin session token (from /api/login) OR agent authtoken"
-    )]
-    token: String,
-
-    #[command(subcommand)]
-    cmd: Cmd,
+fn is_admin() -> bool {
+    std::env::var("WARREN_ADMIN").ok().as_deref() == Some("1")
 }
 
-#[derive(Subcommand, Debug)]
-enum Cmd {
-    /// Show the current authenticated principal (uses /api/agents/me).
-    Whoami,
+fn build_cli() -> Command {
+    let admin = is_admin();
 
-    /// List, create, or delete agents.
-    #[command(subcommand)]
-    Agents(AgentsCmd),
+    let mut requests = Command::new("requests").about("List, create, or approve/reject requests");
+    requests = requests.subcommand(Command::new("list").about("List requests").arg(
+        Arg::new("status").long("status").num_args(1).value_parser([
+            "pending_request_approval",
+            "pending_response_approval",
+            "done",
+            "rejected",
+        ]),
+    ));
+    requests = requests.subcommand(
+        Command::new("create")
+            .about("Create a request")
+            .arg(Arg::new("class").long("class").num_args(1).required(true))
+            .arg(Arg::new("kind").long("type").num_args(1).value_name("KIND"))
+            .arg(
+                Arg::new("file")
+                    .short('f')
+                    .long("file")
+                    .num_args(1)
+                    .conflicts_with("payload"),
+            )
+            .arg(
+                Arg::new("payload")
+                    .short('p')
+                    .long("payload")
+                    .num_args(1)
+                    .conflicts_with("file"),
+            )
+            .arg(
+                Arg::new("approve")
+                    .long("approve")
+                    .action(ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("channel")
+                    .long("channel")
+                    .num_args(1)
+                    .value_name("CHANNEL_ID"),
+            ),
+    );
+    requests = requests.subcommand(
+        Command::new("approve")
+            .about("Approve a pending request (admin)")
+            .hide(!admin)
+            .arg(Arg::new("id").num_args(1).required(true)),
+    );
+    requests = requests.subcommand(
+        Command::new("reject")
+            .about("Reject a pending request (admin)")
+            .hide(!admin)
+            .arg(Arg::new("id").num_args(1).required(true)),
+    );
+    requests = requests.subcommand(
+        Command::new("accept-response")
+            .about("Accept a response (admin)")
+            .hide(!admin)
+            .arg(Arg::new("id").num_args(1).required(true)),
+    );
+    requests = requests.subcommand(
+        Command::new("reject-response")
+            .about("Reject a response (admin)")
+            .hide(!admin)
+            .arg(Arg::new("id").num_args(1).required(true)),
+    );
 
-    /// List, create, approve, or reject requests.
-    #[command(subcommand)]
-    Requests(RequestsCmd),
+    let agents = Command::new("agents")
+        .about("List, create, or delete agents (admin)")
+        .subcommand(Command::new("list").about("List agents"))
+        .subcommand(
+            Command::new("create")
+                .about("Create an agent")
+                .arg(Arg::new("name").long("name").num_args(1).required(true))
+                .arg(Arg::new("class").long("class").num_args(1).required(true))
+                .arg(Arg::new("kind").long("kind").num_args(1))
+                .arg(Arg::new("model").long("model").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("delete")
+                .about("Delete an agent")
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .hide(!admin);
 
-    /// List, create, or delete channels (admin).
-    #[command(subcommand)]
-    Channels(ChannelsCmd),
+    let channels = Command::new("channels")
+        .about("List, create, or delete channels (admin)")
+        .subcommand(Command::new("list").about("List channels"))
+        .subcommand(
+            Command::new("create")
+                .about("Create a channel")
+                .arg(
+                    Arg::new("sender_class")
+                        .long("sender-class")
+                        .num_args(1)
+                        .required(true),
+                )
+                .arg(Arg::new("sender_kind").long("sender-kind").num_args(1))
+                .arg(
+                    Arg::new("receiver_class")
+                        .long("receiver-class")
+                        .num_args(1)
+                        .required(true),
+                )
+                .arg(Arg::new("receiver_kind").long("receiver-kind").num_args(1))
+                .arg(
+                    Arg::new("description")
+                        .long("description")
+                        .num_args(1)
+                        .required(true),
+                ),
+        )
+        .subcommand(
+            Command::new("delete")
+                .about("Delete a channel")
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .hide(!admin);
 
-    /// Agent inbox: list requests sent by, claimable by, claimed by, or
-    /// responded by you.
-    InboxRequests,
-    /// Atomically claim a request.
-    Claim { id: String },
-    /// Respond to a request you previously claimed.
-    Respond {
-        id: String,
-        #[arg(short, long, conflicts_with = "payload")]
-        file: Option<PathBuf>,
-        #[arg(short, long, conflicts_with = "file")]
-        payload: Option<String>,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum AgentsCmd {
-    List,
-    Create {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        class: String,
-        #[arg(long)]
-        kind: Option<String>,
-        #[arg(long)]
-        model: String,
-    },
-    Delete {
-        id: String,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum RequestsCmd {
-    List {
-        #[arg(long)]
-        status: Option<String>,
-    },
-    Create {
-        #[arg(long)]
-        class: String,
-        #[arg(long = "type")]
-        kind: Option<String>,
-        #[arg(short, long, conflicts_with = "payload")]
-        file: Option<PathBuf>,
-        #[arg(short, long, conflicts_with = "file")]
-        payload: Option<String>,
-        #[arg(long)]
-        approve: bool,
-        #[arg(long)]
-        channel: Option<String>,
-    },
-    Approve {
-        id: String,
-    },
-    Reject {
-        id: String,
-    },
-    AcceptResponse {
-        id: String,
-    },
-    RejectResponse {
-        id: String,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum ChannelsCmd {
-    List,
-    Create {
-        #[arg(long)]
-        sender_class: String,
-        #[arg(long)]
-        sender_kind: Option<String>,
-        #[arg(long)]
-        receiver_class: String,
-        #[arg(long)]
-        receiver_kind: Option<String>,
-        #[arg(long)]
-        description: String,
-    },
-    Delete {
-        id: String,
-    },
+    Command::new("warren-cli")
+        .about("warren admin + agent CLI")
+        .version(env!("CARGO_PKG_VERSION"))
+        .arg(
+            Arg::new("url")
+                .long("url")
+                .env("WARREN_URL")
+                .num_args(1)
+                .required(true),
+        )
+        .arg(
+            Arg::new("token")
+                .long("token")
+                .env("WARREN_TOKEN")
+                .num_args(1)
+                .required(true)
+                .help("Admin session token (from /api/login) OR agent authtoken"),
+        )
+        .subcommand(
+            Command::new("whoami")
+                .about("Show the current authenticated principal (uses /api/agents/me)"),
+        )
+        .subcommand(
+            Command::new("inbox-requests")
+                .about("List requests sent by, claimable by, claimed by, or responded by you"),
+        )
+        .subcommand(
+            Command::new("claim")
+                .about("Atomically claim a request")
+                .arg(Arg::new("id").num_args(1).required(true)),
+        )
+        .subcommand(
+            Command::new("respond")
+                .about("Respond to a request you previously claimed")
+                .arg(Arg::new("id").num_args(1).required(true))
+                .arg(
+                    Arg::new("file")
+                        .short('f')
+                        .long("file")
+                        .num_args(1)
+                        .conflicts_with("payload"),
+                )
+                .arg(
+                    Arg::new("payload")
+                        .short('p')
+                        .long("payload")
+                        .num_args(1)
+                        .conflicts_with("file"),
+                ),
+        )
+        .subcommand(requests)
+        .subcommand(agents)
+        .subcommand(channels)
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = build_cli().get_matches();
     let agent = ureq::AgentBuilder::new().build();
 
     let res = run(&cli, &agent);
@@ -142,105 +199,154 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
-    match &cli.cmd {
-        Cmd::Whoami => {
-            let body = cli.get(agent, "/api/agents/me")?;
+fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
+    let url = cli.get_one::<String>("url").unwrap().clone();
+    let token = cli.get_one::<String>("token").unwrap().clone();
+
+    match cli.subcommand() {
+        Some(("whoami", _)) => {
+            let body = http_get(agent, &url, &token, "/api/agents/me")?;
             Ok(strip_authtoken(&body))
         }
 
-        Cmd::Agents(AgentsCmd::List) => cli.get(agent, "/api/agents"),
-        Cmd::Agents(AgentsCmd::Create {
-            name,
-            class,
-            kind,
-            model,
-        }) => {
-            let body = serde_json::json!({
-                "name": name,
-                "class": class,
-                "kind": kind,
-                "model": model,
-            });
-            cli.post(agent, "/api/agents", &body.to_string())
-        }
-        Cmd::Agents(AgentsCmd::Delete { id }) => cli.delete(agent, &format!("/api/agents/{id}")),
+        Some(("agents", m)) => match m.subcommand() {
+            Some(("list", _)) => http_get(agent, &url, &token, "/api/agents"),
+            Some(("create", sc)) => {
+                let body = serde_json::json!({
+                    "name": sc.get_one::<String>("name").unwrap(),
+                    "class": sc.get_one::<String>("class").unwrap(),
+                    "kind": sc.get_one::<String>("kind").map(String::as_str),
+                    "model": sc.get_one::<String>("model").unwrap(),
+                });
+                http_post(agent, &url, &token, "/api/agents", &body.to_string())
+            }
+            Some(("delete", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_delete(agent, &url, &token, &format!("/api/agents/{id}"))
+            }
+            _ => unreachable!(),
+        },
 
-        Cmd::Requests(RequestsCmd::List { status }) => {
-            let q = status
-                .as_deref()
-                .map(|s| format!("?status={}", urlencode(s)))
-                .unwrap_or_default();
-            cli.get(agent, &format!("/api/requests{q}"))
-        }
-        Cmd::Requests(RequestsCmd::Create {
-            class,
-            kind,
-            file,
-            payload,
-            approve,
-            channel,
-        }) => {
-            let payload = read_payload(file.as_deref(), payload.as_deref());
-            let body = serde_json::json!({
-                "target_class": class,
-                "target_type": kind,
-                "payload": payload,
-                "approved": approve,
-                "channel_id": channel,
-            });
-            cli.post(agent, "/api/requests", &body.to_string())
-        }
-        Cmd::Requests(RequestsCmd::Approve { id }) => {
-            cli.post(agent, &format!("/api/requests/{id}/approve"), "")
-        }
-        Cmd::Requests(RequestsCmd::Reject { id }) => {
-            cli.post(agent, &format!("/api/requests/{id}/reject"), "")
-        }
-        Cmd::Requests(RequestsCmd::AcceptResponse { id }) => {
-            cli.post(agent, &format!("/api/requests/{id}/accept-response"), "")
-        }
-        Cmd::Requests(RequestsCmd::RejectResponse { id }) => {
-            cli.post(agent, &format!("/api/requests/{id}/reject-response"), "")
-        }
+        Some(("requests", m)) => match m.subcommand() {
+            Some(("list", sc)) => {
+                let q = sc
+                    .get_one::<String>("status")
+                    .map(|s| format!("?status={}", urlencode(s)))
+                    .unwrap_or_default();
+                http_get(agent, &url, &token, &format!("/api/requests{q}"))
+            }
+            Some(("create", sc)) => {
+                let payload = read_payload(
+                    sc.get_one::<String>("file"),
+                    sc.get_one::<String>("payload"),
+                );
+                let body = serde_json::json!({
+                    "target_class": sc.get_one::<String>("class").unwrap(),
+                    "target_type": sc.get_one::<String>("kind").map(String::as_str),
+                    "payload": payload,
+                    "approved": sc.get_flag("approve"),
+                    "channel_id": sc.get_one::<String>("channel").map(String::as_str),
+                });
+                http_post(agent, &url, &token, "/api/requests", &body.to_string())
+            }
+            Some(("approve", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_post(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/requests/{id}/approve"),
+                    "",
+                )
+            }
+            Some(("reject", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_post(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/requests/{id}/reject"),
+                    "",
+                )
+            }
+            Some(("accept-response", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_post(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/requests/{id}/accept-response"),
+                    "",
+                )
+            }
+            Some(("reject-response", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_post(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/requests/{id}/reject-response"),
+                    "",
+                )
+            }
+            _ => unreachable!(),
+        },
 
-        Cmd::Channels(ChannelsCmd::List) => cli.get(agent, "/api/channels"),
-        Cmd::Channels(ChannelsCmd::Create {
-            sender_class,
-            sender_kind,
-            receiver_class,
-            receiver_kind,
-            description,
-        }) => {
-            let body = serde_json::json!({
-                "sender_class": sender_class,
-                "sender_kind": sender_kind,
-                "receiver_class": receiver_class,
-                "receiver_kind": receiver_kind,
-                "description": description,
-            });
-            cli.post(agent, "/api/channels", &body.to_string())
-        }
-        Cmd::Channels(ChannelsCmd::Delete { id }) => {
-            cli.delete(agent, &format!("/api/channels/{id}"))
-        }
+        Some(("channels", m)) => match m.subcommand() {
+            Some(("list", _)) => http_get(agent, &url, &token, "/api/channels"),
+            Some(("create", sc)) => {
+                let body = serde_json::json!({
+                    "sender_class": sc.get_one::<String>("sender_class").unwrap(),
+                    "sender_kind": sc.get_one::<String>("sender_kind").map(String::as_str),
+                    "receiver_class": sc.get_one::<String>("receiver_class").unwrap(),
+                    "receiver_kind": sc.get_one::<String>("receiver_kind").map(String::as_str),
+                    "description": sc.get_one::<String>("description").unwrap(),
+                });
+                http_post(agent, &url, &token, "/api/channels", &body.to_string())
+            }
+            Some(("delete", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_delete(agent, &url, &token, &format!("/api/channels/{id}"))
+            }
+            _ => unreachable!(),
+        },
 
-        Cmd::InboxRequests => cli.get(agent, "/api/requests"),
-        Cmd::Claim { id } => cli.post(agent, &format!("/api/requests/{id}/claim"), ""),
-        Cmd::Respond { id, file, payload } => {
-            let payload = read_payload(file.as_deref(), payload.as_deref());
+        Some(("inbox-requests", _)) => http_get(agent, &url, &token, "/api/requests"),
+        Some(("claim", sc)) => {
+            let id = sc.get_one::<String>("id").unwrap();
+            http_post(
+                agent,
+                &url,
+                &token,
+                &format!("/api/requests/{id}/claim"),
+                "",
+            )
+        }
+        Some(("respond", sc)) => {
+            let id = sc.get_one::<String>("id").unwrap();
+            let payload = read_payload(
+                sc.get_one::<String>("file"),
+                sc.get_one::<String>("payload"),
+            );
             let body = serde_json::json!({ "response": payload }).to_string();
-            cli.post(agent, &format!("/api/requests/{id}/respond"), &body)
+            http_post(
+                agent,
+                &url,
+                &token,
+                &format!("/api/requests/{id}/respond"),
+                &body,
+            )
         }
+        _ => unreachable!(),
     }
 }
 
-fn read_payload(file: Option<&Path>, payload: Option<&str>) -> Value {
+fn read_payload(file: Option<&String>, payload: Option<&String>) -> Value {
     match (file, payload) {
         (Some(p), _) => match fs::read_to_string(p) {
             Ok(s) => serde_json::from_str(&s).unwrap_or(Value::String(s)),
             Err(e) => {
-                eprintln!("read {}: {e}", p.display());
+                eprintln!("read {p}: {e}");
                 Value::Null
             }
         },
@@ -248,8 +354,6 @@ fn read_payload(file: Option<&Path>, payload: Option<&str>) -> Value {
         (None, None) => Value::Null,
     }
 }
-
-use std::path::Path;
 
 fn strip_authtoken(body: &str) -> String {
     let Ok(mut v) = serde_json::from_str::<Value>(body) else {
@@ -270,36 +374,41 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
-impl Cli {
-    fn auth(&self) -> String {
-        format!("Bearer {}", self.token)
+fn http_get(agent: &ureq::Agent, base: &str, token: &str, path: &str) -> Result<String, String> {
+    let url = format!("{}{path}", base.trim_end_matches('/'));
+    agent
+        .get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .map_err(|e| format!("{e}"))
+        .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))
+}
+
+fn http_post(
+    agent: &ureq::Agent,
+    base: &str,
+    token: &str,
+    path: &str,
+    body: &str,
+) -> Result<String, String> {
+    let url = format!("{}{path}", base.trim_end_matches('/'));
+    let mut rb = agent
+        .post(&url)
+        .set("Authorization", &format!("Bearer {token}"));
+    if !body.is_empty() {
+        rb = rb.set("Content-Type", "application/json");
     }
-    fn get(&self, agent: &ureq::Agent, path: &str) -> Result<String, String> {
-        let url = format!("{}{path}", self.url.trim_end_matches('/'));
-        agent
-            .get(&url)
-            .set("Authorization", &self.auth())
-            .call()
-            .map_err(|e| format!("{e}"))
-            .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))
-    }
-    fn post(&self, agent: &ureq::Agent, path: &str, body: &str) -> Result<String, String> {
-        let url = format!("{}{path}", self.url.trim_end_matches('/'));
-        let mut rb = agent.post(&url).set("Authorization", &self.auth());
-        if !body.is_empty() {
-            rb = rb.set("Content-Type", "application/json");
-        }
-        rb.send_string(body)
-            .map_err(|e| format!("{e}"))
-            .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))
-    }
-    fn delete(&self, agent: &ureq::Agent, path: &str) -> Result<String, String> {
-        let url = format!("{}{path}", self.url.trim_end_matches('/'));
-        agent
-            .delete(&url)
-            .set("Authorization", &self.auth())
-            .call()
-            .map_err(|e| format!("{e}"))
-            .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))
-    }
+    rb.send_string(body)
+        .map_err(|e| format!("{e}"))
+        .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))
+}
+
+fn http_delete(agent: &ureq::Agent, base: &str, token: &str, path: &str) -> Result<String, String> {
+    let url = format!("{}{path}", base.trim_end_matches('/'));
+    agent
+        .delete(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+        .map_err(|e| format!("{e}"))
+        .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))
 }
