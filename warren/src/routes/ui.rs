@@ -401,7 +401,7 @@ async fn inject_create_req(
     if let Err(e) = crate::db_ops::create_request(
         &state.db,
         &new,
-        crate::entity::request::AWAITING_RESPONSE,
+        crate::entity::request::AWAITING_AGENT_REQUEST_CLAIM,
         None,
     )
     .await
@@ -422,8 +422,8 @@ async fn message_approve_request(
     match crate::db_ops::set_request_status(
         &state.db,
         id,
-        crate::entity::request::PENDING_REQUEST_APPROVAL,
-        crate::entity::request::AWAITING_RESPONSE,
+        crate::entity::request::AWAITING_ADMIN_REQUEST_APPROVAL,
+        crate::entity::request::AWAITING_AGENT_REQUEST_CLAIM,
     )
     .await
     {
@@ -443,7 +443,7 @@ async fn message_reject_request(
     match crate::db_ops::set_request_status(
         &state.db,
         id,
-        crate::entity::request::PENDING_REQUEST_APPROVAL,
+        crate::entity::request::AWAITING_ADMIN_REQUEST_APPROVAL,
         crate::entity::request::REJECTED,
     )
     .await

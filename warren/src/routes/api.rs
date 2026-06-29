@@ -179,7 +179,7 @@ struct ListQuery {
     status: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
-    include_acknowledged: Option<bool>,
+    include_done: Option<bool>,
 }
 
 async fn api_list_requests(
@@ -197,13 +197,13 @@ async fn api_list_requests(
         }
         AuthContext::Agent(a) => {
             let _ = (q.limit, q.offset);
-            let include_acknowledged = q.include_acknowledged.unwrap_or(false);
+            let include_done = q.include_done.unwrap_or(false);
             let rows = crate::db_ops::list_requests_for_agent(
                 &state.db,
                 a.0.id,
                 &a.0.class,
                 a.0.kind.as_deref(),
-                include_acknowledged,
+                include_done,
             )
             .await?;
             Ok(Json(rows))
@@ -218,8 +218,8 @@ async fn api_create_request(
 ) -> AppResult<Json<request::Model>> {
     // Admin POSTs auto-skip request approval; agent POSTs go through review.
     let (initial_status, sender_agent_id) = match &ctx {
-        AuthContext::Admin(_) => (request::AWAITING_RESPONSE, None),
-        AuthContext::Agent(a) => (request::PENDING_REQUEST_APPROVAL, Some(a.0.id)),
+        AuthContext::Admin(_) => (request::AWAITING_AGENT_REQUEST_CLAIM, None),
+        AuthContext::Agent(a) => (request::AWAITING_ADMIN_REQUEST_APPROVAL, Some(a.0.id)),
     };
     if new.target_class.trim().is_empty() {
         return Err(AppError::BadRequest("target_class required".into()));
@@ -255,7 +255,7 @@ async fn api_get_request(
         AuthContext::Agent(a) => {
             let sent_self = r.sender_agent_id.map(|s| s == a.0.id).unwrap_or(false);
             let claims_self = r.claimed_by.map(|cb| cb == a.0.id).unwrap_or(false);
-            let in_inbox = r.status == request::AWAITING_RESPONSE
+            let in_inbox = r.status == request::AWAITING_AGENT_REQUEST_CLAIM
                 && r.claimed_by.is_none()
                 && r.target_class == a.0.class
                 && (r.target_type.is_none() || r.target_type.as_deref() == a.0.kind.as_deref());
@@ -308,8 +308,8 @@ async fn api_approve_request(
     crate::db_ops::set_request_status(
         &state.db,
         id,
-        request::PENDING_REQUEST_APPROVAL,
-        request::AWAITING_RESPONSE,
+        request::AWAITING_ADMIN_REQUEST_APPROVAL,
+        request::AWAITING_AGENT_REQUEST_CLAIM,
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -324,7 +324,7 @@ async fn api_reject_request(
     crate::db_ops::set_request_status(
         &state.db,
         id,
-        request::PENDING_REQUEST_APPROVAL,
+        request::AWAITING_ADMIN_REQUEST_APPROVAL,
         request::REJECTED,
     )
     .await?;
@@ -377,11 +377,19 @@ async fn api_unacknowledge_request(
 fn parse_request_status(s: Option<&str>) -> AppResult<Option<i16>> {
     match s {
         None => Ok(None),
-        Some("pending_request_approval") => Ok(Some(request::PENDING_REQUEST_APPROVAL)),
-        Some("awaiting_response") => Ok(Some(request::AWAITING_RESPONSE)),
+        Some("awaiting_admin_request_approval") => {
+            Ok(Some(request::AWAITING_ADMIN_REQUEST_APPROVAL))
+        }
+        Some("awaiting_agent_request_claim") => Ok(Some(request::AWAITING_AGENT_REQUEST_CLAIM)),
+        Some("awaiting_agent_response") => Ok(Some(request::AWAITING_AGENT_RESPONSE)),
+        Some("awaiting_admin_response_approval") => {
+            Ok(Some(request::AWAITING_ADMIN_RESPONSE_APPROVAL))
+        }
+        Some("awaiting_agent_response_acknowledge") => {
+            Ok(Some(request::AWAITING_AGENT_RESPONSE_ACKNOWLEDGE))
+        }
         Some("done") => Ok(Some(request::DONE)),
         Some("rejected") => Ok(Some(request::REJECTED)),
-        Some("acknowledged") => Ok(Some(request::ACKNOWLEDGED)),
         Some(other) => Err(AppError::BadRequest(format!("unknown status '{other}'"))),
     }
 }

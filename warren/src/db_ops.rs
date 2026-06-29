@@ -112,8 +112,8 @@ pub async fn list_all_requests(
 }
 
 /// All requests an agent should see at `/api/requests`:
-/// - sent by them (regardless of status, unless `include_acknowledged = false`)
-/// - claimable now (matching class+kind, pending, unclaimed)
+/// - sent by them (regardless of status, unless `include_done = false`)
+/// - claimable now (matching class+kind, awaiting claim, unclaimed)
 /// - claimed by them (any status where they hold the claim)
 /// - responded by them (response set, may still be waiting for admin approval)
 pub async fn list_requests_for_agent(
@@ -121,12 +121,12 @@ pub async fn list_requests_for_agent(
     agent_id: Uuid,
     class: &str,
     kind: Option<&str>,
-    include_acknowledged: bool,
+    include_done: bool,
 ) -> AppResult<Vec<request::Model>> {
     let mut sent = Condition::all().add(request::Column::SenderAgentId.eq(agent_id));
     let mut claimed = Condition::all().add(request::Column::ClaimedBy.eq(agent_id));
     let mut inbox = Condition::all()
-        .add(request::Column::Status.eq(request::AWAITING_RESPONSE))
+        .add(request::Column::Status.eq(request::AWAITING_AGENT_REQUEST_CLAIM))
         .add(request::Column::ClaimedBy.is_null())
         .add(request::Column::TargetClass.eq(class.to_string()));
     match kind {
@@ -139,11 +139,11 @@ pub async fn list_requests_for_agent(
             inbox = inbox.add(request::Column::TargetType.is_null());
         }
     }
-    if !include_acknowledged {
-        let not_ack = request::Column::Status.ne(request::ACKNOWLEDGED);
-        sent = sent.add(not_ack.clone());
-        claimed = claimed.add(not_ack.clone());
-        inbox = inbox.add(not_ack);
+    if !include_done {
+        let not_done = request::Column::Status.ne(request::DONE);
+        sent = sent.add(not_done.clone());
+        claimed = claimed.add(not_done.clone());
+        inbox = inbox.add(not_done);
     }
     let where_clause = Condition::any().add(sent).add(inbox).add(claimed);
     Ok(request::Entity::find()
@@ -187,7 +187,7 @@ pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<reque
             Expr::value(Some(chrono::Utc::now())),
         )
         .filter(request::Column::Id.eq(id))
-        .filter(request::Column::Status.eq(request::AWAITING_RESPONSE))
+        .filter(request::Column::Status.eq(request::AWAITING_AGENT_REQUEST_CLAIM))
         .filter(request::Column::ClaimedBy.is_null())
         .filter(request::Column::TargetClass.in_subquery(class_subquery))
         .filter(target_type_match)
@@ -212,7 +212,7 @@ pub async fn respond_to_request(
         )
         .filter(request::Column::Id.eq(id))
         .filter(request::Column::ClaimedBy.eq(agent_id))
-        .filter(request::Column::Status.eq(request::AWAITING_RESPONSE))
+        .filter(request::Column::Status.eq(request::AWAITING_AGENT_RESPONSE))
         .filter(request::Column::Response.is_null())
         .exec_with_returning(db)
         .await?;
@@ -239,9 +239,12 @@ pub async fn set_request_status(db: &Db, id: Uuid, from: i16, to: i16) -> AppRes
 
 pub async fn accept_request_response(db: &Db, id: Uuid) -> AppResult<()> {
     let res = request::Entity::update_many()
-        .col_expr(request::Column::Status, Expr::value(request::DONE))
+        .col_expr(
+            request::Column::Status,
+            Expr::value(request::AWAITING_AGENT_RESPONSE_ACKNOWLEDGE),
+        )
         .filter(request::Column::Id.eq(id))
-        .filter(request::Column::Status.eq(request::AWAITING_RESPONSE))
+        .filter(request::Column::Status.eq(request::AWAITING_ADMIN_RESPONSE_APPROVAL))
         .filter(request::Column::Response.is_not_null())
         .exec(db)
         .await?;
@@ -266,8 +269,12 @@ pub async fn reject_request_response(db: &Db, id: Uuid) -> AppResult<()> {
             request::Column::RespondedAt,
             Expr::value(None as Option<chrono::DateTime<chrono::Utc>>),
         )
+        .col_expr(
+            request::Column::Status,
+            Expr::value(request::AWAITING_AGENT_REQUEST_CLAIM),
+        )
         .filter(request::Column::Id.eq(id))
-        .filter(request::Column::Status.eq(request::AWAITING_RESPONSE))
+        .filter(request::Column::Status.eq(request::AWAITING_ADMIN_RESPONSE_APPROVAL))
         .filter(request::Column::Response.is_not_null())
         .exec(db)
         .await?;
@@ -277,11 +284,10 @@ pub async fn reject_request_response(db: &Db, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// Mark a `done` request as acknowledged by an agent (or by an admin on
-/// the agent's behalf). Sets `status = ACKNOWLEDGED` and stamps
-/// `acknowledged_at`. Atomic; if the row is not in `done` state, or
-/// `by_admin = false` and the caller is neither sender nor claimer,
-/// returns `Conflict`.
+/// Mark an `awaiting_agent_response_acknowledge` request as `done` by an
+/// agent (or by an admin on the agent's behalf). Atomic; if the row is not in
+/// that state, or `by_admin = false` and the caller is neither sender nor
+/// claimer, returns `Conflict`.
 pub async fn acknowledge_request(
     db: &Db,
     id: Uuid,
@@ -289,13 +295,13 @@ pub async fn acknowledge_request(
     by_admin: bool,
 ) -> AppResult<request::Model> {
     let mut q = request::Entity::update_many()
-        .col_expr(request::Column::Status, Expr::value(request::ACKNOWLEDGED))
+        .col_expr(request::Column::Status, Expr::value(request::DONE))
         .col_expr(
             request::Column::AcknowledgedAt,
             Expr::value(chrono::Utc::now()),
         )
         .filter(request::Column::Id.eq(id))
-        .filter(request::Column::Status.eq(request::DONE));
+        .filter(request::Column::Status.eq(request::AWAITING_AGENT_RESPONSE_ACKNOWLEDGE));
     if !by_admin {
         let owned = request::Column::SenderAgentId
             .eq(caller_id)
@@ -309,20 +315,23 @@ pub async fn acknowledge_request(
         .ok_or_else(|| AppError::Conflict("request not done yet or not owned by caller".into()))
 }
 
-/// Admin-only: revert an `acknowledged` request back to `done`.
+/// Admin-only: revert a `done` request back to awaiting-agent-acknowledge.
 pub async fn unacknowledge_request(db: &Db, id: Uuid) -> AppResult<()> {
     let res = request::Entity::update_many()
-        .col_expr(request::Column::Status, Expr::value(request::DONE))
+        .col_expr(
+            request::Column::Status,
+            Expr::value(request::AWAITING_AGENT_RESPONSE_ACKNOWLEDGE),
+        )
         .col_expr(
             request::Column::AcknowledgedAt,
             Expr::value(None as Option<chrono::DateTime<chrono::Utc>>),
         )
         .filter(request::Column::Id.eq(id))
-        .filter(request::Column::Status.eq(request::ACKNOWLEDGED))
+        .filter(request::Column::Status.eq(request::DONE))
         .exec(db)
         .await?;
     if res.rows_affected == 0 {
-        return Err(AppError::Conflict("request not acknowledged".into()));
+        return Err(AppError::Conflict("request not done".into()));
     }
     Ok(())
 }

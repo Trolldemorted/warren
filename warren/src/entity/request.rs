@@ -3,30 +3,36 @@ use sea_orm::sea_query::{ConditionalStatement, Expr, Index, IndexCreateStatement
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value as Json;
 
-pub const PENDING_REQUEST_APPROVAL: i16 = 0;
-pub const AWAITING_RESPONSE: i16 = 1;
-pub const DONE: i16 = 2;
-pub const REJECTED: i16 = 3;
-pub const ACKNOWLEDGED: i16 = 4;
+pub const AWAITING_ADMIN_REQUEST_APPROVAL: i16 = 0;
+pub const AWAITING_AGENT_REQUEST_CLAIM: i16 = 1;
+pub const AWAITING_AGENT_RESPONSE: i16 = 2;
+pub const AWAITING_ADMIN_RESPONSE_APPROVAL: i16 = 3;
+pub const AWAITING_AGENT_RESPONSE_ACKNOWLEDGE: i16 = 4;
+pub const DONE: i16 = 5;
+pub const REJECTED: i16 = 6;
 
 pub fn status_label(s: i16) -> &'static str {
     match s {
-        PENDING_REQUEST_APPROVAL => "pending_request_approval",
-        AWAITING_RESPONSE => "awaiting_response",
+        AWAITING_ADMIN_REQUEST_APPROVAL => "awaiting_admin_request_approval",
+        AWAITING_AGENT_REQUEST_CLAIM => "awaiting_agent_request_claim",
+        AWAITING_AGENT_RESPONSE => "awaiting_agent_response",
+        AWAITING_ADMIN_RESPONSE_APPROVAL => "awaiting_admin_response_approval",
+        AWAITING_AGENT_RESPONSE_ACKNOWLEDGE => "awaiting_agent_response_acknowledge",
         DONE => "done",
         REJECTED => "rejected",
-        ACKNOWLEDGED => "acknowledged",
         _ => "unknown",
     }
 }
 
 fn label_to_status(label: &str) -> Option<i16> {
     match label {
-        "pending_request_approval" => Some(PENDING_REQUEST_APPROVAL),
-        "awaiting_response" => Some(AWAITING_RESPONSE),
+        "awaiting_admin_request_approval" => Some(AWAITING_ADMIN_REQUEST_APPROVAL),
+        "awaiting_agent_request_claim" => Some(AWAITING_AGENT_REQUEST_CLAIM),
+        "awaiting_agent_response" => Some(AWAITING_AGENT_RESPONSE),
+        "awaiting_admin_response_approval" => Some(AWAITING_ADMIN_RESPONSE_APPROVAL),
+        "awaiting_agent_response_acknowledge" => Some(AWAITING_AGENT_RESPONSE_ACKNOWLEDGE),
         "done" => Some(DONE),
         "rejected" => Some(REJECTED),
-        "acknowledged" => Some(ACKNOWLEDGED),
         _ => None,
     }
 }
@@ -151,7 +157,7 @@ pub fn extra_indexes() -> Vec<IndexCreateStatement> {
             .table(Entity)
             .col(Column::TargetClass)
             .col(Column::TargetType)
-            .and_where(Expr::col(Column::Status).eq(AWAITING_RESPONSE))
+            .and_where(Expr::col(Column::Status).eq(AWAITING_AGENT_REQUEST_CLAIM))
             .and_where(Expr::col(Column::ClaimedBy).is_null())
             .to_owned(),
         Index::create()

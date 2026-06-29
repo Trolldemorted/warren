@@ -114,12 +114,14 @@ components:
         status:
           type: string
           description: |
-            pending_request_approval — admin has not approved the request yet
-            awaiting_response — admin has approved; waiting for a recipient agent to claim and respond
-            done — response accepted by admin
-            rejected — admin rejected the request or its response
-            acknowledged — agent has marked the accepted response as consumed
-          enum: [pending_request_approval, awaiting_response, done, rejected, acknowledged]
+            awaiting_admin_request_approval — admin has not approved the request yet (0)
+            awaiting_agent_request_claim — admin approved; waiting for an agent to claim (1)
+            awaiting_agent_response — agent claimed; waiting for the agent to respond (2)
+            awaiting_admin_response_approval — agent responded; waiting for admin to accept/reject (3)
+            awaiting_agent_response_acknowledge — admin accepted; waiting for the agent to acknowledge (4)
+            done — agent has acknowledged the accepted response (5)
+            rejected — admin rejected the request or its response (6)
+          enum: [awaiting_admin_request_approval, awaiting_agent_request_claim, awaiting_agent_response, awaiting_admin_response_approval, awaiting_agent_response_acknowledge, done, rejected]
         sender_agent_id: { type: string, format: uuid, nullable: true }
         claimed_by: { type: string, format: uuid, nullable: true }
         claimed_at: { type: string, format: date-time, nullable: true }
@@ -346,7 +348,7 @@ paths:
           name: status
           schema:
             type: string
-            enum: [pending_request_approval, awaiting_response, done, rejected, acknowledged]
+            enum: [awaiting_admin_request_approval, awaiting_agent_request_claim, awaiting_agent_response, awaiting_admin_response_approval, awaiting_agent_response_acknowledge, done, rejected]
         - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
@@ -354,9 +356,9 @@ paths:
           name: offset
           schema: { type: integer, minimum: 0, default: 0 }
         - in: query
-          name: include_acknowledged
+          name: include_done
           description: |
-            Agent-only. When true, `acknowledged` rows surface in the listing.
+            Agent-only. When true, `done` rows surface in the listing.
             Defaults to false so the inbox stays focused on actionable rows.
           schema: { type: boolean, default: false }
       responses:
@@ -371,9 +373,9 @@ paths:
       tags: [admin, agent]
       summary: Create request (admin or agent)
       description: |
-        Admin POSTs auto-skip `pending_request_approval` and land directly in
-        `awaiting_response` (status 1). Agent POSTs always go through
-        admin review first (status 0) and record the sender as the agent.
+        Admin POSTs auto-skip `awaiting_admin_request_approval` and land directly
+        in `awaiting_agent_request_claim` (status 1). Agent POSTs always go
+        through admin review first (status 0) and record the sender as the agent.
       security:
         - adminSession: []
         - agentToken: []
@@ -456,7 +458,7 @@ paths:
   /api/requests/{id}/approve:
     post:
       tags: [admin]
-      summary: "Approve a pending_request_approval request: 0 -> 1 (admin)"
+      summary: "Approve an awaiting_admin_request_approval request: 0 -> 1 (admin)"
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -465,11 +467,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204': { description: OK }
-        '409': { description: Not in pending_request_approval }
+        '409': { description: Not in awaiting_admin_request_approval }
   /api/requests/{id}/reject:
     post:
       tags: [admin]
-      summary: "Reject a pending_request_approval request: 0 -> 3 (admin)"
+      summary: "Reject an awaiting_admin_request_approval request: 0 -> 6 (admin)"
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -478,11 +480,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204': { description: OK }
-        '409': { description: Not in pending_request_approval }
+        '409': { description: Not in awaiting_admin_request_approval }
   /api/requests/{id}/accept-response:
     post:
       tags: [admin]
-      summary: "Accept a response: 1 -> 2 (admin). Requires response to be set."
+      summary: "Accept a response: 3 -> 4 (admin). Requires response to be set."
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -495,7 +497,7 @@ paths:
   /api/requests/{id}/reject-response:
     post:
       tags: [admin]
-      summary: "Reject a response: clear response and claim, stay at status 1 (admin)"
+      summary: "Reject a response: clear response and claim, back to status 1 (admin)"
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -508,11 +510,11 @@ paths:
   /api/requests/{id}/acknowledge:
     post:
       tags: [agent, admin]
-      summary: "Mark an accepted response as consumed (status 2 -> 4)"
+      summary: "Mark an accepted response as consumed (status 4 -> 5)"
       description: |
-        Agents may acknowledge a `done` request they sent or claimed.
-        Admins may acknowledge any `done` request on the agent's behalf.
-        No-op (409) if the row is not currently `done`.
+        Agents may acknowledge an `awaiting_agent_response_acknowledge` request
+        they sent or claimed. Admins may acknowledge any on the agent's behalf.
+        No-op (409) if the row is not currently in that state.
       security:
         - adminSession: []
         - agentToken: []
@@ -528,11 +530,11 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Request' }
         '409':
-          description: Request not done yet, or (for agents) not owned by caller.
+          description: Request not awaiting acknowledgement, or (for agents) not owned by caller.
   /api/requests/{id}/unacknowledge:
     post:
       tags: [admin]
-      summary: "Revert a request from acknowledged back to done (admin)"
+      summary: "Revert a `done` request back to awaiting_agent_response_acknowledge (admin)"
       security: [{ adminSession: [] }]
       parameters:
         - in: path
@@ -541,4 +543,4 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204': { description: OK }
-        '409': { description: Request not acknowledged }
+        '409': { description: Request not done }

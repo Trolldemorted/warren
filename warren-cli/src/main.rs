@@ -19,16 +19,18 @@ fn build_requests_cmd(admin: bool) -> Command {
             Command::new("list")
                 .about("List requests")
                 .arg(Arg::new("status").long("status").num_args(1).value_parser([
-                    "pending_request_approval",
-                    "awaiting_response",
+                    "awaiting_admin_request_approval",
+                    "awaiting_agent_request_claim",
+                    "awaiting_agent_response",
+                    "awaiting_admin_response_approval",
+                    "awaiting_agent_response_acknowledge",
                     "done",
                     "rejected",
-                    "acknowledged",
                 ]))
                 .arg(
                     Arg::new("all")
                         .long("all")
-                        .help("Include acknowledged rows in the listing")
+                        .help("Include done rows in the listing")
                         .action(ArgAction::SetTrue),
                 ),
         )
@@ -95,12 +97,12 @@ fn build_requests_cmd(admin: bool) -> Command {
         )
         .subcommand(
             Command::new("acknowledge")
-                .about("Mark an accepted response as consumed (status 4)")
+                .about("Mark an accepted response as consumed (status 4 → 5)")
                 .arg(Arg::new("id").num_args(1).required(true)),
         )
         .subcommand(
             Command::new("unacknowledge")
-                .about("Revert acknowledged back to done (admin)")
+                .about("Revert a done request back to awaiting agent acknowledgement (admin)")
                 .hide(!admin)
                 .arg(Arg::new("id").num_args(1).required(true)),
         )
@@ -273,7 +275,7 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                     q.push(format!("status={}", urlencode(s)));
                 }
                 if sc.get_flag("all") {
-                    q.push("include_acknowledged=true".to_string());
+                    q.push("include_done=true".to_string());
                 }
                 let qs = if q.is_empty() {
                     String::new()

@@ -54,7 +54,7 @@
                 <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
               </form>
               {% endif %}
-              {% if r.status == 1 && r.response.is_some() %}
+              {% if r.status == 3 %}
               <form method="post" action="/admin/comms/requests/{{ r.id }}/approve-response" class="d-inline">
                 <button class="btn btn-sm btn-success" type="submit">Accept</button>
               </form>
