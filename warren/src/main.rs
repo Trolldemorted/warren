@@ -40,8 +40,8 @@ enum Command {
     /// Start the HTTP server.
     Server,
     /// Run `atlas migrate apply` against $DATABASE_URL using warren/migrations_atlas.
-    #[command(name = "applyMigration")]
-    ApplyMigration,
+    #[command(name = "applyMigrations")]
+    ApplyMigrations,
     /// Emit CREATE TABLE SQL for every entity to stdout.
     DumpSchema,
 }
@@ -72,7 +72,7 @@ fn main() {
     let result = runtime.block_on(async move {
         match cli.command {
             Command::Server => run_server().await,
-            Command::ApplyMigration => run_apply_migration().await,
+            Command::ApplyMigrations => run_apply_migrations().await,
             Command::DumpSchema => run_dump_schema().await,
         }
     });
@@ -131,8 +131,8 @@ fn redact_url(url: &str) -> String {
     url.to_string()
 }
 
-async fn run_apply_migration() -> anyhow::Result<()> {
-    let cfg = Config::from_env().context("loading configuration")?;
+async fn run_apply_migrations() -> anyhow::Result<()> {
+    let cfg = Config::from_env_for_migrations().context("loading configuration")?;
     let migrations_dir = std::env::current_dir()
         .context("getting current directory")?
         .join("warren/migrations_atlas");

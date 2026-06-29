@@ -38,4 +38,25 @@ impl Config {
             docs_dir,
         })
     }
+
+    /// Load only what's needed to run `atlas migrate apply`: just the
+    /// database URL. The admin PSK is irrelevant for migrations.
+    pub fn from_env_for_migrations() -> anyhow::Result<Self> {
+        let database_url = env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "host=localhost user=warren password=warren dbname=warren".into());
+        let static_dir = env::var("WARREN_STATIC_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static"));
+        let docs_dir = env::var("WARREN_DOCS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs"));
+        Ok(Self {
+            bind_addr: env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into()),
+            database_url,
+            admin_psk: String::new(),
+            session_ttl_hours: 24,
+            static_dir,
+            docs_dir,
+        })
+    }
 }
