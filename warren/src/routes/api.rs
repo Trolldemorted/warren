@@ -1,8 +1,10 @@
 use crate::auth::{AuthContext, SESSION_COOKIE};
-use crate::entity::{agent, request};
+use crate::entity::{agent, channel, request};
 use crate::error::{AppError, AppResult};
 use crate::ids::{new_agent_token, new_session_token};
-use crate::models::{AgentNew, AgentPatch, LoginReq, LoginRes, RequestNew, RequestRespond};
+use crate::models::{
+    AgentNew, AgentPatch, ChannelNew, ChannelPatch, LoginReq, LoginRes, RequestNew, RequestRespond,
+};
 use crate::{auth, AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -42,6 +44,16 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/requests/:id/reject-response",
             post(api_reject_response),
+        )
+        .route(
+            "/api/channels",
+            get(api_list_channels).post(api_create_channel),
+        )
+        .route(
+            "/api/channels/:id",
+            get(api_get_channel)
+                .put(api_update_channel)
+                .delete(api_delete_channel),
         )
 }
 
@@ -94,9 +106,15 @@ async fn api_get_agent(
     Ok(Json(agent))
 }
 
-async fn api_me(State(_state): State<AppState>, ctx: AuthContext) -> AppResult<Json<agent::Model>> {
+async fn api_me(State(state): State<AppState>, ctx: AuthContext) -> AppResult<Json<MeResponse>> {
     let auth = ctx.require_agent()?;
-    Ok(Json(auth.0.clone()))
+    let available_channels =
+        crate::db_ops::channels_for_sender(&state.db, &auth.0.class, auth.0.kind.as_deref())
+            .await?;
+    Ok(Json(MeResponse {
+        agent: auth.0.clone(),
+        available_channels,
+    }))
 }
 
 async fn api_create_agent(
@@ -191,6 +209,20 @@ async fn api_create_request(
     };
     if new.target_class.trim().is_empty() {
         return Err(AppError::BadRequest("target_class required".into()));
+    }
+    if let AuthContext::Agent(a) = &ctx {
+        let channel_id = new
+            .channel_id
+            .ok_or_else(|| AppError::BadRequest("channel_id required".into()))?;
+        crate::db_ops::channel_authorizes(
+            &state.db,
+            channel_id,
+            &a.0.class,
+            a.0.kind.as_deref(),
+            &new.target_class,
+            new.target_type.as_deref(),
+        )
+        .await?;
     }
     let r = crate::db_ops::create_request(&state.db, &new, initial_status, sender_agent_id).await?;
     Ok(Json(r))
@@ -304,4 +336,76 @@ fn parse_request_status(s: Option<&str>) -> AppResult<Option<i16>> {
         Some("rejected") => Ok(Some(request::REJECTED)),
         Some(other) => Err(AppError::BadRequest(format!("unknown status '{other}'"))),
     }
+}
+
+#[derive(serde::Serialize)]
+struct MeResponse {
+    #[serde(flatten)]
+    agent: agent::Model,
+    available_channels: Vec<channel::Model>,
+}
+
+async fn api_list_channels(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+) -> AppResult<Json<Vec<channel::Model>>> {
+    ctx.require_admin()?;
+    Ok(Json(crate::db_ops::list_channels(&state.db).await?))
+}
+
+async fn api_get_channel(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<channel::Model>> {
+    ctx.require_admin()?;
+    let ch = crate::db_ops::get_channel(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(ch))
+}
+
+async fn api_create_channel(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Json(new): Json<ChannelNew>,
+) -> AppResult<Json<channel::Model>> {
+    ctx.require_admin()?;
+    validate_channel_new(&new)?;
+    let ch = crate::db_ops::create_channel(&state.db, &new).await?;
+    Ok(Json(ch))
+}
+
+async fn api_update_channel(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(patch): Json<ChannelPatch>,
+) -> AppResult<Json<channel::Model>> {
+    ctx.require_admin()?;
+    let ch = crate::db_ops::patch_channel(&state.db, id, &patch).await?;
+    Ok(Json(ch))
+}
+
+async fn api_delete_channel(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ctx.require_admin()?;
+    crate::db_ops::delete_channel(&state.db, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn validate_channel_new(n: &ChannelNew) -> AppResult<()> {
+    if n.sender_class.trim().is_empty() {
+        return Err(AppError::BadRequest("sender_class required".into()));
+    }
+    if n.receiver_class.trim().is_empty() {
+        return Err(AppError::BadRequest("receiver_class required".into()));
+    }
+    if n.description.trim().is_empty() {
+        return Err(AppError::BadRequest("description required".into()));
+    }
+    Ok(())
 }

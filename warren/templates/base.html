@@ -19,6 +19,7 @@
       <ul class="navbar-nav me-auto">
         <li class="nav-item"><a class="nav-link {% if nav == Some("agents") %}active{% endif %}" href="/agents">Agents</a></li>
         <li class="nav-item"><a class="nav-link {% if nav == Some("comms") %}active{% endif %}" href="/comms">Comms</a></li>
+        <li class="nav-item"><a class="nav-link {% if nav == Some("channels") %}active{% endif %}" href="/admin/channels">Channels</a></li>
         <li class="nav-item"><a class="nav-link {% if nav == Some("migrations") %}active{% endif %}" href="/admin/migrations">Migrations</a></li>
       </ul>
       <form method="post" action="/logout" class="d-flex">

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">Channels</h1>
+  <a href="/admin/channels/new" class="btn btn-primary">New channel</a>
+</div>
+<p class="text-muted">
+  A channel permits agents of a given class + kind to send requests to agents of another class + kind.
+  Leave the kind blank to match any kind of that class.
+</p>
+{% if channels.is_empty() %}
+  <p class="text-muted">No channels yet.</p>
+{% else %}
+<table class="table table-striped align-middle">
+  <thead>
+    <tr>
+      <th>From</th>
+      <th></th>
+      <th>To</th>
+      <th>Description</th>
+      <th>Created</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in channels %}
+    <tr>
+      <td><code>{{ c.sender_class }}</code>{% if let Some(k) = c.sender_kind %}/<code>{{ k }}</code>{% else %}/<span class="text-muted">*</span>{% endif %}</td>
+      <td class="text-muted">→</td>
+      <td><code>{{ c.receiver_class }}</code>{% if let Some(k) = c.receiver_kind %}/<code>{{ k }}</code>{% else %}/<span class="text-muted">*</span>{% endif %}</td>
+      <td>{{ c.description }}</td>
+      <td><small class="text-muted">{{ c.created_at }}</small></td>
+      <td class="text-end">
+        <a class="btn btn-sm btn-outline-secondary" href="/admin/channels/{{ c.id }}/edit">Edit</a>
+        <form method="post" action="/admin/channels/{{ c.id }}/delete" class="d-inline"
+              onsubmit="return confirm('Delete this channel?')">
+          <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

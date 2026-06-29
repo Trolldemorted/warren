@@ -34,6 +34,10 @@ enum Cmd {
     #[command(subcommand)]
     Requests(RequestsCmd),
 
+    /// List, create, or delete channels (admin).
+    #[command(subcommand)]
+    Channels(ChannelsCmd),
+
     /// Agent inbox: list requests sent by, claimable by, claimed by, or
     /// responded by you.
     InboxRequests,
@@ -84,6 +88,8 @@ enum RequestsCmd {
         payload: Option<String>,
         #[arg(long)]
         approve: bool,
+        #[arg(long)]
+        channel: Option<String>,
     },
     Approve {
         id: String,
@@ -95,6 +101,26 @@ enum RequestsCmd {
         id: String,
     },
     RejectResponse {
+        id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ChannelsCmd {
+    List,
+    Create {
+        #[arg(long)]
+        sender_class: String,
+        #[arg(long)]
+        sender_kind: Option<String>,
+        #[arg(long)]
+        receiver_class: String,
+        #[arg(long)]
+        receiver_kind: Option<String>,
+        #[arg(long)]
+        description: String,
+    },
+    Delete {
         id: String,
     },
 }
@@ -150,6 +176,7 @@ fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
             file,
             payload,
             approve,
+            channel,
         }) => {
             let payload = read_payload(file.as_deref(), payload.as_deref());
             let body = serde_json::json!({
@@ -157,6 +184,7 @@ fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
                 "target_type": kind,
                 "payload": payload,
                 "approved": approve,
+                "channel_id": channel,
             });
             cli.post(agent, "/api/requests", &body.to_string())
         }
@@ -171,6 +199,27 @@ fn run(cli: &Cli, agent: &ureq::Agent) -> Result<String, String> {
         }
         Cmd::Requests(RequestsCmd::RejectResponse { id }) => {
             cli.post(agent, &format!("/api/requests/{id}/reject-response"), "")
+        }
+
+        Cmd::Channels(ChannelsCmd::List) => cli.get(agent, "/api/channels"),
+        Cmd::Channels(ChannelsCmd::Create {
+            sender_class,
+            sender_kind,
+            receiver_class,
+            receiver_kind,
+            description,
+        }) => {
+            let body = serde_json::json!({
+                "sender_class": sender_class,
+                "sender_kind": sender_kind,
+                "receiver_class": receiver_class,
+                "receiver_kind": receiver_kind,
+                "description": description,
+            });
+            cli.post(agent, "/api/channels", &body.to_string())
+        }
+        Cmd::Channels(ChannelsCmd::Delete { id }) => {
+            cli.delete(agent, &format!("/api/channels/{id}"))
         }
 
         Cmd::InboxRequests => cli.get(agent, "/api/requests"),

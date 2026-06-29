@@ -57,6 +57,25 @@ pub struct MigrationsTemplate {
     pub migrations: Vec<crate::db_ops::MigrationRow>,
 }
 
+#[derive(Template)]
+#[template(path = "channels.html")]
+pub struct ChannelsTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub channels: Vec<crate::entity::channel::Model>,
+}
+
+#[derive(Template)]
+#[template(path = "channel_form.html")]
+pub struct ChannelFormTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub channel: Option<crate::entity::channel::Model>,
+    pub form_action: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Flash {
     pub level: &'static str,

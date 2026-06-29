@@ -34,6 +34,12 @@ components:
         prompt: { type: string }
         authtoken: { type: string }
         created_at: { type: string, format: date-time }
+        available_channels:
+          type: array
+          description: |
+            Channels where this agent is the sender (outbound lanes).
+            Returned by /api/agents/me; null on /api/agents/{id}.
+          items: { $ref: '#/components/schemas/Channel' }
       required: [id, name, class, kind, model, prompt, authtoken, created_at]
     AgentNew:
       type: object
@@ -56,6 +62,37 @@ components:
             Pass `null` to clear, omit to leave unchanged, pass a string to set.
         model: { type: string }
         prompt: { type: string }
+    Channel:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        sender_class: { type: string }
+        sender_kind: { type: string, nullable: true }
+        receiver_class: { type: string }
+        receiver_kind: { type: string, nullable: true }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+      required: [id, sender_class, sender_kind, receiver_class, receiver_kind, description, created_at]
+    ChannelNew:
+      type: object
+      properties:
+        sender_class: { type: string }
+        sender_kind: { type: string, nullable: true }
+        receiver_class: { type: string }
+        receiver_kind: { type: string, nullable: true }
+        description: { type: string }
+      required: [sender_class, receiver_class, description]
+    ChannelPatch:
+      type: object
+      description: |
+        All fields optional. Pass `null` for sender_kind/receiver_kind to clear
+        (set to "any kind").
+      properties:
+        sender_class: { type: string }
+        sender_kind: { type: string, nullable: true }
+        receiver_class: { type: string }
+        receiver_kind: { type: string, nullable: true }
+        description: { type: string }
     LoginReq:
       type: object
       properties:
@@ -85,6 +122,7 @@ components:
         sender_agent_id: { type: string, format: uuid, nullable: true }
         claimed_by: { type: string, format: uuid, nullable: true }
         claimed_at: { type: string, format: date-time, nullable: true }
+        channel_id: { type: string, format: uuid, nullable: true }
         created_at: { type: string, format: date-time }
         responded_at: { type: string, format: date-time, nullable: true }
       required: [id, target_class, target_type, payload, status, created_at]
@@ -94,6 +132,14 @@ components:
         target_class: { type: string }
         target_type: { type: string, nullable: true }
         payload: {}
+        channel_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Required when caller is an agent; admin POSTs may omit it.
+            Must reference a channel that allows
+            (caller.class, caller.kind) → (target_class, target_type).
       required: [target_class, payload]
     RequestRespond:
       type: object
@@ -212,6 +258,76 @@ paths:
       security: [{ adminSession: [] }]
       responses:
         '204': { description: OK }
+  /api/channels:
+    get:
+      tags: [admin]
+      summary: List channels (admin)
+      security: [{ adminSession: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Channel' }
+    post:
+      tags: [admin]
+      summary: Create channel (admin)
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelNew' }
+      responses:
+        '200':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '409': { description: Channel already exists }
+  /api/channels/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [admin]
+      summary: Get channel (admin)
+      security: [{ adminSession: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '404': { description: Not found }
+    put:
+      tags: [admin]
+      summary: Patch channel (admin)
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelPatch' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '404': { description: Not found }
+        '409': { description: Channel already exists }
+    delete:
+      tags: [admin]
+      summary: Delete channel (admin)
+      security: [{ adminSession: [] }]
+      responses:
+        '204': { description: OK }
+        '404': { description: Not found }
   /api/requests:
     get:
       tags: [admin, agent]

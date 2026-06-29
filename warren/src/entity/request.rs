@@ -64,6 +64,7 @@ pub struct Model {
     pub sender_agent_id: Option<Uuid>,
     pub claimed_by: Option<Uuid>,
     pub claimed_at: Option<ChronoDateTimeUtc>,
+    pub channel_id: Option<Uuid>,
     #[sea_orm(default_expr = "Expr::cust(\"now()\")")]
     pub created_at: ChronoDateTimeUtc,
     pub responded_at: Option<ChronoDateTimeUtc>,
@@ -83,11 +84,23 @@ pub enum Relation {
         to = "super::agent::Column::Id"
     )]
     Sender,
+    #[sea_orm(
+        belongs_to = "super::channel::Entity",
+        from = "Column::ChannelId",
+        to = "super::channel::Column::Id"
+    )]
+    Channel,
 }
 
 impl Related<super::agent::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Agent.def()
+    }
+}
+
+impl Related<super::channel::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Channel.def()
     }
 }
 

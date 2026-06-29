@@ -1,10 +1,10 @@
 use crate::auth::SESSION_COOKIE;
 use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
-use crate::models::{AgentNew, AgentPatch, RequestNew};
+use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew};
 use crate::templates::{
-    AgentFormTemplate, AgentsTemplate, CommsInjectTemplate, CommsTemplate, Flash, LoginTemplate,
-    MigrationsTemplate,
+    AgentFormTemplate, AgentsTemplate, ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate,
+    CommsTemplate, Flash, LoginTemplate, MigrationsTemplate,
 };
 use crate::{auth, AppState};
 use askama::Template;
@@ -49,6 +49,12 @@ pub fn router() -> Router<AppState> {
             get(message_edit_page).post(message_edit_save),
         )
         .route("/admin/migrations", get(migrations_page))
+        .route("/admin/channels", get(channels_page))
+        .route("/admin/channels/new", get(channel_new_page))
+        .route("/admin/channels", post(channel_create))
+        .route("/admin/channels/:id/edit", get(channel_edit_page))
+        .route("/admin/channels/:id", post(channel_update))
+        .route("/admin/channels/:id/delete", post(channel_delete))
 }
 
 async fn root() -> Redirect {
@@ -379,6 +385,7 @@ async fn inject_create_req(
         target_class: form.target_class,
         target_type: form.target_type.filter(|s| !s.is_empty()),
         payload: parse_payload(&form.payload),
+        channel_id: None,
     };
     // UI inject is admin-only — auto-skip request approval.
     if let Err(e) = crate::db_ops::create_request(
@@ -563,4 +570,134 @@ async fn migrations_page(State(state): State<AppState>, headers: HeaderMap) -> R
         flash: None,
         migrations,
     })
+}
+
+#[derive(Deserialize)]
+struct ChannelForm {
+    sender_class: String,
+    #[serde(default)]
+    sender_kind: Option<String>,
+    receiver_class: String,
+    #[serde(default)]
+    receiver_kind: Option<String>,
+    description: String,
+}
+
+async fn channels_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    match crate::db_ops::list_channels(&state.db).await {
+        Ok(channels) => {
+            let t = ChannelsTemplate {
+                title: Some("Channels"),
+                nav: Some("channels"),
+                flash: None,
+                channels,
+            };
+            render(t)
+        }
+        Err(e) => err_page(e),
+    }
+}
+
+async fn channel_new_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    render(ChannelFormTemplate {
+        title: Some("New channel"),
+        nav: Some("channels"),
+        flash: None,
+        channel: None,
+        form_action: "/admin/channels".into(),
+    })
+}
+
+async fn channel_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ChannelForm>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let new = ChannelNew {
+        sender_class: form.sender_class,
+        sender_kind: form.sender_kind.filter(|s| !s.is_empty()),
+        receiver_class: form.receiver_class,
+        receiver_kind: form.receiver_kind.filter(|s| !s.is_empty()),
+        description: form.description,
+    };
+    match crate::db_ops::create_channel(&state.db, &new).await {
+        Ok(_) => Redirect::to("/admin/channels").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn channel_edit_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    match crate::db_ops::get_channel(&state.db, id).await {
+        Ok(Some(channel)) => {
+            let t = ChannelFormTemplate {
+                title: Some("Edit channel"),
+                nav: Some("channels"),
+                flash: None,
+                channel: Some(channel),
+                form_action: format!("/admin/channels/{id}"),
+            };
+            render(t)
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn channel_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Form(form): Form<ChannelForm>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let new = ChannelNew {
+        sender_class: form.sender_class,
+        sender_kind: form.sender_kind.filter(|s| !s.is_empty()),
+        receiver_class: form.receiver_class,
+        receiver_kind: form.receiver_kind.filter(|s| !s.is_empty()),
+        description: form.description,
+    };
+    let patch = crate::models::ChannelPatch {
+        sender_class: Some(new.sender_class),
+        sender_kind: Some(new.sender_kind),
+        receiver_class: Some(new.receiver_class),
+        receiver_kind: Some(new.receiver_kind),
+        description: Some(new.description),
+    };
+    match crate::db_ops::update_channel(&state.db, id, &patch).await {
+        Ok(_) => Redirect::to("/admin/channels").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn channel_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    match crate::db_ops::delete_channel(&state.db, id).await {
+        Ok(_) => Redirect::to("/admin/channels").into_response(),
+        Err(e) => err_page(e),
+    }
 }

@@ -1,7 +1,7 @@
 use crate::db::Db;
-use crate::entity::{agent, request};
+use crate::entity::{agent, channel, request};
 use crate::error::{map_unique_conflict, AppError, AppResult};
-use crate::models::{AgentNew, AgentPatch, RequestNew};
+use crate::models::{AgentNew, AgentPatch, ChannelNew, ChannelPatch, RequestNew};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, FromQueryResult,
@@ -92,6 +92,7 @@ pub async fn create_request(
         payload: Set(new.payload.clone()),
         status: Set(initial_status),
         sender_agent_id: Set(sender_agent_id),
+        channel_id: Set(new.channel_id),
         ..Default::default()
     };
     Ok(am.insert(db).await?)
@@ -127,7 +128,7 @@ pub async fn list_requests_for_agent(
     };
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, created_at, responded_at \
+        "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at \
            FROM requests \
           WHERE sender_agent_id = '{agent_id}' \
              OR (status = {pending} \
@@ -152,7 +153,7 @@ pub async fn get_request(db: &Db, id: Uuid) -> AppResult<Option<request::Model>>
 pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<request::Model> {
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, created_at, responded_at"
+        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let row = db.query_one(stmt).await?;
@@ -173,7 +174,7 @@ pub async fn respond_to_request(
     let response_json = serde_json::to_string(response).unwrap_or_else(|_| "null".to_string());
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "UPDATE requests SET response = '{response_json}'::jsonb, responded_at = NOW() WHERE id = '{id}' AND claimed_by = '{agent_id}' AND status = {pending} RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, created_at, responded_at"
+        "UPDATE requests SET response = '{response_json}'::jsonb, responded_at = NOW() WHERE id = '{id}' AND claimed_by = '{agent_id}' AND status = {pending} RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let row = db.query_one(stmt).await?;
@@ -442,6 +443,129 @@ pub async fn update_request_payload(
         .await?;
     if res.rows_affected == 0 {
         return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn list_channels(db: &Db) -> AppResult<Vec<channel::Model>> {
+    Ok(channel::Entity::find()
+        .order_by_desc(channel::Column::CreatedAt)
+        .all(db)
+        .await?)
+}
+
+pub async fn get_channel(db: &Db, id: Uuid) -> AppResult<Option<channel::Model>> {
+    Ok(channel::Entity::find_by_id(id).one(db).await?)
+}
+
+pub async fn create_channel(db: &Db, new: &ChannelNew) -> AppResult<channel::Model> {
+    let am = channel::ActiveModel {
+        sender_class: Set(new.sender_class.clone()),
+        sender_kind: Set(new.sender_kind.clone()),
+        receiver_class: Set(new.receiver_class.clone()),
+        receiver_kind: Set(new.receiver_kind.clone()),
+        description: Set(new.description.clone()),
+        ..Default::default()
+    };
+    match am.insert(db).await {
+        Ok(m) => Ok(m),
+        Err(e) => Err(map_unique_conflict(e, "channel already exists")),
+    }
+}
+
+pub async fn update_channel(db: &Db, id: Uuid, patch: &ChannelPatch) -> AppResult<()> {
+    let mut am = channel::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .into_active_model();
+    if let Some(c) = &patch.sender_class {
+        am.sender_class = Set(c.clone());
+    }
+    if let Some(k) = &patch.sender_kind {
+        am.sender_kind = Set(k.clone());
+    }
+    if let Some(c) = &patch.receiver_class {
+        am.receiver_class = Set(c.clone());
+    }
+    if let Some(k) = &patch.receiver_kind {
+        am.receiver_kind = Set(k.clone());
+    }
+    if let Some(d) = &patch.description {
+        am.description = Set(d.clone());
+    }
+    match am.update(db).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(map_unique_conflict(e, "channel already exists")),
+    }
+}
+
+pub async fn patch_channel(db: &Db, id: Uuid, patch: &ChannelPatch) -> AppResult<channel::Model> {
+    update_channel(db, id, patch).await?;
+    get_channel(db, id).await?.ok_or(AppError::NotFound)
+}
+
+pub async fn delete_channel(db: &Db, id: Uuid) -> AppResult<()> {
+    let res = channel::Entity::delete_by_id(id).exec(db).await?;
+    if res.rows_affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// All channels where (sender_class, sender_kind) allow this agent to send.
+/// NULL sender_kind on the channel = any kind of that class.
+pub async fn channels_for_sender(
+    db: &Db,
+    class: &str,
+    kind: Option<&str>,
+) -> AppResult<Vec<channel::Model>> {
+    let kind_sql = match kind {
+        Some(k) => format!("'{k}'"),
+        None => "NULL".to_string(),
+    };
+    let sql = format!(
+        "SELECT id, sender_class, sender_kind, receiver_class, receiver_kind, description, created_at \
+           FROM channels \
+          WHERE sender_class = '{class}' \
+            AND (sender_kind IS NULL OR sender_kind = {kind_sql}) \
+          ORDER BY created_at ASC"
+    );
+    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+    let rows = db.query_all(stmt).await?;
+    rows.into_iter()
+        .map(|r| channel::Model::from_query_result(&r, ""))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::from)
+}
+
+/// Returns Ok(()) iff the channel allows
+/// `(sender_class, sender_kind) → (target_class, target_kind)`.
+/// Returns Err(NotFound) if the channel doesn't exist; Err(Forbidden) if the
+/// sender side doesn't match; Err(BadRequest) if the receiver side doesn't
+/// match the target.
+pub async fn channel_authorizes(
+    db: &Db,
+    channel_id: Uuid,
+    sender_class: &str,
+    sender_kind: Option<&str>,
+    target_class: &str,
+    target_kind: Option<&str>,
+) -> AppResult<()> {
+    let ch = get_channel(db, channel_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let sender_ok = ch.sender_class == sender_class
+        && (ch.sender_kind.is_none() || ch.sender_kind.as_deref() == sender_kind);
+    if !sender_ok {
+        return Err(AppError::Forbidden);
+    }
+    let receiver_ok = ch.receiver_class == target_class
+        && (ch.receiver_kind.is_none() || ch.receiver_kind.as_deref() == target_kind);
+    if !receiver_ok {
+        return Err(AppError::BadRequest(
+            "channel does not allow this target".into(),
+        ));
     }
     Ok(())
 }

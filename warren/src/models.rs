@@ -4,6 +4,7 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::fmt;
+use uuid::Uuid;
 
 /// Distinguishes "field omitted" (None) from "field present as null" (Some(None))
 /// from "field present with a value" (Some(Some(v))). Plain `Option<Option<T>>`
@@ -70,6 +71,8 @@ pub struct RequestNew {
     #[serde(default)]
     pub target_type: Option<String>,
     pub payload: Value,
+    #[serde(default)]
+    pub channel_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,4 +88,29 @@ pub struct LoginReq {
 #[derive(Debug, Clone, Serialize)]
 pub struct LoginRes {
     pub ok: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelNew {
+    pub sender_class: String,
+    #[serde(default)]
+    pub sender_kind: Option<String>,
+    pub receiver_class: String,
+    #[serde(default)]
+    pub receiver_kind: Option<String>,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ChannelPatch {
+    #[serde(default)]
+    pub sender_class: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_kind")]
+    pub sender_kind: Option<Option<String>>,
+    #[serde(default)]
+    pub receiver_class: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_kind")]
+    pub receiver_kind: Option<Option<String>>,
+    #[serde(default)]
+    pub description: Option<String>,
 }

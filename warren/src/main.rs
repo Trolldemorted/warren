@@ -188,13 +188,14 @@ async fn log_status(database_url: &str, dir_url: &str) {
 }
 
 async fn run_dump_schema() -> anyhow::Result<()> {
-    use entity::{admin_session, agent, request};
+    use entity::{admin_session, agent, channel, request};
     use sea_orm::sea_query::PostgresQueryBuilder;
     use sea_orm::{DatabaseBackend, Schema};
 
     let schema = Schema::new(DatabaseBackend::Postgres);
     let tables = [
         schema.create_table_from_entity(agent::Entity),
+        schema.create_table_from_entity(channel::Entity),
         schema.create_table_from_entity(request::Entity),
         schema.create_table_from_entity(admin_session::Entity),
     ];
@@ -205,6 +206,12 @@ async fn run_dump_schema() -> anyhow::Result<()> {
         );
     }
     for stmt in schema.create_index_from_entity(agent::Entity) {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in schema.create_index_from_entity(channel::Entity) {
         println!(
             "{};",
             stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
@@ -223,6 +230,12 @@ async fn run_dump_schema() -> anyhow::Result<()> {
         );
     }
     for stmt in agent::extra_indexes() {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in channel::extra_indexes() {
         println!(
             "{};",
             stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
