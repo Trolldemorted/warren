@@ -120,6 +120,14 @@ impl Model {
     pub fn response_preview(&self) -> Option<String> {
         self.response.as_ref().map(|r| preview_json(r, 120))
     }
+
+    pub fn payload_full(&self) -> String {
+        self.payload.to_string()
+    }
+
+    pub fn response_full(&self) -> Option<String> {
+        self.response.as_ref().map(|r| r.to_string())
+    }
 }
 
 fn preview_json(v: &Json, max_chars: usize) -> String {

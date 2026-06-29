@@ -12,6 +12,15 @@
     <p class="text-muted">No requests.</p>
   {% else %}
     <table class="table table-sm align-middle">
+      <colgroup>
+        <col style="width: 11rem">
+        <col style="width: 10rem">
+        <col>
+        <col style="width: 13rem">
+        <col style="width: 17rem">
+        <col>
+        <col style="width: 22rem">
+      </colgroup>
       <thead>
         <tr>
           <th>Created</th><th>Target</th><th>Payload</th><th>Status</th><th>Claimer</th><th>Response</th><th></th>
@@ -22,10 +31,14 @@
         <tr>
           <td><small>{{ r.created_at }}</small></td>
           <td>{{ r.target_class }}{% if let Some(t) = r.target_type %}/{{ t }}{% endif %}</td>
-          <td><pre class="payload mb-0">{{ r.payload_preview() }}</pre></td>
+          <td>
+            <a class="payload-link" href="#payload-{{ r.id }}" title="Click to view full payload">
+              <pre class="payload mb-0">{{ r.payload_preview() }}</pre>
+            </a>
+          </td>
           <td><small>{{ r.status_label() }}</small></td>
           <td><small class="text-muted">{% if let Some(c) = r.claimed_by %}{{ c }}{% else %}—{% endif %}</small></td>
-          <td>{% match r.response_preview() %}{% when Some(resp) %}<pre class="payload mb-0">{{ resp }}</pre>{% when None %}—{% endmatch %}</td>
+          <td>{% match r.response_preview() %}{% when Some(resp) %}<a class="payload-link" href="#response-{{ r.id }}" title="Click to view full response"><pre class="payload mb-0">{{ resp }}</pre></a>{% when None %}—{% endmatch %}</td>
           <td class="text-end">
             <a class="btn btn-sm btn-outline-secondary" href="/admin/comms/requests/{{ r.id }}/edit">Edit</a>
             {% if r.status == 0 %}
@@ -53,6 +66,35 @@
         {% endfor %}
       </tbody>
     </table>
+
+    {% for r in requests %}
+    <div id="payload-{{ r.id }}" class="modal" role="dialog" aria-labelledby="payload-title-{{ r.id }}">
+      <a class="modal-backdrop" href="#" aria-label="Close"></a>
+      <div class="modal-dialog" role="document">
+        <div class="modal-header">
+          <h5 class="modal-title" id="payload-title-{{ r.id }}">Payload · <code>{{ r.id }}</code></h5>
+          <a class="modal-close" href="#" aria-label="Close">×</a>
+        </div>
+        <div class="modal-body">
+          <pre class="payload mb-0">{{ r.payload_full() }}</pre>
+        </div>
+      </div>
+    </div>
+    {% if r.response.is_some() %}
+    <div id="response-{{ r.id }}" class="modal" role="dialog" aria-labelledby="response-title-{{ r.id }}">
+      <a class="modal-backdrop" href="#" aria-label="Close"></a>
+      <div class="modal-dialog" role="document">
+        <div class="modal-header">
+          <h5 class="modal-title" id="response-title-{{ r.id }}">Response · <code>{{ r.id }}</code></h5>
+          <a class="modal-close" href="#" aria-label="Close">×</a>
+        </div>
+        <div class="modal-body">
+          <pre class="payload mb-0">{{ r.response_full().as_deref().unwrap_or("") }}</pre>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+    {% endfor %}
   {% endif %}
 </section>
 {% endblock %}
