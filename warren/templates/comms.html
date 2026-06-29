@@ -13,13 +13,13 @@
   {% else %}
     <table class="table table-sm align-middle">
       <colgroup>
-        <col style="width: 11rem">
-        <col style="width: 10rem">
-        <col>
-        <col style="width: 13rem">
-        <col style="width: 17rem">
-        <col>
-        <col style="width: 22rem">
+        <col style="width: 10%">
+        <col style="width: 9%">
+        <col style="width: 22%">
+        <col style="width: 11%">
+        <col style="width: 14%">
+        <col style="width: 22%">
+        <col style="width: 12%">
       </colgroup>
       <thead>
         <tr>
@@ -39,28 +39,30 @@
           <td><small>{{ r.status_label() }}</small></td>
           <td><small class="text-muted">{% if let Some(c) = r.claimed_by %}{{ c }}{% else %}—{% endif %}</small></td>
           <td>{% match r.response_preview() %}{% when Some(resp) %}<a class="payload-link" href="#response-{{ r.id }}" title="Click to view full response"><pre class="payload mb-0">{{ resp }}</pre></a>{% when None %}—{% endmatch %}</td>
-          <td class="text-end">
-            <a class="btn btn-sm btn-outline-secondary" href="/admin/comms/requests/{{ r.id }}/edit">Edit</a>
-            {% if r.status == 0 %}
-            <form method="post" action="/admin/comms/requests/{{ r.id }}/approve" class="d-inline">
-              <button class="btn btn-sm btn-success" type="submit">Approve</button>
-            </form>
-            <form method="post" action="/admin/comms/requests/{{ r.id }}/reject" class="d-inline">
-              <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
-            </form>
-            <form method="post" action="/admin/comms/requests/{{ r.id }}/delete" class="d-inline"
-                  onsubmit="return confirm('Delete this pending request?')">
-              <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
-            </form>
-            {% endif %}
-            {% if r.status == 1 && r.response.is_some() %}
-            <form method="post" action="/admin/comms/requests/{{ r.id }}/approve-response" class="d-inline">
-              <button class="btn btn-sm btn-success" type="submit">Accept</button>
-            </form>
-            <form method="post" action="/admin/comms/requests/{{ r.id }}/reject-response" class="d-inline">
-              <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
-            </form>
-            {% endif %}
+          <td>
+            <div class="d-flex flex-wrap gap-1 justify-content-end">
+              <a class="btn btn-sm btn-outline-secondary" href="/admin/comms/requests/{{ r.id }}/edit">Edit</a>
+              {% if r.status == 0 %}
+              <form method="post" action="/admin/comms/requests/{{ r.id }}/approve" class="d-inline">
+                <button class="btn btn-sm btn-success" type="submit">Approve</button>
+              </form>
+              <form method="post" action="/admin/comms/requests/{{ r.id }}/reject" class="d-inline">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
+              </form>
+              <form method="post" action="/admin/comms/requests/{{ r.id }}/delete" class="d-inline"
+                    onsubmit="return confirm('Delete this pending request?')">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+              </form>
+              {% endif %}
+              {% if r.status == 1 && r.response.is_some() %}
+              <form method="post" action="/admin/comms/requests/{{ r.id }}/approve-response" class="d-inline">
+                <button class="btn btn-sm btn-success" type="submit">Accept</button>
+              </form>
+              <form method="post" action="/admin/comms/requests/{{ r.id }}/reject-response" class="d-inline">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
+              </form>
+              {% endif %}
+            </div>
           </td>
         </tr>
         {% endfor %}
