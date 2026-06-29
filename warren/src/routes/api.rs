@@ -30,7 +30,6 @@ pub fn router() -> Router<AppState> {
             "/api/requests",
             get(api_list_requests).post(api_create_request),
         )
-        .route("/api/requests/incoming", get(api_incoming_requests))
         .route("/api/requests/:id", get(api_get_request))
         .route("/api/requests/:id/claim", post(api_claim_request))
         .route("/api/requests/:id/respond", post(api_respond_request))
@@ -158,12 +157,26 @@ async fn api_list_requests(
     ctx: AuthContext,
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Vec<request::Model>>> {
-    ctx.require_admin()?;
-    let limit = q.limit.unwrap_or(50).clamp(1, 500) as u64;
-    let offset = q.offset.unwrap_or(0).max(0) as u64;
-    let status = parse_request_status(q.status.as_deref())?;
-    let rows = crate::db_ops::list_all_requests(&state.db, status, limit, offset).await?;
-    Ok(Json(rows))
+    match &ctx {
+        AuthContext::Admin(_) => {
+            let limit = q.limit.unwrap_or(50).clamp(1, 500) as u64;
+            let offset = q.offset.unwrap_or(0).max(0) as u64;
+            let status = parse_request_status(q.status.as_deref())?;
+            let rows = crate::db_ops::list_all_requests(&state.db, status, limit, offset).await?;
+            Ok(Json(rows))
+        }
+        AuthContext::Agent(a) => {
+            let _ = (q.limit, q.offset);
+            let rows = crate::db_ops::list_requests_for_agent(
+                &state.db,
+                a.0.id,
+                &a.0.class,
+                a.0.kind.as_deref(),
+            )
+            .await?;
+            Ok(Json(rows))
+        }
+    }
 }
 
 async fn api_create_request(
@@ -172,25 +185,15 @@ async fn api_create_request(
     Json(new): Json<RequestNew>,
 ) -> AppResult<Json<request::Model>> {
     // Admin POSTs auto-skip request approval; agent POSTs go through review.
-    let initial_status = match &ctx {
-        AuthContext::Admin(_) => request::PENDING_RESPONSE_APPROVAL,
-        AuthContext::Agent(_) => request::PENDING_REQUEST_APPROVAL,
+    let (initial_status, sender_agent_id) = match &ctx {
+        AuthContext::Admin(_) => (request::PENDING_RESPONSE_APPROVAL, None),
+        AuthContext::Agent(a) => (request::PENDING_REQUEST_APPROVAL, Some(a.0.id)),
     };
     if new.target_class.trim().is_empty() {
         return Err(AppError::BadRequest("target_class required".into()));
     }
-    let r = crate::db_ops::create_request(&state.db, &new, initial_status).await?;
+    let r = crate::db_ops::create_request(&state.db, &new, initial_status, sender_agent_id).await?;
     Ok(Json(r))
-}
-
-async fn api_incoming_requests(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-) -> AppResult<Json<Vec<request::Model>>> {
-    let agent = ctx.require_agent()?;
-    let rows =
-        crate::db_ops::list_inbox(&state.db, &agent.0.class, agent.0.kind.as_deref()).await?;
-    Ok(Json(rows))
 }
 
 async fn api_get_request(
@@ -204,12 +207,13 @@ async fn api_get_request(
     match &ctx {
         AuthContext::Admin(_) => Ok(Json(r)),
         AuthContext::Agent(a) => {
+            let sent_self = r.sender_agent_id.map(|s| s == a.0.id).unwrap_or(false);
             let claims_self = r.claimed_by.map(|cb| cb == a.0.id).unwrap_or(false);
             let in_inbox = r.status == request::PENDING_RESPONSE_APPROVAL
                 && r.claimed_by.is_none()
                 && r.target_class == a.0.class
                 && (r.target_type.is_none() || r.target_type.as_deref() == a.0.kind.as_deref());
-            if claims_self || in_inbox {
+            if sent_self || claims_self || in_inbox {
                 Ok(Json(r))
             } else {
                 Err(AppError::Forbidden)

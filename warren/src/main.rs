@@ -47,8 +47,6 @@ enum Command {
 }
 
 fn main() {
-    println!("what the fuck");
-    eprintln!("is happeningn here");
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
         eprintln!("panic: {info}\n{bt}");

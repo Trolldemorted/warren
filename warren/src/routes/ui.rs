@@ -264,6 +264,7 @@ async fn agent_update(
     let patch = AgentPatch {
         name: Some(form.name),
         class: Some(form.class),
+        kind: Some(form.kind.filter(|s| !s.is_empty())),
         model: Some(form.model),
         prompt: Some(form.prompt),
     };
@@ -384,6 +385,7 @@ async fn inject_create_req(
         &state.db,
         &new,
         crate::entity::request::PENDING_RESPONSE_APPROVAL,
+        None,
     )
     .await
     {

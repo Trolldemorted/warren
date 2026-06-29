@@ -49,6 +49,11 @@ components:
       properties:
         name: { type: string }
         class: { type: string }
+        type:
+          type: string
+          nullable: true
+          description: |
+            Pass `null` to clear, omit to leave unchanged, pass a string to set.
         model: { type: string }
         prompt: { type: string }
     LoginReq:
@@ -77,6 +82,7 @@ components:
             2 = done
             3 = rejected
           enum: [0, 1, 2, 3]
+        sender_agent_id: { type: string, format: uuid, nullable: true }
         claimed_by: { type: string, format: uuid, nullable: true }
         claimed_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
@@ -208,9 +214,15 @@ paths:
         '204': { description: OK }
   /api/requests:
     get:
-      tags: [admin]
-      summary: List requests (admin); ?status= ?limit= ?offset=
-      security: [{ adminSession: [] }]
+      tags: [admin, agent]
+      summary: List requests relevant to the caller
+      description: |
+        Admin: list all requests with `?status= ?limit= ?offset=`.
+        Agent: list requests sent by me, claimable (matching class+type),
+        claimed by me, and responded by me (regardless of admin-approval state).
+      security:
+        - adminSession: []
+        - agentToken: []
       parameters:
         - in: query
           name: status
@@ -237,7 +249,7 @@ paths:
       description: |
         Admin POSTs auto-skip `pending_request_approval` and land directly in
         `pending_response_approval` (status 1). Agent POSTs always go through
-        admin review first (status 0).
+        admin review first (status 0) and record the sender as the agent.
       security:
         - adminSession: []
         - agentToken: []
@@ -252,19 +264,6 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Request' }
-  /api/requests/incoming:
-    get:
-      tags: [agent]
-      summary: "Agent inbox: approved+unclaimed requests matching your class+type"
-      security: [{ agentToken: [] }]
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Request' }
   /api/requests/{id}:
     parameters:
       - in: path

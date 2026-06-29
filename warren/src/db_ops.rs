@@ -54,6 +54,9 @@ pub async fn update_agent(db: &Db, id: Uuid, patch: &AgentPatch) -> AppResult<()
     if let Some(c) = &patch.class {
         am.class = Set(c.clone());
     }
+    if let Some(k) = &patch.kind {
+        am.kind = Set(k.clone());
+    }
     if let Some(m) = &patch.model {
         am.model = Set(m.clone());
     }
@@ -81,12 +84,14 @@ pub async fn create_request(
     db: &Db,
     new: &RequestNew,
     initial_status: i16,
+    sender_agent_id: Option<Uuid>,
 ) -> AppResult<request::Model> {
     let am = request::ActiveModel {
         target_class: Set(new.target_class.clone()),
         target_type: Set(new.target_type.clone()),
         payload: Set(new.payload.clone()),
         status: Set(initial_status),
+        sender_agent_id: Set(sender_agent_id),
         ..Default::default()
     };
     Ok(am.insert(db).await?)
@@ -105,8 +110,14 @@ pub async fn list_all_requests(
     Ok(q.limit(Some(limit)).offset(Some(offset)).all(db).await?)
 }
 
-pub async fn list_inbox(
+/// All requests an agent should see at `/api/requests`:
+/// - sent by them (regardless of status)
+/// - claimable now (matching class+type, pending, unclaimed)
+/// - claimed by them (any status where they hold the claim)
+/// - responded by them (response set, may still be waiting for admin approval)
+pub async fn list_requests_for_agent(
     db: &Db,
+    agent_id: Uuid,
     class: &str,
     kind: Option<&str>,
 ) -> AppResult<Vec<request::Model>> {
@@ -116,7 +127,15 @@ pub async fn list_inbox(
     };
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "SELECT id, target_class, target_type, payload, response, status, claimed_by, claimed_at, created_at, responded_at FROM requests WHERE status = {pending} AND claimed_by IS NULL AND target_class = '{class}' AND (target_type IS NULL OR target_type = {target_type_sql}) ORDER BY created_at ASC"
+        "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, created_at, responded_at \
+           FROM requests \
+          WHERE sender_agent_id = '{agent_id}' \
+             OR (status = {pending} \
+                 AND claimed_by IS NULL \
+                 AND target_class = '{class}' \
+                 AND (target_type IS NULL OR target_type = {target_type_sql})) \
+             OR claimed_by = '{agent_id}' \
+          ORDER BY created_at ASC"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let rows = db.query_all(stmt).await?;
@@ -133,7 +152,7 @@ pub async fn get_request(db: &Db, id: Uuid) -> AppResult<Option<request::Model>>
 pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<request::Model> {
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT type FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, claimed_by, claimed_at, created_at, responded_at"
+        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT type FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, created_at, responded_at"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let row = db.query_one(stmt).await?;
@@ -154,7 +173,7 @@ pub async fn respond_to_request(
     let response_json = serde_json::to_string(response).unwrap_or_else(|_| "null".to_string());
     let pending = request::PENDING_RESPONSE_APPROVAL;
     let sql = format!(
-        "UPDATE requests SET response = '{response_json}'::jsonb, responded_at = NOW() WHERE id = '{id}' AND claimed_by = '{agent_id}' AND status = {pending} RETURNING id, target_class, target_type, payload, response, status, claimed_by, claimed_at, created_at, responded_at"
+        "UPDATE requests SET response = '{response_json}'::jsonb, responded_at = NOW() WHERE id = '{id}' AND claimed_by = '{agent_id}' AND status = {pending} RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, created_at, responded_at"
     );
     let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let row = db.query_one(stmt).await?;

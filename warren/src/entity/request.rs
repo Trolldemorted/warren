@@ -37,6 +37,7 @@ pub struct Model {
     pub response: Option<Json>,
     #[sea_orm(default_expr = "0")]
     pub status: i16,
+    pub sender_agent_id: Option<Uuid>,
     pub claimed_by: Option<Uuid>,
     pub claimed_at: Option<ChronoDateTimeUtc>,
     #[sea_orm(default_expr = "Expr::cust(\"now()\")")]
@@ -52,6 +53,12 @@ pub enum Relation {
         to = "super::agent::Column::Id"
     )]
     Agent,
+    #[sea_orm(
+        belongs_to = "super::agent::Entity",
+        from = "Column::SenderAgentId",
+        to = "super::agent::Column::Id"
+    )]
+    Sender,
 }
 
 impl Related<super::agent::Entity> for Entity {
@@ -82,6 +89,12 @@ pub fn extra_indexes() -> Vec<IndexCreateStatement> {
             .name("requests_status_idx")
             .table(Entity)
             .col(Column::Status)
+            .col((Column::CreatedAt, IndexOrder::Desc))
+            .to_owned(),
+        Index::create()
+            .name("requests_sender_idx")
+            .table(Entity)
+            .col(Column::SenderAgentId)
             .col((Column::CreatedAt, IndexOrder::Desc))
             .to_owned(),
     ]
