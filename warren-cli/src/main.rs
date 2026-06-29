@@ -10,7 +10,8 @@ fn is_admin() -> bool {
 fn build_cli() -> Command {
     let admin = is_admin();
 
-    let mut requests = Command::new("requests").about("List, create, or approve/reject requests");
+    let mut requests = Command::new("requests")
+        .about("List, create, claim, respond to, or approve/reject requests");
     requests = requests.subcommand(Command::new("list").about("List requests").arg(
         Arg::new("status").long("status").num_args(1).value_parser([
             "pending_request_approval",
@@ -48,6 +49,34 @@ fn build_cli() -> Command {
                     .long("channel")
                     .num_args(1)
                     .value_name("CHANNEL_ID"),
+            ),
+    );
+    requests = requests.subcommand(
+        Command::new("inbox")
+            .about("List requests sent by, claimable by, claimed by, or responded by you"),
+    );
+    requests = requests.subcommand(
+        Command::new("claim")
+            .about("Atomically claim a request")
+            .arg(Arg::new("id").num_args(1).required(true)),
+    );
+    requests = requests.subcommand(
+        Command::new("respond")
+            .about("Respond to a request you previously claimed")
+            .arg(Arg::new("id").num_args(1).required(true))
+            .arg(
+                Arg::new("file")
+                    .short('f')
+                    .long("file")
+                    .num_args(1)
+                    .conflicts_with("payload"),
+            )
+            .arg(
+                Arg::new("payload")
+                    .short('p')
+                    .long("payload")
+                    .num_args(1)
+                    .conflicts_with("file"),
             ),
     );
     requests = requests.subcommand(
@@ -144,34 +173,6 @@ fn build_cli() -> Command {
                 .num_args(1)
                 .required(true)
                 .help("Admin session token (from /api/login) OR agent authtoken"),
-        )
-        .subcommand(
-            Command::new("inbox-requests")
-                .about("List requests sent by, claimable by, claimed by, or responded by you"),
-        )
-        .subcommand(
-            Command::new("claim")
-                .about("Atomically claim a request")
-                .arg(Arg::new("id").num_args(1).required(true)),
-        )
-        .subcommand(
-            Command::new("respond")
-                .about("Respond to a request you previously claimed")
-                .arg(Arg::new("id").num_args(1).required(true))
-                .arg(
-                    Arg::new("file")
-                        .short('f')
-                        .long("file")
-                        .num_args(1)
-                        .conflicts_with("payload"),
-                )
-                .arg(
-                    Arg::new("payload")
-                        .short('p')
-                        .long("payload")
-                        .num_args(1)
-                        .conflicts_with("file"),
-                ),
         )
         .subcommand(requests)
         .subcommand(agents)
@@ -285,6 +286,32 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                     "",
                 )
             }
+            Some(("inbox", _)) => http_get(agent, &url, &token, "/api/requests"),
+            Some(("claim", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                http_post(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/requests/{id}/claim"),
+                    "",
+                )
+            }
+            Some(("respond", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                let payload = read_payload(
+                    sc.get_one::<String>("file"),
+                    sc.get_one::<String>("payload"),
+                );
+                let body = serde_json::json!({ "response": payload }).to_string();
+                http_post(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/requests/{id}/respond"),
+                    &body,
+                )
+            }
             _ => unreachable!(),
         },
 
@@ -307,32 +334,6 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
             _ => unreachable!(),
         },
 
-        Some(("inbox-requests", _)) => http_get(agent, &url, &token, "/api/requests"),
-        Some(("claim", sc)) => {
-            let id = sc.get_one::<String>("id").unwrap();
-            http_post(
-                agent,
-                &url,
-                &token,
-                &format!("/api/requests/{id}/claim"),
-                "",
-            )
-        }
-        Some(("respond", sc)) => {
-            let id = sc.get_one::<String>("id").unwrap();
-            let payload = read_payload(
-                sc.get_one::<String>("file"),
-                sc.get_one::<String>("payload"),
-            );
-            let body = serde_json::json!({ "response": payload }).to_string();
-            http_post(
-                agent,
-                &url,
-                &token,
-                &format!("/api/requests/{id}/respond"),
-                &body,
-            )
-        }
         _ => unreachable!(),
     }
 }
