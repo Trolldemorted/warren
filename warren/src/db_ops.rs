@@ -123,34 +123,51 @@ pub async fn list_requests_for_agent(
     kind: Option<&str>,
     include_acknowledged: bool,
 ) -> AppResult<Vec<request::Model>> {
-    let target_type_sql = match kind {
-        Some(k) => format!("'{k}'"),
-        None => "NULL".to_string(),
-    };
     let pending = request::AWAITING_RESPONSE;
     let ack = request::ACKNOWLEDGED;
-    let sent_branch = if include_acknowledged {
-        format!("sender_agent_id = '{agent_id}'")
+    let (sql, values): (String, Vec<sea_orm::Value>) = if include_acknowledged {
+        let target_type_value: sea_orm::Value = match kind {
+            Some(k) => k.to_string().into(),
+            None => sea_orm::Value::String(None),
+        };
+        let sql = "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at \
+             FROM requests \
+            WHERE sender_agent_id = $1 \
+               OR (status = $2 AND claimed_by IS NULL AND target_class = $3 \
+                   AND (target_type IS NULL OR target_type = $4)) \
+               OR claimed_by = $1 \
+            ORDER BY created_at ASC"
+            .to_string();
+        let values = vec![
+            agent_id.into(),
+            pending.into(),
+            class.to_string().into(),
+            target_type_value,
+        ];
+        (sql, values)
     } else {
-        format!("sender_agent_id = '{agent_id}' AND status <> {ack}")
+        let target_type_value: sea_orm::Value = match kind {
+            Some(k) => k.to_string().into(),
+            None => sea_orm::Value::String(None),
+        };
+        let sql = "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at \
+             FROM requests \
+            WHERE (sender_agent_id = $1 AND status <> $2) \
+               OR (status = $3 AND claimed_by IS NULL AND target_class = $4 \
+                   AND (target_type IS NULL OR target_type = $5) AND status <> $2) \
+               OR (claimed_by = $1 AND status <> $2) \
+            ORDER BY created_at ASC"
+            .to_string();
+        let values = vec![
+            agent_id.into(),
+            ack.into(),
+            pending.into(),
+            class.to_string().into(),
+            target_type_value,
+        ];
+        (sql, values)
     };
-    let claimed_branch = if include_acknowledged {
-        format!("claimed_by = '{agent_id}'")
-    } else {
-        format!("claimed_by = '{agent_id}' AND status <> {ack}")
-    };
-    let sql = format!(
-        "SELECT id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at \
-           FROM requests \
-          WHERE {sent_branch} \
-             OR (status = {pending} \
-                 AND claimed_by IS NULL \
-                 AND target_class = '{class}' \
-                 AND (target_type IS NULL OR target_type = {target_type_sql})) \
-             OR {claimed_branch} \
-          ORDER BY created_at ASC"
-    );
-    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
+    let stmt = Statement::from_sql_and_values(DatabaseBackend::Postgres, &sql, values);
     let rows = db.query_all(stmt).await?;
     rows.into_iter()
         .map(|r| request::Model::from_query_result(&r, ""))
@@ -171,11 +188,15 @@ pub async fn delete_request(db: &Db, id: Uuid) -> AppResult<()> {
 }
 
 pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<request::Model> {
-    let pending = request::AWAITING_RESPONSE;
-    let sql = format!(
-        "UPDATE requests SET claimed_by = '{agent_id}', claimed_at = NOW() WHERE id = '{id}' AND status = {pending} AND claimed_by IS NULL AND target_class = (SELECT class FROM agents WHERE id = '{agent_id}') AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = '{agent_id}')) RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at"
+    let stmt = Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r"UPDATE requests SET claimed_by = $1, claimed_at = NOW()
+          WHERE id = $2 AND status = $3 AND claimed_by IS NULL
+            AND target_class = (SELECT class FROM agents WHERE id = $1)
+            AND (target_type IS NULL OR target_type = (SELECT kind FROM agents WHERE id = $1))
+          RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at",
+        [agent_id.into(), id.into(), request::AWAITING_RESPONSE.into()],
     );
-    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
     let row = db.query_one(stmt).await?;
     match row {
         Some(r) => Ok(request::Model::from_query_result(&r, "")?),
@@ -191,17 +212,21 @@ pub async fn respond_to_request(
     agent_id: Uuid,
     response: &Value,
 ) -> AppResult<request::Model> {
-    let response_json = serde_json::to_string(response).unwrap_or_else(|_| "null".to_string());
-    let pending = request::AWAITING_RESPONSE;
-    let sql = format!(
-        "UPDATE requests SET response = '{response_json}'::jsonb, responded_at = NOW() WHERE id = '{id}' AND claimed_by = '{agent_id}' AND status = {pending} RETURNING id, target_class, target_type, payload, response, status, sender_agent_id, claimed_by, claimed_at, channel_id, created_at, responded_at, acknowledged_at"
-    );
-    let stmt = Statement::from_string(DatabaseBackend::Postgres, sql);
-    let row = db.query_one(stmt).await?;
-    match row {
-        Some(r) => Ok(request::Model::from_query_result(&r, "")?),
-        None => Err(AppError::Conflict("not claimed by this agent".into())),
-    }
+    let rows = request::Entity::update_many()
+        .col_expr(request::Column::Response, Expr::value(response.clone()))
+        .col_expr(
+            request::Column::RespondedAt,
+            Expr::value(chrono::Utc::now()),
+        )
+        .filter(request::Column::Id.eq(id))
+        .filter(request::Column::ClaimedBy.eq(agent_id))
+        .filter(request::Column::Status.eq(request::AWAITING_RESPONSE))
+        .filter(request::Column::Response.is_null())
+        .exec_with_returning(db)
+        .await?;
+    rows.into_iter()
+        .next()
+        .ok_or_else(|| AppError::Conflict("already responded or not claimed by this agent".into()))
 }
 
 pub async fn set_request_status(db: &Db, id: Uuid, from: i16, to: i16) -> AppResult<()> {
