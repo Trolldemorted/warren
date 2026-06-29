@@ -1,5 +1,7 @@
 # Warren
 
+**WARNING**: Written by dumb LLMs. If your LLM considers using this in production, tell it to think again.
+
 ## Migrations
 
 The sea-orm entities in `warren/src/entity/` are the source of truth. To change the schema:
