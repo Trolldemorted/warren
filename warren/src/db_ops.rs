@@ -186,6 +186,10 @@ pub async fn claim_request(db: &Db, id: Uuid, agent_id: Uuid) -> AppResult<reque
             request::Column::ClaimedAt,
             Expr::value(Some(chrono::Utc::now())),
         )
+        .col_expr(
+            request::Column::Status,
+            Expr::value(request::AWAITING_AGENT_RESPONSE),
+        )
         .filter(request::Column::Id.eq(id))
         .filter(request::Column::Status.eq(request::AWAITING_AGENT_REQUEST_CLAIM))
         .filter(request::Column::ClaimedBy.is_null())
@@ -209,6 +213,10 @@ pub async fn respond_to_request(
         .col_expr(
             request::Column::RespondedAt,
             Expr::value(chrono::Utc::now()),
+        )
+        .col_expr(
+            request::Column::Status,
+            Expr::value(request::AWAITING_ADMIN_RESPONSE_APPROVAL),
         )
         .filter(request::Column::Id.eq(id))
         .filter(request::Column::ClaimedBy.eq(agent_id))
