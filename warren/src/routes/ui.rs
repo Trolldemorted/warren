@@ -371,7 +371,20 @@ async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
                 .as_ref()
                 .and_then(|id| name_map.get(id).cloned())
                 .unwrap_or_else(|| "admin".to_string());
-            CommsRow { req, source }
+            let claimed_by_name = req
+                .claimed_by
+                .as_ref()
+                .and_then(|id| name_map.get(id).cloned());
+            let acknowledged_by_name = req
+                .acknowledged_by
+                .as_ref()
+                .and_then(|id| name_map.get(id).cloned());
+            CommsRow {
+                req,
+                source,
+                claimed_by_name,
+                acknowledged_by_name,
+            }
         })
         .collect();
     let t = CommsTemplate {

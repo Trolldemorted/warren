@@ -41,6 +41,8 @@ pub struct CommsTemplate<'a> {
 pub struct CommsRow<'a> {
     pub req: &'a crate::entity::request::Model,
     pub source: String,
+    pub claimed_by_name: Option<String>,
+    pub acknowledged_by_name: Option<String>,
 }
 
 #[derive(Template)]

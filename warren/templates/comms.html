@@ -50,8 +50,8 @@
             </a>
           </td>
           <td><small>{{ r.status_human() }}</small></td>
-          <td><small class="text-muted">{% if let Some(c) = r.claimed_by %}{{ c }}{% else %}—{% endif %}</small></td>
-          <td><small class="text-muted">{% if let Some(a) = r.acknowledged_by %}{{ a }}{% else %}—{% endif %}</small></td>
+          <td><small class="text-muted">{% if let Some(name) = row.claimed_by_name %}{{ name }}{% else %}—{% endif %}</small></td>
+          <td><small class="text-muted">{% if let Some(name) = row.acknowledged_by_name %}{{ name }}{% else %}—{% endif %}</small></td>
           <td>{% match r.response_preview() %}{% when Some(resp) %}<a class="payload-link" href="#response-{{ r.id }}" title="Click to view full response"><pre class="payload mb-0">{{ resp }}</pre></a>{% when None %}—{% endmatch %}</td>
           <td>
             <div class="d-flex flex-wrap gap-1 justify-content-end">
