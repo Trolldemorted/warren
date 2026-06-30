@@ -94,7 +94,7 @@
       {% endif %}
     </div>
   </nav>
-  <main class="container">
+  <main class="container-fluid">
     {% if let Some(flash) = flash %}
     <div class="alert alert-{{ flash.level }} mt-3" role="alert">{{ flash.message }}</div>
     {% endif %}
