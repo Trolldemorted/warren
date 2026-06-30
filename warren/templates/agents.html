@@ -23,14 +23,30 @@
       <td><small class="text-muted">{{ a.created_at }}</small></td>
       <td class="text-end">
         <a class="btn btn-sm btn-outline-secondary" href="/admin/agents/{{ a.id }}/edit">Edit</a>
-        <form method="post" action="/admin/agents/{{ a.id }}/delete" class="d-inline"
-              onsubmit="return confirm('Delete agent {{ a.name }}?')">
-          <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-        </form>
+        <a class="btn btn-sm btn-outline-danger" href="#delete-agent-{{ a.id }}">Delete</a>
       </td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+
+{% for a in agents %}
+<div id="delete-agent-{{ a.id }}" class="modal" role="dialog" aria-labelledby="delete-agent-title-{{ a.id }}">
+  <a class="modal-bg" href="#" aria-label="Close"></a>
+  <div class="modal-dialog" role="document">
+    <div class="modal-header">
+      <h5 class="modal-title" id="delete-agent-title-{{ a.id }}">Delete agent?</h5>
+      <a class="modal-close" href="#" aria-label="Close">×</a>
+    </div>
+    <div class="modal-body">
+      <p>Are you sure you want to delete agent <code>{{ a.name }}</code>? This cannot be undone.</p>
+      <form method="post" action="/admin/agents/{{ a.id }}/delete">
+        <button type="submit" class="btn btn-danger">Yes, delete</button>
+        <a href="#" class="btn btn-link">Cancel</a>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
 {% endif %}
 {% endblock %}

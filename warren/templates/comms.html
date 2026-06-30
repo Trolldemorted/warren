@@ -72,10 +72,7 @@
                 <button class="btn btn-sm btn-outline-danger" type="submit">Reject</button>
               </form>
               {% endif %}
-              <form method="post" action="/admin/comms/requests/{{ r.id }}/delete" class="d-inline"
-                    onsubmit="return confirm('Delete this request? This cannot be undone.')">
-                <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
-              </form>
+              <a class="btn btn-sm btn-outline-danger" href="#delete-request-{{ r.id }}">Delete</a>
             </div>
           </td>
         </tr>
@@ -112,6 +109,22 @@
       </div>
     </div>
     {% endif %}
+    <div id="delete-request-{{ r.id }}" class="modal" role="dialog" aria-labelledby="delete-request-title-{{ r.id }}">
+      <a class="modal-bg" href="#" aria-label="Close"></a>
+      <div class="modal-dialog" role="document">
+        <div class="modal-header">
+          <h5 class="modal-title" id="delete-request-title-{{ r.id }}">Delete request?</h5>
+          <a class="modal-close" href="#" aria-label="Close">×</a>
+        </div>
+        <div class="modal-body">
+          <p>Are you sure you want to delete this request? This cannot be undone.</p>
+          <form method="post" action="/admin/comms/requests/{{ r.id }}/delete">
+            <button type="submit" class="btn btn-danger">Yes, delete</button>
+            <a href="#" class="btn btn-link">Cancel</a>
+          </form>
+        </div>
+      </div>
+    </div>
     {% endfor %}
   {% endif %}
 </section>
