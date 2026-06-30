@@ -339,6 +339,8 @@ struct InjectForm {
     #[serde(default)]
     target_type: Option<String>,
     payload: String,
+    #[serde(default)]
+    response: Option<String>,
 }
 
 async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -488,6 +490,7 @@ struct CommsEditTemplate {
     target_classes: Vec<String>,
     target_kinds: Vec<String>,
     payload: String,
+    response: String,
     form_action: String,
 }
 
@@ -533,6 +536,7 @@ async fn message_edit_page(
         target_classes,
         target_kinds,
         payload: req.payload.clone(),
+        response: req.response.clone().unwrap_or_default(),
         form_action: format!("/admin/comms/requests/{id}/edit"),
     })
 }
@@ -547,12 +551,14 @@ async fn message_edit_save(
         return redirect_to_login();
     }
     let target_type = form.target_type.filter(|s| !s.is_empty());
-    match crate::db_ops::update_request_payload(
+    let response = form.response.filter(|s| !s.is_empty());
+    match crate::db_ops::update_request(
         &state.db,
         id,
         &form.target_class,
         target_type.as_deref(),
         &form.payload,
+        response.as_deref(),
     )
     .await
     {

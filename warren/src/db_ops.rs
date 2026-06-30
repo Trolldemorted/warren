@@ -535,12 +535,13 @@ async fn query_schema_migrations(
     Ok(MigrationRow::find_by_statement(stmt).all(db).await?)
 }
 
-pub async fn update_request_payload(
+pub async fn update_request(
     db: &Db,
     id: Uuid,
     target_class: &str,
     target_type: Option<&str>,
     payload: &str,
+    response: Option<&str>,
 ) -> AppResult<()> {
     let res = request::Entity::update_many()
         .col_expr(
@@ -552,6 +553,10 @@ pub async fn update_request_payload(
             Expr::value(target_type.map(str::to_string)),
         )
         .col_expr(request::Column::Payload, Expr::value(payload.to_string()))
+        .col_expr(
+            request::Column::Response,
+            Expr::value(response.map(str::to_string)),
+        )
         .filter(request::Column::Id.eq(id))
         .exec(db)
         .await?;
