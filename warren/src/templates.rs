@@ -31,11 +31,16 @@ pub struct AgentFormTemplate {
 
 #[derive(Template)]
 #[template(path = "comms.html")]
-pub struct CommsTemplate {
+pub struct CommsTemplate<'a> {
     pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
-    pub requests: Vec<crate::entity::request::Model>,
+    pub rows: Vec<CommsRow<'a>>,
+}
+
+pub struct CommsRow<'a> {
+    pub req: &'a crate::entity::request::Model,
+    pub source: String,
 }
 
 #[derive(Template)]

@@ -4,7 +4,7 @@ use crate::ids::new_session_token;
 use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew};
 use crate::templates::{
     AgentFormTemplate, AgentsTemplate, ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate,
-    CommsTemplate, Flash, LoginTemplate, MigrationsTemplate,
+    CommsRow, CommsTemplate, Flash, LoginTemplate, MigrationsTemplate,
 };
 use crate::{auth, AppState};
 use askama::Template;
@@ -357,11 +357,28 @@ async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
         Ok(r) => r,
         Err(e) => return err_page(e),
     };
+    let agents = match crate::db_ops::list_agents(&state.db).await {
+        Ok(a) => a,
+        Err(e) => return err_page(e),
+    };
+    let name_map: std::collections::HashMap<uuid::Uuid, String> =
+        agents.into_iter().map(|a| (a.id, a.name)).collect();
+    let rows = reqs
+        .iter()
+        .map(|req| {
+            let source = req
+                .sender_agent_id
+                .as_ref()
+                .and_then(|id| name_map.get(id).cloned())
+                .unwrap_or_else(|| "admin".to_string());
+            CommsRow { req, source }
+        })
+        .collect();
     let t = CommsTemplate {
         title: Some("Comms"),
         nav: Some("comms"),
         flash: None,
-        requests: reqs,
+        rows,
     };
     render(t)
 }

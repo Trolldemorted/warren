@@ -8,7 +8,7 @@
     <h2 class="h5 mb-0">Requests</h2>
     <a class="btn btn-sm btn-primary ms-2" href="/admin/comms/requests/new">Inject</a>
   </div>
-  {% if requests.is_empty() %}
+  {% if rows.is_empty() %}
     <p class="text-muted">No requests.</p>
   {% else %}
     <div class="table-responsive">
@@ -16,29 +16,40 @@
       <colgroup>
         <col style="width: 9%">
         <col style="width: 8%">
-        <col style="width: 19%">
+        <col style="width: 8%">
+        <col style="width: 17%">
+        <col style="width: 13%">
+        <col style="width: 10%">
+        <col style="width: 14%">
         <col style="width: 11%">
-        <col style="width: 12%">
-        <col style="width: 18%">
-        <col style="width: 12%">
-        <col style="width: 11%">
+        <col style="width: 10%">
       </colgroup>
       <thead>
         <tr>
-          <th>Created</th><th>Target</th><th>Payload</th><th>Status</th><th>Claimed by</th><th>Acknowledged by</th><th>Response</th><th></th>
+          <th>Created (UTC)</th>
+          <th>Source</th>
+          <th>Target</th>
+          <th>Payload</th>
+          <th>Status</th>
+          <th>Claimed by</th>
+          <th>Acknowledged by</th>
+          <th>Response</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
-        {% for r in requests %}
+        {% for row in rows %}
+        {% let r = row.req %}
         <tr>
-          <td><small>{{ r.created_at }}</small></td>
+          <td><small>{{ r.created_at_display() }}</small></td>
+          <td><small>{{ row.source }}</small></td>
           <td>{{ r.target_class }}{% if let Some(t) = r.target_type %}/{{ t }}{% endif %}</td>
           <td>
             <a class="payload-link" href="#payload-{{ r.id }}" title="Click to view full payload">
               <pre class="payload mb-0">{{ r.payload_preview() }}</pre>
             </a>
           </td>
-          <td><small>{{ r.status_label() }}</small></td>
+          <td><small>{{ r.status_human() }}</small></td>
           <td><small class="text-muted">{% if let Some(c) = r.claimed_by %}{{ c }}{% else %}—{% endif %}</small></td>
           <td><small class="text-muted">{% if let Some(a) = r.acknowledged_by %}{{ a }}{% else %}—{% endif %}</small></td>
           <td>{% match r.response_preview() %}{% when Some(resp) %}<a class="payload-link" href="#response-{{ r.id }}" title="Click to view full response"><pre class="payload mb-0">{{ resp }}</pre></a>{% when None %}—{% endmatch %}</td>
@@ -73,7 +84,8 @@
     </table>
     </div>
 
-    {% for r in requests %}
+    {% for row in rows %}
+    {% let r = row.req %}
     <div id="payload-{{ r.id }}" class="modal" role="dialog" aria-labelledby="payload-title-{{ r.id }}">
       <a class="modal-bg" href="#" aria-label="Close"></a>
       <div class="modal-dialog" role="document">

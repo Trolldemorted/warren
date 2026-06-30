@@ -136,6 +136,23 @@ impl Model {
         status_label(self.status)
     }
 
+    pub fn status_human(&self) -> &'static str {
+        match self.status {
+            AWAITING_ADMIN_REQUEST_APPROVAL => "Awaiting Admin Approval",
+            AWAITING_AGENT_REQUEST_CLAIM => "Awaiting Claim",
+            AWAITING_AGENT_RESPONSE => "Awaiting Agent Response",
+            AWAITING_ADMIN_RESPONSE_APPROVAL => "Awaiting Admin Approval",
+            AWAITING_AGENT_RESPONSE_ACKNOWLEDGE => "Awaiting Agent Acknowledge",
+            DONE => "Done",
+            REJECTED => "Rejected",
+            _ => "Unknown",
+        }
+    }
+
+    pub fn created_at_display(&self) -> String {
+        self.created_at.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
     pub fn payload_preview(&self) -> String {
         preview_str(&self.payload, 120)
     }
