@@ -59,7 +59,9 @@ pub struct Model {
     #[sea_orm(column_name = "target_type")]
     #[serde(rename = "target_type")]
     pub target_type: Option<String>,
+    #[sea_orm(column_type = "Text")]
     pub payload: String,
+    #[sea_orm(column_type = "Text")]
     pub response: Option<String>,
     #[sea_orm(default_expr = "0")]
     #[serde(
@@ -75,6 +77,7 @@ pub struct Model {
     pub created_at: ChronoDateTimeUtc,
     pub responded_at: Option<ChronoDateTimeUtc>,
     pub acknowledged_at: Option<ChronoDateTimeUtc>,
+    pub acknowledged_by: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -87,6 +90,12 @@ pub enum Relation {
     Agent,
     #[sea_orm(
         belongs_to = "super::agent::Entity",
+        from = "Column::AcknowledgedBy",
+        to = "super::agent::Column::Id"
+    )]
+    Acknowledger,
+    #[sea_orm(
+        belongs_to = "super::agent::Entity",
         from = "Column::SenderAgentId",
         to = "super::agent::Column::Id"
     )]
@@ -94,7 +103,8 @@ pub enum Relation {
     #[sea_orm(
         belongs_to = "super::channel::Entity",
         from = "Column::ChannelId",
-        to = "super::channel::Column::Id"
+        to = "super::channel::Column::Id",
+        on_delete = "SetNull"
     )]
     Channel,
 }

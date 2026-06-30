@@ -305,6 +305,10 @@ pub async fn acknowledge_request(
             request::Column::AcknowledgedAt,
             Expr::value(chrono::Utc::now()),
         )
+        .col_expr(
+            request::Column::AcknowledgedBy,
+            Expr::value(if by_admin { None } else { Some(caller_id) } as Option<Uuid>),
+        )
         .filter(request::Column::Id.eq(id))
         .filter(request::Column::Status.eq(request::AWAITING_AGENT_RESPONSE_ACKNOWLEDGE));
     if !by_admin {
@@ -330,6 +334,10 @@ pub async fn unacknowledge_request(db: &Db, id: Uuid) -> AppResult<()> {
         .col_expr(
             request::Column::AcknowledgedAt,
             Expr::value(None as Option<chrono::DateTime<chrono::Utc>>),
+        )
+        .col_expr(
+            request::Column::AcknowledgedBy,
+            Expr::value(None as Option<Uuid>),
         )
         .filter(request::Column::Id.eq(id))
         .filter(request::Column::Status.eq(request::DONE))

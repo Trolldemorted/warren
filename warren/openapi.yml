@@ -129,6 +129,7 @@ components:
         created_at: { type: string, format: date-time }
         responded_at: { type: string, format: date-time, nullable: true }
         acknowledged_at: { type: string, format: date-time, nullable: true }
+        acknowledged_by: { type: string, format: uuid, nullable: true }
       required: [id, target_class, target_type, payload, status, created_at]
     RequestNew:
       type: object

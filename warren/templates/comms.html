@@ -13,17 +13,18 @@
   {% else %}
     <table class="table table-sm align-middle">
       <colgroup>
-        <col style="width: 10%">
         <col style="width: 9%">
-        <col style="width: 22%">
+        <col style="width: 8%">
+        <col style="width: 19%">
         <col style="width: 11%">
-        <col style="width: 14%">
-        <col style="width: 22%">
         <col style="width: 12%">
+        <col style="width: 18%">
+        <col style="width: 12%">
+        <col style="width: 11%">
       </colgroup>
       <thead>
         <tr>
-          <th>Created</th><th>Target</th><th>Payload</th><th>Status</th><th>Claimer</th><th>Response</th><th></th>
+          <th>Created</th><th>Target</th><th>Payload</th><th>Status</th><th>Claimed by</th><th>Acknowledged by</th><th>Response</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -38,6 +39,7 @@
           </td>
           <td><small>{{ r.status_label() }}</small></td>
           <td><small class="text-muted">{% if let Some(c) = r.claimed_by %}{{ c }}{% else %}—{% endif %}</small></td>
+          <td><small class="text-muted">{% if let Some(a) = r.acknowledged_by %}{{ a }}{% else %}—{% endif %}</small></td>
           <td>{% match r.response_preview() %}{% when Some(resp) %}<a class="payload-link" href="#response-{{ r.id }}" title="Click to view full response"><pre class="payload mb-0">{{ resp }}</pre></a>{% when None %}—{% endmatch %}</td>
           <td>
             <div class="d-flex flex-wrap gap-1 justify-content-end">
