@@ -34,6 +34,9 @@
     a.payload-link { display: block; color: inherit; text-decoration: none; cursor: pointer; }
     a.payload-link:hover pre.payload,
     a.payload-link:focus pre.payload { background: #e9ecef; }
+    @media (max-width: 575.98px) {
+      main.container { padding-left: 0; padding-right: 0; }
+    }
     .modal { display: none; position: fixed; inset: 0; z-index: 1050; overflow: auto; padding: 1rem; }
     .modal:target { display: block; }
     .modal-bg { display: block; position: fixed; inset: 0; z-index: 0; cursor: default; }

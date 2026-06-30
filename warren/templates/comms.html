@@ -11,6 +11,7 @@
   {% if requests.is_empty() %}
     <p class="text-muted">No requests.</p>
   {% else %}
+    <div class="table-responsive">
     <table class="table table-sm align-middle">
       <colgroup>
         <col style="width: 9%">
@@ -70,6 +71,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
 
     {% for r in requests %}
     <div id="payload-{{ r.id }}" class="modal" role="dialog" aria-labelledby="payload-title-{{ r.id }}">
