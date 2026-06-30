@@ -212,6 +212,15 @@ fn build_cli() -> Command {
         .subcommand(build_requests_cmd(admin))
         .subcommand(build_agents_cmd(admin))
         .subcommand(build_channels_cmd(admin))
+        .subcommand(
+            Command::new("pending-requests")
+                .about("List actionable requests as markdown: unclaimed in inbox, or claimed by you and not yet responded")
+                .hide(admin),
+        )
+        .subcommand(
+            Command::new("pending-acknowledges")
+                .about("List pending acknowledges as markdown (status awaiting_agent_response_acknowledge)"),
+        )
 }
 
 fn main() -> ExitCode {
@@ -409,8 +418,82 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
             _ => print_cmd_help(build_channels_cmd(admin)),
         },
 
+        Some(("pending-requests", _)) => {
+            let body = http_get(agent, &url, &token, "/api/requests?limit=500&include_done=true")?;
+            format_pending(
+                &body,
+                &[
+                    "awaiting_agent_request_claim",
+                    "awaiting_agent_response",
+                ],
+                false,
+            )
+        }
+        Some(("pending-acknowledges", _)) => {
+            let body = http_get(agent, &url, &token, "/api/requests?limit=500&include_done=true")?;
+            format_pending(
+                &body,
+                &["awaiting_agent_response_acknowledge"],
+                true,
+            )
+        }
+
         _ => Err("unknown subcommand".to_string()),
     }
+}
+
+fn format_pending(body: &str, accepted: &[&str], include_response: bool) -> Result<String, String> {
+    let v: Value = serde_json::from_str(body).map_err(|e| format!("parse json: {e}"))?;
+    let arr = v.as_array().ok_or("expected JSON array from /api/requests")?;
+    let mut out = String::new();
+    let mut first = true;
+    for req in arr {
+        let status = req["status"].as_str().unwrap_or("");
+        if !accepted.contains(&status) {
+            continue;
+        }
+        let id = req["id"].as_str().unwrap_or("");
+        let target_class = req["target_class"].as_str().unwrap_or("");
+        let target_type = req["target_type"].as_str();
+        let target = match target_type {
+            Some(t) => format!("{target_class}/{t}"),
+            None => target_class.to_string(),
+        };
+        let payload = req["payload"].as_str().unwrap_or("");
+        let created = req["created_at"].as_str().unwrap_or("");
+        let created_display = created.get(..19).unwrap_or(created);
+
+        let mut entry = String::new();
+        entry.push_str(&format!("## {id}\n\n"));
+        entry.push_str(&format!("**Status:** {status}\n"));
+        entry.push_str(&format!("**Target:** {target}\n"));
+        entry.push_str(&format!("**Created:** {created_display}\n"));
+        if !payload.is_empty() {
+            entry.push_str("\n**Payload:**\n\n```\n");
+            entry.push_str(payload);
+            if !payload.ends_with('\n') {
+                entry.push('\n');
+            }
+            entry.push_str("```\n");
+        }
+        if include_response {
+            if let Some(resp) = req["response"].as_str() {
+                entry.push_str("\n**Response:**\n\n```\n");
+                entry.push_str(resp);
+                if !resp.ends_with('\n') {
+                    entry.push('\n');
+                }
+                entry.push_str("```\n");
+            }
+        }
+
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        out.push_str(&entry);
+    }
+    Ok(out)
 }
 
 fn read_payload(file: Option<&String>, payload: Option<&String>) -> String {
