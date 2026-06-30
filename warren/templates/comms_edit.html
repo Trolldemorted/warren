@@ -3,6 +3,15 @@
 <h1 class="h3 mb-3">Edit request</h1>
 <form method="post" action="{{ form_action }}">
   <div class="mb-3">
+    <label class="form-label">Status</label>
+    <select class="form-select" name="status">
+      {% for label in status_labels %}
+        <option value="{{ label }}" {% if label == status_label %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <div class="form-text">Admin override — use to recover from a stuck state.</div>
+  </div>
+  <div class="mb-3">
     <label class="form-label">Target class</label>
     {% if target_classes.is_empty() %}
       <input class="form-control" name="target_class" value="{{ target_class }}" required>

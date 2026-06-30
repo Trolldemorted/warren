@@ -57,6 +57,7 @@ pub fn router() -> Router<AppState> {
             "/api/requests/:id/unacknowledge",
             post(api_unacknowledge_request),
         )
+        .route("/api/requests/:id/status", post(api_set_request_status))
         .route(
             "/api/channels",
             get(api_list_channels).post(api_create_channel),
@@ -422,6 +423,24 @@ async fn api_unacknowledge_request(
     ctx.require_admin()?;
     crate::db_ops::unacknowledge_request(&state.db, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct RequestSetStatus {
+    status: String,
+}
+
+async fn api_set_request_status(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RequestSetStatus>,
+) -> AppResult<Json<request::Model>> {
+    ctx.require_admin()?;
+    let new_status = parse_request_status(Some(&body.status))?
+        .ok_or_else(|| AppError::BadRequest(format!("unknown status '{}'", body.status)))?;
+    let r = crate::db_ops::set_request_status_admin(&state.db, id, new_status).await?;
+    Ok(Json(r))
 }
 
 fn parse_request_status(s: Option<&str>) -> AppResult<Option<i16>> {

@@ -58,6 +58,10 @@ pub fn router() -> Router<AppState> {
             "/admin/comms/requests/:id/delete",
             post(message_delete_request),
         )
+        .route(
+            "/admin/comms/requests/:id/set-status",
+            post(message_set_status),
+        )
         .route("/admin/migrations", get(migrations_page))
         .route("/admin/channels", get(channels_page))
         .route("/admin/channels/new", get(channel_new_page))
@@ -341,6 +345,8 @@ struct InjectForm {
     payload: String,
     #[serde(default)]
     response: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -491,6 +497,8 @@ struct CommsEditTemplate {
     target_kinds: Vec<String>,
     payload: String,
     response: String,
+    status_label: &'static str,
+    status_labels: Vec<String>,
     form_action: String,
 }
 
@@ -518,9 +526,9 @@ async fn message_edit_page(
     };
     let target_kinds = match crate::db_ops::distinct_agent_kinds(&state.db).await {
         Ok(mut v) => {
-            if let Some(t) = &req.target_type {
-                if !v.contains(t) {
-                    v.insert(0, t.clone());
+            if let Some(t) = req.target_type.clone() {
+                if !v.contains(&t) {
+                    v.insert(0, t);
                 }
             }
             v
@@ -531,12 +539,17 @@ async fn message_edit_page(
         title: Some("Edit request"),
         nav: Some("comms"),
         flash: None,
-        target_class: req.target_class,
-        target_type: req.target_type,
+        target_class: req.target_class.clone(),
+        target_type: req.target_type.clone(),
         target_classes,
         target_kinds,
         payload: req.payload.clone(),
         response: req.response.clone().unwrap_or_default(),
+        status_label: req.status_label(),
+        status_labels: crate::entity::request::STATUS_LABELS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         form_action: format!("/admin/comms/requests/{id}/edit"),
     })
 }
@@ -552,6 +565,13 @@ async fn message_edit_save(
     }
     let target_type = form.target_type.filter(|s| !s.is_empty());
     let response = form.response.filter(|s| !s.is_empty());
+    let status = match form.status.as_deref() {
+        Some(label) => match parse_request_status_label(label) {
+            Some(s) => s,
+            None => return err_page(AppError::BadRequest(format!("unknown status '{label}'"))),
+        },
+        None => return err_page(AppError::BadRequest("status required".into())),
+    };
     match crate::db_ops::update_request(
         &state.db,
         id,
@@ -559,6 +579,7 @@ async fn message_edit_save(
         target_type.as_deref(),
         &form.payload,
         response.as_deref(),
+        status,
     )
     .await
     {
@@ -578,6 +599,45 @@ async fn message_delete_request(
     match crate::db_ops::delete_request(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/comms").into_response(),
         Err(e) => err_page(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SetStatusForm {
+    status: String,
+}
+
+async fn message_set_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Form(form): Form<SetStatusForm>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let label = form.status;
+    let new_status = match parse_request_status_label(&label) {
+        Some(s) => s,
+        None => return err_page(AppError::BadRequest(format!("unknown status '{label}'"))),
+    };
+    match crate::db_ops::set_request_status_admin(&state.db, id, new_status).await {
+        Ok(_) => Redirect::to("/admin/comms").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+fn parse_request_status_label(label: &str) -> Option<i16> {
+    use crate::entity::request::*;
+    match label {
+        "awaiting_admin_request_approval" => Some(AWAITING_ADMIN_REQUEST_APPROVAL),
+        "awaiting_agent_request_claim" => Some(AWAITING_AGENT_REQUEST_CLAIM),
+        "awaiting_agent_response" => Some(AWAITING_AGENT_RESPONSE),
+        "awaiting_admin_response_approval" => Some(AWAITING_ADMIN_RESPONSE_APPROVAL),
+        "awaiting_agent_response_acknowledge" => Some(AWAITING_AGENT_RESPONSE_ACKNOWLEDGE),
+        "done" => Some(DONE),
+        "rejected" => Some(REJECTED),
+        _ => None,
     }
 }
 

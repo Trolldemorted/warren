@@ -242,6 +242,22 @@ pub async fn set_request_status(db: &Db, id: Uuid, from: i16, to: i16) -> AppRes
     Ok(())
 }
 
+/// Admin override: set a request's status to any valid value without
+/// checking the current state. Returns the updated row, or NotFound if
+/// no row exists with this id.
+pub async fn set_request_status_admin(
+    db: &Db,
+    id: Uuid,
+    new_status: i16,
+) -> AppResult<request::Model> {
+    let rows = request::Entity::update_many()
+        .col_expr(request::Column::Status, Expr::value(new_status))
+        .filter(request::Column::Id.eq(id))
+        .exec_with_returning(db)
+        .await?;
+    rows.into_iter().next().ok_or(AppError::NotFound)
+}
+
 pub async fn accept_request_response(db: &Db, id: Uuid) -> AppResult<()> {
     let res = request::Entity::update_many()
         .col_expr(
@@ -314,7 +330,6 @@ pub async fn acknowledge_request(
     if !by_admin {
         let owned = request::Column::SenderAgentId
             .eq(caller_id)
-            .or(request::Column::ClaimedBy.eq(caller_id))
             .into_condition();
         q = q.filter(owned);
     }
@@ -542,6 +557,7 @@ pub async fn update_request(
     target_type: Option<&str>,
     payload: &str,
     response: Option<&str>,
+    status: i16,
 ) -> AppResult<()> {
     let res = request::Entity::update_many()
         .col_expr(
@@ -557,6 +573,7 @@ pub async fn update_request(
             request::Column::Response,
             Expr::value(response.map(str::to_string)),
         )
+        .col_expr(request::Column::Status, Expr::value(status))
         .filter(request::Column::Id.eq(id))
         .exec(db)
         .await?;

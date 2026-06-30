@@ -549,8 +549,9 @@ paths:
       summary: "Mark an accepted response as consumed (status 4 -> 5)"
       description: |
         Agents may acknowledge an `awaiting_agent_response_acknowledge` request
-        they sent or claimed. Admins may acknowledge any on the agent's behalf.
-        No-op (409) if the row is not currently in that state.
+        they sent (the requesting party / recipient of the response). Admins
+        may acknowledge any on the agent's behalf. No-op (409) if the row is
+        not currently in that state.
       security:
         - adminSession: []
         - agentToken: []
@@ -585,3 +586,44 @@ paths:
       responses:
         '204': { description: OK }
         '409': { description: Request not done }
+  /api/requests/{id}/status:
+    post:
+      tags: [admin]
+      summary: "Admin override: set a request's status to any valid value."
+      description: |
+        Unconditional status setter for recovery — useful when a request is
+        stuck in an intermediate state and the normal transition endpoints
+        can't reach the desired state. No body validation beyond the status
+        label.
+      security: [{ adminSession: [] }]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum:
+                    - awaiting_admin_request_approval
+                    - awaiting_agent_request_claim
+                    - awaiting_agent_response
+                    - awaiting_admin_response_approval
+                    - awaiting_agent_response_acknowledge
+                    - done
+                    - rejected
+              required: [status]
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Request' }
+        '400': { description: Unknown status label }
+        '404': { description: No request with this id }

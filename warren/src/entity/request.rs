@@ -10,6 +10,16 @@ pub const AWAITING_AGENT_RESPONSE_ACKNOWLEDGE: i16 = 4;
 pub const DONE: i16 = 5;
 pub const REJECTED: i16 = 6;
 
+pub const STATUS_LABELS: [&str; 7] = [
+    "awaiting_admin_request_approval",
+    "awaiting_agent_request_claim",
+    "awaiting_agent_response",
+    "awaiting_admin_response_approval",
+    "awaiting_agent_response_acknowledge",
+    "done",
+    "rejected",
+];
+
 pub fn status_label(s: i16) -> &'static str {
     match s {
         AWAITING_ADMIN_REQUEST_APPROVAL => "awaiting_admin_request_approval",
