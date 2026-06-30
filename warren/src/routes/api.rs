@@ -1,4 +1,5 @@
-use crate::auth::{AuthContext, SESSION_COOKIE};
+use crate::auth::{AgentAuth, AuthContext, SESSION_COOKIE};
+use crate::db::Db;
 use crate::entity::{agent, channel, request};
 use crate::error::{AppError, AppResult};
 use crate::ids::{new_agent_token, new_session_token};
@@ -66,6 +67,39 @@ pub fn router() -> Router<AppState> {
                 .put(api_update_channel)
                 .delete(api_delete_channel),
         )
+}
+
+async fn build_request_not_found(db: &Db, agent: &AgentAuth, requested: Uuid) -> AppError {
+    let rows = crate::db_ops::list_requests_for_agent(
+        db,
+        agent.0.id,
+        &agent.0.class,
+        agent.0.kind.as_deref(),
+        false,
+    )
+    .await
+    .unwrap_or_default();
+    let ids: Vec<Uuid> = rows.into_iter().map(|r| r.id).collect();
+    AppError::RequestNotFound(requested, ids)
+}
+
+async fn run_or_classify_missing<F>(
+    db: &Db,
+    agent: &AgentAuth,
+    requested: Uuid,
+    fut: F,
+) -> AppResult<request::Model>
+where
+    F: std::future::Future<Output = AppResult<request::Model>>,
+{
+    match fut.await {
+        Ok(r) => Ok(r),
+        Err(AppError::Conflict(msg)) => match crate::db_ops::get_request(db, requested).await? {
+            None => Err(build_request_not_found(db, agent, requested).await),
+            Some(_) => Err(AppError::Conflict(msg)),
+        },
+        Err(e) => Err(e),
+    }
 }
 
 async fn api_login(
@@ -247,24 +281,27 @@ async fn api_get_request(
     ctx: AuthContext,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<request::Model>> {
-    let r = crate::db_ops::get_request(&state.db, id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    match &ctx {
-        AuthContext::Admin(_) => Ok(Json(r)),
-        AuthContext::Agent(a) => {
-            let sent_self = r.sender_agent_id.map(|s| s == a.0.id).unwrap_or(false);
-            let claims_self = r.claimed_by.map(|cb| cb == a.0.id).unwrap_or(false);
-            let in_inbox = r.status == request::AWAITING_AGENT_REQUEST_CLAIM
-                && r.claimed_by.is_none()
-                && r.target_class == a.0.class
-                && (r.target_type.is_none() || r.target_type.as_deref() == a.0.kind.as_deref());
-            if sent_self || claims_self || in_inbox {
-                Ok(Json(r))
-            } else {
-                Err(AppError::Forbidden)
+    match crate::db_ops::get_request(&state.db, id).await? {
+        None => match &ctx {
+            AuthContext::Admin(_) => Err(AppError::NotFound),
+            AuthContext::Agent(a) => Err(build_request_not_found(&state.db, a, id).await),
+        },
+        Some(r) => match &ctx {
+            AuthContext::Admin(_) => Ok(Json(r)),
+            AuthContext::Agent(a) => {
+                let sent_self = r.sender_agent_id.map(|s| s == a.0.id).unwrap_or(false);
+                let claims_self = r.claimed_by.map(|cb| cb == a.0.id).unwrap_or(false);
+                let in_inbox = r.status == request::AWAITING_AGENT_REQUEST_CLAIM
+                    && r.claimed_by.is_none()
+                    && r.target_class == a.0.class
+                    && (r.target_type.is_none() || r.target_type.as_deref() == a.0.kind.as_deref());
+                if sent_self || claims_self || in_inbox {
+                    Ok(Json(r))
+                } else {
+                    Err(AppError::Forbidden)
+                }
             }
-        }
+        },
     }
 }
 
@@ -284,7 +321,10 @@ async fn api_claim_request(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<request::Model>> {
     let agent = ctx.require_agent()?;
-    let r = crate::db_ops::claim_request(&state.db, id, agent.0.id).await?;
+    let r = run_or_classify_missing(&state.db, agent, id, async {
+        crate::db_ops::claim_request(&state.db, id, agent.0.id).await
+    })
+    .await?;
     Ok(Json(r))
 }
 
@@ -295,7 +335,10 @@ async fn api_respond_request(
     Json(body): Json<RequestRespond>,
 ) -> AppResult<Json<request::Model>> {
     let agent = ctx.require_agent()?;
-    let r = crate::db_ops::respond_to_request(&state.db, id, agent.0.id, &body.response).await?;
+    let r = run_or_classify_missing(&state.db, agent, id, async {
+        crate::db_ops::respond_to_request(&state.db, id, agent.0.id, &body.response).await
+    })
+    .await?;
     Ok(Json(r))
 }
 
@@ -356,12 +399,19 @@ async fn api_acknowledge_request(
     ctx: AuthContext,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<request::Model>> {
-    let (caller_id, by_admin) = match &ctx {
-        AuthContext::Admin(_) => (Uuid::nil(), true),
-        AuthContext::Agent(a) => (a.0.id, false),
-    };
-    let r = crate::db_ops::acknowledge_request(&state.db, id, caller_id, by_admin).await?;
-    Ok(Json(r))
+    match &ctx {
+        AuthContext::Admin(_) => {
+            let r = crate::db_ops::acknowledge_request(&state.db, id, Uuid::nil(), true).await?;
+            Ok(Json(r))
+        }
+        AuthContext::Agent(agent) => {
+            let r = run_or_classify_missing(&state.db, agent, id, async {
+                crate::db_ops::acknowledge_request(&state.db, id, agent.0.id, false).await
+            })
+            .await?;
+            Ok(Json(r))
+        }
+    }
 }
 
 async fn api_unacknowledge_request(

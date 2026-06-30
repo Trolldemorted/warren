@@ -4,11 +4,14 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("not found")]
     NotFound,
+    #[error("no request with id '{0}' exists")]
+    RequestNotFound(Uuid, Vec<Uuid>),
     #[error("unauthorized")]
     Unauthorized,
     #[error("forbidden")]
@@ -41,29 +44,60 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        self.log();
-        let (status, code, msg) = match &self {
-            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", "not found".to_string()),
+        match self {
+            AppError::Db(e) => {
+                log::error!("database error: {e}");
+                log::debug!("database error detail: {e:?}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal error", "code": "internal"})),
+                )
+                    .into_response()
+            }
+            AppError::Internal(e) => {
+                log::error!("internal error: {e:?}");
+                log::debug!("internal error detail: {e:#?}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal error", "code": "internal"})),
+                )
+                    .into_response()
+            }
+            AppError::NotFound => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "not found", "code": "not_found"})),
+            )
+                .into_response(),
+            AppError::RequestNotFound(id, eligible) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!("no request with id '{id}' exists"),
+                    "code": "request_not_found",
+                    "eligible_request_ids": eligible,
+                })),
+            )
+                .into_response(),
             AppError::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "unauthorized".to_string(),
-            ),
-            AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "forbidden".to_string()),
-            AppError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
-            AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.clone()),
-            AppError::Db(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                "internal error".to_string(),
-            ),
-            AppError::Internal(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-                "internal error".to_string(),
-            ),
-        };
-        (status, Json(json!({"error": msg, "code": code}))).into_response()
+                Json(json!({"error": "unauthorized", "code": "unauthorized"})),
+            )
+                .into_response(),
+            AppError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "forbidden", "code": "forbidden"})),
+            )
+                .into_response(),
+            AppError::Conflict(m) => (
+                StatusCode::CONFLICT,
+                Json(json!({"error": m, "code": "conflict"})),
+            )
+                .into_response(),
+            AppError::BadRequest(m) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": m, "code": "bad_request"})),
+            )
+                .into_response(),
+        }
     }
 }
 

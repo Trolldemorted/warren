@@ -156,6 +156,23 @@ components:
       properties:
         error: { type: string }
       required: [error]
+    RequestNotFoundError:
+      type: object
+      description: |
+        Returned (HTTP 404) when an agent supplies a request id that does not
+        reference any row. The body echoes the requested id and lists the
+        request ids the caller is currently eligible to act on, computed with
+        the same filter as `GET /api/requests` (`include_done=false`), so the
+        agent can self-correct.
+      properties:
+        error: { type: string }
+        code:
+          type: string
+          enum: [request_not_found]
+        eligible_request_ids:
+          type: array
+          items: { type: string, format: uuid }
+      required: [error, code, eligible_request_ids]
 paths:
   /api/login:
     post:
@@ -409,6 +426,14 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Request' }
+        '404':
+          description: |
+            No row with this id. Agents receive a RequestNotFoundError body
+            listing their eligible request ids; admins receive the plain
+            Error body.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestNotFoundError' }
         '403': { description: Forbidden }
     delete:
       tags: [admin]
@@ -433,6 +458,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Request' }
+        '404':
+          description: No request with this id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestNotFoundError' }
         '409': { description: Not in inbox or already claimed }
   /api/requests/{id}/respond:
     post:
@@ -455,6 +485,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Request' }
+        '404':
+          description: No request with this id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestNotFoundError' }
         '409': { description: Not claimed by you }
   /api/requests/{id}/approve:
     post:
@@ -530,6 +565,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Request' }
+        '404':
+          description: No request with this id (agent callers)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RequestNotFoundError' }
         '409':
           description: Request not awaiting acknowledgement, or (for agents) not owned by caller.
   /api/requests/{id}/unacknowledge:
