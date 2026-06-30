@@ -361,24 +361,26 @@ async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
         Ok(a) => a,
         Err(e) => return err_page(e),
     };
-    let name_map: std::collections::HashMap<uuid::Uuid, String> =
-        agents.into_iter().map(|a| (a.id, a.name)).collect();
+    let agent_map: std::collections::HashMap<uuid::Uuid, &crate::entity::agent::Model> =
+        agents.iter().map(|a| (a.id, a)).collect();
     let rows = reqs
         .iter()
         .map(|req| {
-            let source = req
-                .sender_agent_id
-                .as_ref()
-                .and_then(|id| name_map.get(id).cloned())
-                .unwrap_or_else(|| "admin".to_string());
+            let source = match req.sender_agent_id.as_ref().and_then(|id| agent_map.get(id)) {
+                Some(a) => match &a.kind {
+                    Some(k) => format!("{}/{}", a.class, k),
+                    None => a.class.clone(),
+                },
+                None => "admin".to_string(),
+            };
             let claimed_by_name = req
                 .claimed_by
                 .as_ref()
-                .and_then(|id| name_map.get(id).cloned());
+                .and_then(|id| agent_map.get(id).map(|a| a.name.clone()));
             let acknowledged_by_name = req
                 .acknowledged_by
                 .as_ref()
-                .and_then(|id| name_map.get(id).cloned());
+                .and_then(|id| agent_map.get(id).map(|a| a.name.clone()));
             CommsRow {
                 req,
                 source,
