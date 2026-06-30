@@ -162,8 +162,7 @@ components:
         Returned (HTTP 404) when an agent supplies a request id that does not
         reference any row. The body echoes the requested id and lists the
         request ids the caller is currently eligible to act on, computed with
-        the same filter as `GET /api/requests` (`include_done=false`), so the
-        agent can self-correct.
+        the same filter as `GET /api/inbox`, so the agent can self-correct.
       properties:
         error: { type: string }
         code:
@@ -350,17 +349,57 @@ paths:
       responses:
         '204': { description: OK }
         '404': { description: Not found }
+  /api/inbox:
+    get:
+      tags: [agent]
+      summary: List requests actionable for the caller right now
+      description: |
+        Returns the requests the agent must act on right now:
+          - status `awaiting_agent_request_claim`: in the caller's class+kind inbox, unclaimed
+          - status `awaiting_agent_response`: the caller holds the claim and must respond
+          - status `awaiting_agent_response_acknowledge`: the caller sent the request and must ack the response
+        No query parameters; the set is defined by the spec above.
+      security:
+        - agentToken: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Request' }
+        '403': { description: Forbidden — admin sessions are not allowed }
+  /api/requests/mine:
+    get:
+      tags: [agent]
+      summary: Full history of requests sent or received by the caller
+      description: |
+        Returns every row the caller sent or is otherwise involved in
+        (sent by the caller, claimed by the caller, or claimable in their
+        class+kind inbox), regardless of status. Use this to read through
+        history; use `GET /api/inbox` for the actionable subset.
+      security:
+        - agentToken: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Request' }
+        '403': { description: Forbidden — admin sessions are not allowed }
   /api/requests:
     get:
-      tags: [admin, agent]
-      summary: List requests relevant to the caller
+      tags: [admin]
+      summary: List all requests
       description: |
-        Admin: list all requests with `?status= ?limit= ?offset=`.
-        Agent: list requests sent by me, claimable (matching class+type),
-        claimed by me, and responded by me (regardless of admin-approval state).
+        Admin-only. List every request with optional `?status=`, `?limit=`,
+        `?offset=`. Agents should use `GET /api/inbox` (actionable items) or
+        `GET /api/requests/mine` (full history).
       security:
         - adminSession: []
-        - agentToken: []
       parameters:
         - in: query
           name: status
@@ -373,12 +412,6 @@ paths:
         - in: query
           name: offset
           schema: { type: integer, minimum: 0, default: 0 }
-        - in: query
-          name: include_done
-          description: |
-            Agent-only. When true, `done` rows surface in the listing.
-            Defaults to false so the inbox stays focused on actionable rows.
-          schema: { type: boolean, default: false }
       responses:
         '200':
           description: OK
@@ -387,6 +420,7 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/Request' }
+        '403': { description: Forbidden — admin session required }
     post:
       tags: [admin, agent]
       summary: Create request (admin or agent)

@@ -33,6 +33,8 @@ pub fn router() -> Router<AppState> {
             "/api/requests",
             get(api_list_requests).post(api_create_request),
         )
+        .route("/api/inbox", get(api_inbox))
+        .route("/api/requests/mine", get(api_requests_mine))
         .route(
             "/api/requests/:id",
             get(api_get_request).delete(api_delete_request),
@@ -71,12 +73,11 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn build_request_not_found(db: &Db, agent: &AgentAuth, requested: Uuid) -> AppError {
-    let rows = crate::db_ops::list_requests_for_agent(
+    let rows = crate::db_ops::list_inbox_for_agent(
         db,
         agent.0.id,
         &agent.0.class,
         agent.0.kind.as_deref(),
-        false,
     )
     .await
     .unwrap_or_default();
@@ -214,7 +215,6 @@ struct ListQuery {
     status: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
-    include_done: Option<bool>,
 }
 
 async fn api_list_requests(
@@ -222,28 +222,34 @@ async fn api_list_requests(
     ctx: AuthContext,
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Vec<request::Model>>> {
-    match &ctx {
-        AuthContext::Admin(_) => {
-            let limit = q.limit.unwrap_or(50).clamp(1, 500) as u64;
-            let offset = q.offset.unwrap_or(0).max(0) as u64;
-            let status = parse_request_status(q.status.as_deref())?;
-            let rows = crate::db_ops::list_all_requests(&state.db, status, limit, offset).await?;
-            Ok(Json(rows))
-        }
-        AuthContext::Agent(a) => {
-            let _ = (q.limit, q.offset);
-            let include_done = q.include_done.unwrap_or(false);
-            let rows = crate::db_ops::list_requests_for_agent(
-                &state.db,
-                a.0.id,
-                &a.0.class,
-                a.0.kind.as_deref(),
-                include_done,
-            )
+    ctx.require_admin()?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 500) as u64;
+    let offset = q.offset.unwrap_or(0).max(0) as u64;
+    let status = parse_request_status(q.status.as_deref())?;
+    let rows = crate::db_ops::list_all_requests(&state.db, status, limit, offset).await?;
+    Ok(Json(rows))
+}
+
+async fn api_inbox(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+) -> AppResult<Json<Vec<request::Model>>> {
+    let a = ctx.require_agent()?;
+    let rows =
+        crate::db_ops::list_inbox_for_agent(&state.db, a.0.id, &a.0.class, a.0.kind.as_deref())
             .await?;
-            Ok(Json(rows))
-        }
-    }
+    Ok(Json(rows))
+}
+
+async fn api_requests_mine(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+) -> AppResult<Json<Vec<request::Model>>> {
+    let a = ctx.require_agent()?;
+    let rows =
+        crate::db_ops::list_history_for_agent(&state.db, a.0.id, &a.0.class, a.0.kind.as_deref())
+            .await?;
+    Ok(Json(rows))
 }
 
 async fn api_create_request(

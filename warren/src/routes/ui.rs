@@ -366,7 +366,11 @@ async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
     let rows = reqs
         .iter()
         .map(|req| {
-            let source = match req.sender_agent_id.as_ref().and_then(|id| agent_map.get(id)) {
+            let source = match req
+                .sender_agent_id
+                .as_ref()
+                .and_then(|id| agent_map.get(id))
+            {
                 Some(a) => match &a.kind {
                     Some(k) => format!("{}/{}", a.class, k),
                     None => a.class.clone(),

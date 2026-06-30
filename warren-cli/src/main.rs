@@ -15,10 +15,14 @@ fn build_requests_cmd(admin: bool) -> Command {
         "List, create, claim, respond to, or acknowledge requests"
     });
     c = c
-        .subcommand(
-            Command::new("list")
-                .about("List requests")
-                .arg(Arg::new("status").long("status").num_args(1).value_parser([
+        .subcommand({
+            let list = Command::new("list").about(if admin {
+                "List requests (admin)"
+            } else {
+                "List your full request history (sent and received)"
+            });
+            if admin {
+                list.arg(Arg::new("status").long("status").num_args(1).value_parser([
                     "awaiting_admin_request_approval",
                     "awaiting_agent_request_claim",
                     "awaiting_agent_response",
@@ -27,13 +31,10 @@ fn build_requests_cmd(admin: bool) -> Command {
                     "done",
                     "rejected",
                 ]))
-                .arg(
-                    Arg::new("all")
-                        .long("all")
-                        .help("Include done rows in the listing")
-                        .action(ArgAction::SetTrue),
-                ),
-        )
+            } else {
+                list
+            }
+        })
         .subcommand(
             Command::new("create")
                 .about("Create a request")
@@ -219,7 +220,7 @@ fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("pending-acknowledges")
-                .about("List pending acknowledges as markdown (status awaiting_agent_response_acknowledge)"),
+                .about("List requests you sent that are awaiting your acknowledgement of the response"),
         )
 }
 
@@ -279,19 +280,21 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
 
         Some(("requests", m)) => match m.subcommand() {
             Some(("list", sc)) => {
-                let mut q: Vec<String> = Vec::new();
-                if let Some(s) = sc.get_one::<String>("status") {
-                    q.push(format!("status={}", urlencode(s)));
-                }
-                if sc.get_flag("all") {
-                    q.push("include_done=true".to_string());
-                }
-                let qs = if q.is_empty() {
-                    String::new()
+                let path = if admin {
+                    let mut q: Vec<String> = Vec::new();
+                    if let Some(s) = sc.get_one::<String>("status") {
+                        q.push(format!("status={}", urlencode(s)));
+                    }
+                    let qs = if q.is_empty() {
+                        String::new()
+                    } else {
+                        format!("?{}", q.join("&"))
+                    };
+                    format!("/api/requests{qs}")
                 } else {
-                    format!("?{}", q.join("&"))
+                    "/api/requests/mine".to_string()
                 };
-                http_get(agent, &url, &token, &format!("/api/requests{qs}"))
+                http_get(agent, &url, &token, &path)
             }
             Some(("create", sc)) => {
                 let payload = read_payload(
@@ -419,23 +422,16 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
         },
 
         Some(("pending-requests", _)) => {
-            let body = http_get(agent, &url, &token, "/api/requests?limit=500&include_done=true")?;
+            let body = http_get(agent, &url, &token, "/api/inbox")?;
             format_pending(
                 &body,
-                &[
-                    "awaiting_agent_request_claim",
-                    "awaiting_agent_response",
-                ],
+                &["awaiting_agent_request_claim", "awaiting_agent_response"],
                 false,
             )
         }
         Some(("pending-acknowledges", _)) => {
-            let body = http_get(agent, &url, &token, "/api/requests?limit=500&include_done=true")?;
-            format_pending(
-                &body,
-                &["awaiting_agent_response_acknowledge"],
-                true,
-            )
+            let body = http_get(agent, &url, &token, "/api/inbox")?;
+            format_pending(&body, &["awaiting_agent_response_acknowledge"], true)
         }
 
         _ => Err("unknown subcommand".to_string()),
@@ -444,7 +440,9 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
 
 fn format_pending(body: &str, accepted: &[&str], include_response: bool) -> Result<String, String> {
     let v: Value = serde_json::from_str(body).map_err(|e| format!("parse json: {e}"))?;
-    let arr = v.as_array().ok_or("expected JSON array from /api/requests")?;
+    let arr = v
+        .as_array()
+        .ok_or("expected JSON array from /api/requests")?;
     let mut out = String::new();
     let mut first = true;
     for req in arr {

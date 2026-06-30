@@ -110,44 +110,68 @@ pub async fn list_all_requests(
     Ok(q.limit(Some(limit)).offset(Some(offset)).all(db).await?)
 }
 
-/// All requests an agent should see at `/api/requests`:
-/// - sent by them (regardless of status, unless `include_done = false`)
-/// - claimable now (matching class+kind, awaiting claim, unclaimed)
-/// - claimed by them (any status where they hold the claim)
-/// - responded by them (response set, may still be waiting for admin approval)
-pub async fn list_requests_for_agent(
+/// Requests actionable for the agent RIGHT NOW:
+/// - status 1 (awaiting_agent_request_claim) in their class+kind inbox, unclaimed
+/// - status 2 (awaiting_agent_response) where they hold the claim
+/// - status 4 (awaiting_agent_response_acknowledge) where they sent the request
+pub async fn list_inbox_for_agent(
     db: &Db,
     agent_id: Uuid,
     class: &str,
     kind: Option<&str>,
-    include_done: bool,
 ) -> AppResult<Vec<request::Model>> {
-    let mut sent = Condition::all().add(request::Column::SenderAgentId.eq(agent_id));
-    let mut claimed = Condition::all().add(request::Column::ClaimedBy.eq(agent_id));
-    let mut inbox = Condition::all()
+    let inbox_branch = Condition::all()
         .add(request::Column::Status.eq(request::AWAITING_AGENT_REQUEST_CLAIM))
         .add(request::Column::ClaimedBy.is_null())
-        .add(request::Column::TargetClass.eq(class.to_string()));
-    let target_type_match = match kind {
-        Some(k) => request::Column::TargetType
-            .is_null()
-            .or(request::Column::TargetType.eq(k.to_string()))
-            .into_condition(),
-        None => request::Column::TargetType.is_null().into_condition(),
-    };
-    inbox = inbox.add(target_type_match);
-    if !include_done {
-        let not_done = request::Column::Status.ne(request::DONE);
-        sent = sent.add(not_done.clone());
-        claimed = claimed.add(not_done.clone());
-        inbox = inbox.add(not_done);
-    }
-    let where_clause = Condition::any().add(sent).add(inbox).add(claimed);
+        .add(request::Column::TargetClass.eq(class.to_string()))
+        .add(target_type_match(kind));
+    let claimed_branch = Condition::all()
+        .add(request::Column::Status.eq(request::AWAITING_AGENT_RESPONSE))
+        .add(request::Column::ClaimedBy.eq(agent_id));
+    let ack_branch = Condition::all()
+        .add(request::Column::Status.eq(request::AWAITING_AGENT_RESPONSE_ACKNOWLEDGE))
+        .add(request::Column::SenderAgentId.eq(agent_id));
+    let where_clause = Condition::any()
+        .add(inbox_branch)
+        .add(claimed_branch)
+        .add(ack_branch);
     Ok(request::Entity::find()
         .filter(where_clause)
         .order_by_asc(request::Column::CreatedAt)
         .all(db)
         .await?)
+}
+
+/// Full history for an agent: every row they sent or received, all statuses.
+pub async fn list_history_for_agent(
+    db: &Db,
+    agent_id: Uuid,
+    class: &str,
+    kind: Option<&str>,
+) -> AppResult<Vec<request::Model>> {
+    let sent = Condition::all().add(request::Column::SenderAgentId.eq(agent_id));
+    let claimed = Condition::all().add(request::Column::ClaimedBy.eq(agent_id));
+    let inbox = Condition::all()
+        .add(request::Column::Status.eq(request::AWAITING_AGENT_REQUEST_CLAIM))
+        .add(request::Column::ClaimedBy.is_null())
+        .add(request::Column::TargetClass.eq(class.to_string()))
+        .add(target_type_match(kind));
+    let where_clause = Condition::any().add(sent).add(claimed).add(inbox);
+    Ok(request::Entity::find()
+        .filter(where_clause)
+        .order_by_asc(request::Column::CreatedAt)
+        .all(db)
+        .await?)
+}
+
+fn target_type_match(kind: Option<&str>) -> sea_orm::Condition {
+    match kind {
+        Some(k) => request::Column::TargetType
+            .is_null()
+            .or(request::Column::TargetType.eq(k.to_string()))
+            .into_condition(),
+        None => request::Column::TargetType.is_null().into_condition(),
+    }
 }
 
 pub async fn get_request(db: &Db, id: Uuid) -> AppResult<Option<request::Model>> {
