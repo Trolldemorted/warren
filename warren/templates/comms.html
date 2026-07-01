@@ -42,8 +42,8 @@
         {% let r = row.req %}
         <tr>
           <td><small>{{ r.created_at_display() }}</small></td>
-          <td><small>{{ row.source }}</small></td>
-          <td>{{ r.target_class }}{% if let Some(t) = r.target_type %}/{{ t }}{% endif %}</td>
+          <td {% if r.status == 4 %}class="cell-pending"{% endif %}><small>{{ row.source }}</small></td>
+          <td {% if r.status == 1 || r.status == 2 %}class="cell-pending"{% endif %}>{{ r.target_class }}{% if let Some(t) = r.target_type %}/{{ t }}{% endif %}</td>
           <td>
             <a class="payload-link" href="#payload-{{ r.id }}" title="Click to view full payload">
               <pre class="payload mb-0">{{ r.payload_preview() }}</pre>
