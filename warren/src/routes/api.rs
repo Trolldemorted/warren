@@ -257,7 +257,8 @@ async fn api_create_request(
     ctx: AuthContext,
     Json(new): Json<RequestNew>,
 ) -> AppResult<Json<request::Model>> {
-    // Admin POSTs auto-skip request approval; agent POSTs go through review.
+    // Admin POSTs auto-skip request approval; agent POSTs go through review
+    // unless the channel disables request approval.
     let (initial_status, sender_agent_id) = match &ctx {
         AuthContext::Admin(_) => (request::AWAITING_AGENT_REQUEST_CLAIM, None),
         AuthContext::Agent(a) => (request::AWAITING_ADMIN_REQUEST_APPROVAL, Some(a.0.id)),
@@ -279,6 +280,19 @@ async fn api_create_request(
         )
         .await?;
     }
+    let initial_status = if matches!(&ctx, AuthContext::Agent(_)) {
+        if let Some(channel_id) = new.channel_id {
+            if !crate::db_ops::channel_requires_request_approval(&state.db, channel_id).await? {
+                request::AWAITING_AGENT_REQUEST_CLAIM
+            } else {
+                initial_status
+            }
+        } else {
+            initial_status
+        }
+    } else {
+        initial_status
+    };
     let r = crate::db_ops::create_request(&state.db, &new, initial_status, sender_agent_id).await?;
     Ok(Json(r))
 }

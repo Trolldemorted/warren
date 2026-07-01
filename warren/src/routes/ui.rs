@@ -702,6 +702,10 @@ struct ChannelForm {
     #[serde(default)]
     receiver_kind: Option<String>,
     description: String,
+    #[serde(default)]
+    requires_request_approval: bool,
+    #[serde(default)]
+    requires_response_approval: bool,
 }
 
 async fn channels_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -742,6 +746,8 @@ async fn channel_new_page(State(state): State<AppState>, headers: HeaderMap) -> 
         selected_sender_kind: None,
         selected_receiver_class: None,
         selected_receiver_kind: None,
+        requires_request_approval: true,
+        requires_response_approval: true,
     })
 }
 
@@ -766,6 +772,8 @@ async fn channel_create(
         receiver_class: form.receiver_class,
         receiver_kind: form.receiver_kind.filter(|s| !s.is_empty()),
         description: form.description,
+        requires_request_approval: form.requires_request_approval,
+        requires_response_approval: form.requires_response_approval,
     };
     match crate::db_ops::create_channel(&state.db, &new).await {
         Ok(_) => Redirect::to("/admin/channels").into_response(),
@@ -799,6 +807,8 @@ async fn channel_edit_page(
                 selected_sender_kind: channel.sender_kind.clone(),
                 selected_receiver_class: Some(channel.receiver_class.clone()),
                 selected_receiver_kind: channel.receiver_kind.clone(),
+                requires_request_approval: channel.requires_request_approval,
+                requires_response_approval: channel.requires_response_approval,
             };
             render(t)
         }
@@ -823,19 +833,14 @@ async fn channel_update(
     if let Err(e) = validate_channel_form(&form, &classes, &kinds) {
         return err_page(e);
     }
-    let new = ChannelNew {
-        sender_class: form.sender_class,
-        sender_kind: form.sender_kind.filter(|s| !s.is_empty()),
-        receiver_class: form.receiver_class,
-        receiver_kind: form.receiver_kind.filter(|s| !s.is_empty()),
-        description: form.description,
-    };
     let patch = crate::models::ChannelPatch {
-        sender_class: Some(new.sender_class),
-        sender_kind: Some(new.sender_kind),
-        receiver_class: Some(new.receiver_class),
-        receiver_kind: Some(new.receiver_kind),
-        description: Some(new.description),
+        sender_class: Some(form.sender_class),
+        sender_kind: Some(form.sender_kind.filter(|s| !s.is_empty())),
+        receiver_class: Some(form.receiver_class),
+        receiver_kind: Some(form.receiver_kind.filter(|s| !s.is_empty())),
+        description: Some(form.description),
+        requires_request_approval: Some(form.requires_request_approval),
+        requires_response_approval: Some(form.requires_response_approval),
     };
     match crate::db_ops::update_channel(&state.db, id, &patch).await {
         Ok(_) => Redirect::to("/admin/channels").into_response(),

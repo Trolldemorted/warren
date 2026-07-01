@@ -156,7 +156,7 @@ fn build_agents_cmd(admin: bool) -> Command {
 
 fn build_channels_cmd(admin: bool) -> Command {
     Command::new("channels")
-        .about("List, create, or delete channels (admin)")
+        .about("List, create, update, or delete channels (admin)")
         .subcommand(Command::new("list").about("List channels"))
         .subcommand(
             Command::new("create")
@@ -180,6 +180,72 @@ fn build_channels_cmd(admin: bool) -> Command {
                         .long("description")
                         .num_args(1)
                         .required(true),
+                )
+                .arg(
+                    Arg::new("requires_request_approval")
+                        .long("requires-request-approval")
+                        .num_args(0)
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Require admin approval of outgoing requests (default)"),
+                )
+                .arg(
+                    Arg::new("no_requires_request_approval")
+                        .long("no-requires-request-approval")
+                        .num_args(0)
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Skip admin approval of outgoing requests"),
+                )
+                .arg(
+                    Arg::new("requires_response_approval")
+                        .long("requires-response-approval")
+                        .num_args(0)
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Require admin approval of responses (default)"),
+                )
+                .arg(
+                    Arg::new("no_requires_response_approval")
+                        .long("no-requires-response-approval")
+                        .num_args(0)
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Skip admin approval of responses"),
+                ),
+        )
+        .subcommand(
+            Command::new("update")
+                .about("Update a channel")
+                .arg(Arg::new("id").num_args(1).required(true))
+                .arg(Arg::new("sender_class").long("sender-class").num_args(1))
+                .arg(Arg::new("sender_kind").long("sender-kind").num_args(1))
+                .arg(
+                    Arg::new("receiver_class")
+                        .long("receiver-class")
+                        .num_args(1),
+                )
+                .arg(Arg::new("receiver_kind").long("receiver-kind").num_args(1))
+                .arg(Arg::new("description").long("description").num_args(1))
+                .arg(
+                    Arg::new("requires_request_approval")
+                        .long("requires-request-approval")
+                        .num_args(0)
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("no_requires_request_approval")
+                        .long("no-requires-request-approval")
+                        .num_args(0)
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("requires_response_approval")
+                        .long("requires-response-approval")
+                        .num_args(0)
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("no_requires_response_approval")
+                        .long("no-requires-response-approval")
+                        .num_args(0)
+                        .action(clap::ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -405,14 +471,71 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
         Some(("channels", m)) => match m.subcommand() {
             Some(("list", _)) => http_get(agent, &url, &token, "/api/channels"),
             Some(("create", sc)) => {
+                let requires_request_approval = !sc.get_flag("no_requires_request_approval");
+                let requires_response_approval = !sc.get_flag("no_requires_response_approval");
                 let body = serde_json::json!({
                     "sender_class": sc.get_one::<String>("sender_class").unwrap(),
                     "sender_kind": sc.get_one::<String>("sender_kind").map(String::as_str),
                     "receiver_class": sc.get_one::<String>("receiver_class").unwrap(),
                     "receiver_kind": sc.get_one::<String>("receiver_kind").map(String::as_str),
                     "description": sc.get_one::<String>("description").unwrap(),
+                    "requires_request_approval": requires_request_approval,
+                    "requires_response_approval": requires_response_approval,
                 });
                 http_post(agent, &url, &token, "/api/channels", &body.to_string())
+            }
+            Some(("update", sc)) => {
+                let id = sc.get_one::<String>("id").unwrap();
+                let mut body = serde_json::Map::new();
+                if let Some(v) = sc.get_one::<String>("sender_class") {
+                    body.insert("sender_class".into(), serde_json::Value::String(v.clone()));
+                }
+                if let Some(v) = sc.get_one::<String>("sender_kind") {
+                    body.insert("sender_kind".into(), serde_json::Value::String(v.clone()));
+                }
+                if let Some(v) = sc.get_one::<String>("receiver_class") {
+                    body.insert(
+                        "receiver_class".into(),
+                        serde_json::Value::String(v.clone()),
+                    );
+                }
+                if let Some(v) = sc.get_one::<String>("receiver_kind") {
+                    body.insert("receiver_kind".into(), serde_json::Value::String(v.clone()));
+                }
+                if let Some(v) = sc.get_one::<String>("description") {
+                    body.insert("description".into(), serde_json::Value::String(v.clone()));
+                }
+                if sc.get_flag("requires_request_approval") {
+                    body.insert(
+                        "requires_request_approval".into(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+                if sc.get_flag("no_requires_request_approval") {
+                    body.insert(
+                        "requires_request_approval".into(),
+                        serde_json::Value::Bool(false),
+                    );
+                }
+                if sc.get_flag("requires_response_approval") {
+                    body.insert(
+                        "requires_response_approval".into(),
+                        serde_json::Value::Bool(true),
+                    );
+                }
+                if sc.get_flag("no_requires_response_approval") {
+                    body.insert(
+                        "requires_response_approval".into(),
+                        serde_json::Value::Bool(false),
+                    );
+                }
+                http_put(
+                    agent,
+                    &url,
+                    &token,
+                    &format!("/api/channels/{id}"),
+                    &serde_json::Value::Object(body).to_string(),
+                )
             }
             Some(("delete", sc)) => {
                 let id = sc.get_one::<String>("id").unwrap();
@@ -551,6 +674,23 @@ fn http_post(
     if !body.is_empty() {
         rb = rb.set("Content-Type", "application/json");
     }
+    rb.send_string(body)
+        .map_err(|e| format!("{e}"))
+        .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))
+}
+
+fn http_put(
+    agent: &ureq::Agent,
+    base: &str,
+    token: &str,
+    path: &str,
+    body: &str,
+) -> Result<String, String> {
+    let url = format!("{}{path}", base.trim_end_matches('/'));
+    let rb = agent
+        .put(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", "application/json");
     rb.send_string(body)
         .map_err(|e| format!("{e}"))
         .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))

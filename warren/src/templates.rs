@@ -87,6 +87,8 @@ pub struct ChannelFormTemplate {
     pub selected_sender_kind: Option<String>,
     pub selected_receiver_class: Option<String>,
     pub selected_receiver_kind: Option<String>,
+    pub requires_request_approval: bool,
+    pub requires_response_approval: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

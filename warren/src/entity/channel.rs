@@ -17,6 +17,10 @@ pub struct Model {
     pub receiver_kind: Option<String>,
     #[sea_orm(default_value = "")]
     pub description: String,
+    #[sea_orm(default_value = "true")]
+    pub requires_request_approval: bool,
+    #[sea_orm(default_value = "true")]
+    pub requires_response_approval: bool,
     #[sea_orm(default_expr = "Expr::cust(\"now()\")")]
     pub created_at: ChronoDateTimeUtc,
 }

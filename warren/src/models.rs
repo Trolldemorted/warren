@@ -98,6 +98,10 @@ pub struct ChannelNew {
     #[serde(default)]
     pub receiver_kind: Option<String>,
     pub description: String,
+    #[serde(default = "default_true")]
+    pub requires_request_approval: bool,
+    #[serde(default = "default_true")]
+    pub requires_response_approval: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -112,4 +116,12 @@ pub struct ChannelPatch {
     pub receiver_kind: Option<Option<String>>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub requires_request_approval: Option<bool>,
+    #[serde(default)]
+    pub requires_response_approval: Option<bool>,
+}
+
+fn default_true() -> bool {
+    true
 }

@@ -97,6 +97,20 @@ pub async fn create_request(
     Ok(am.insert(db).await?)
 }
 
+pub async fn channel_requires_request_approval(db: &Db, channel_id: Uuid) -> AppResult<bool> {
+    Ok(get_channel(db, channel_id)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .requires_request_approval)
+}
+
+pub async fn channel_requires_response_approval(db: &Db, channel_id: Uuid) -> AppResult<bool> {
+    Ok(get_channel(db, channel_id)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .requires_response_approval)
+}
+
 pub async fn list_all_requests(
     db: &Db,
     status_filter: Option<i16>,
@@ -229,16 +243,23 @@ pub async fn respond_to_request(
     agent_id: Uuid,
     response: &str,
 ) -> AppResult<request::Model> {
+    let req = get_request(db, id).await?.ok_or(AppError::NotFound)?;
+    let requires_approval = match req.channel_id {
+        Some(channel_id) => channel_requires_response_approval(db, channel_id).await?,
+        None => true,
+    };
+    let next_status = if requires_approval {
+        request::AWAITING_ADMIN_RESPONSE_APPROVAL
+    } else {
+        request::AWAITING_AGENT_RESPONSE_ACKNOWLEDGE
+    };
     let rows = request::Entity::update_many()
         .col_expr(request::Column::Response, Expr::value(response.to_string()))
         .col_expr(
             request::Column::RespondedAt,
             Expr::value(chrono::Utc::now()),
         )
-        .col_expr(
-            request::Column::Status,
-            Expr::value(request::AWAITING_ADMIN_RESPONSE_APPROVAL),
-        )
+        .col_expr(request::Column::Status, Expr::value(next_status))
         .filter(request::Column::Id.eq(id))
         .filter(request::Column::ClaimedBy.eq(agent_id))
         .filter(request::Column::Status.eq(request::AWAITING_AGENT_RESPONSE))
@@ -625,6 +646,8 @@ pub async fn create_channel(db: &Db, new: &ChannelNew) -> AppResult<channel::Mod
         receiver_class: Set(new.receiver_class.clone()),
         receiver_kind: Set(new.receiver_kind.clone()),
         description: Set(new.description.clone()),
+        requires_request_approval: Set(new.requires_request_approval),
+        requires_response_approval: Set(new.requires_response_approval),
         ..Default::default()
     };
     match am.insert(db).await {
@@ -653,6 +676,12 @@ pub async fn update_channel(db: &Db, id: Uuid, patch: &ChannelPatch) -> AppResul
     }
     if let Some(d) = &patch.description {
         am.description = Set(d.clone());
+    }
+    if let Some(b) = patch.requires_request_approval {
+        am.requires_request_approval = Set(b);
+    }
+    if let Some(b) = patch.requires_response_approval {
+        am.requires_response_approval = Set(b);
     }
     match am.update(db).await {
         Ok(_) => Ok(()),

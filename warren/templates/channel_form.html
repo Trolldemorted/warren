@@ -51,6 +51,16 @@
     <label class="form-label">Description</label>
     <textarea name="description" class="form-control" rows="2" required>{% if let Some(c) = channel %}{{ c.description }}{% endif %}</textarea>
   </div>
+  <div class="mb-3 form-check">
+    <input type="hidden" name="requires_request_approval" value="false">
+    <input type="checkbox" class="form-check-input" id="requires_request_approval" name="requires_request_approval" value="true" {% if requires_request_approval %}checked{% endif %}>
+    <label class="form-check-label" for="requires_request_approval">Require admin approval of outgoing requests</label>
+  </div>
+  <div class="mb-3 form-check">
+    <input type="hidden" name="requires_response_approval" value="false">
+    <input type="checkbox" class="form-check-input" id="requires_response_approval" name="requires_response_approval" value="true" {% if requires_response_approval %}checked{% endif %}>
+    <label class="form-check-label" for="requires_response_approval">Require admin approval of responses</label>
+  </div>
   <button type="submit" class="btn btn-primary">Save</button>
   <a href="/admin/channels" class="btn btn-link">Cancel</a>
 </form>
