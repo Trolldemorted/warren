@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
                 .put(api_update_agent)
                 .delete(api_delete_agent),
         )
+        .merge(crate::agents_live::http::router())
         .route(
             "/api/requests",
             get(api_list_requests).post(api_create_request),

@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block body %}
+<style>
+.claude-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18rem;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.claude-grid pre {
+  background: #0d1117;
+  color: #c9d1d9;
+  padding: 1rem;
+  border-radius: .375rem;
+  min-height: 24rem;
+  max-height: 32rem;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .875rem;
+  white-space: pre;
+  margin: 0;
+}
+.claude-grid .status {
+  font-family: ui-monospace, monospace;
+}
+button.action { width: 100%; margin-bottom: .25rem; }
+</style>
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>
+  <span id="state-badge" class="status badge bg-{% if connected %}success{% else %}secondary{% endif %}">{% if connected %}idle{% else %}disconnected{% endif %}</span>
+</div>
+<div class="claude-grid">
+  <div>
+    <pre id="claude-screen" aria-label="Claude terminal output">(no output yet)</pre>
+    <form id="prompt-form" class="mt-2 d-flex gap-2">
+      <textarea id="prompt-text" name="text" class="form-control" rows="2" placeholder="Send a prompt to claude..." required></textarea>
+      <button class="btn btn-primary align-self-start" type="submit">Send</button>
+    </form>
+  </div>
+  <aside>
+    <h2 class="h6">Status</h2>
+    <dl class="small mb-3">
+      <dt>id</dt><dd><code class="text-muted">{{ agent.id }}</code></dd>
+      <dt>model</dt><dd>{{ agent.model }}</dd>
+      <dt>class</dt><dd>{{ agent.class }}</dd>
+      <dt>kind</dt><dd>{{ agent.kind.as_deref().unwrap_or("—") }}</dd>
+      <dt>session</dt><dd id="state-session" class="text-muted">—</dd>
+      <dt>version</dt><dd id="state-version" class="text-muted">—</dd>
+    </dl>
+    <h2 class="h6">Usage</h2>
+    <dl class="small mb-3">
+      <dt>input tokens</dt><dd id="usage-in">0</dd>
+      <dt>output tokens</dt><dd id="usage-out">0</dd>
+      <dt>cache read</dt><dd id="usage-cr">0</dd>
+      <dt>cache write</dt><dd id="usage-cw">0</dd>
+    </dl>
+    <h2 class="h6">Actions</h2>
+    <button class="btn btn-outline-warning action" data-action="interrupt">Interrupt</button>
+    <button class="btn btn-outline-secondary action" data-action="clear">Clear</button>
+    <button class="btn btn-outline-secondary action" data-action="compact">Compact</button>
+    <button class="btn btn-outline-danger action" data-action="restart">Restart</button>
+  </aside>
+</div>
+<script>
+const agentId = "{{ agent.id }}";
+const screen = document.getElementById('claude-screen');
+const stateBadge = document.getElementById('state-badge');
+const stateSession = document.getElementById('state-session');
+const stateVersion = document.getElementById('state-version');
+const usageIn = document.getElementById('usage-in');
+const usageOut = document.getElementById('usage-out');
+const usageCr = document.getElementById('usage-cr');
+const usageCw = document.getElementById('usage-cw');
+
+let sse = null;
+let termBuf = '';
+
+function setBadge(state, connected) {
+  if (!connected) {
+    stateBadge.textContent = 'disconnected';
+    stateBadge.className = 'status badge bg-secondary';
+    return;
+  }
+  const labels = {
+    starting: 'starting',
+    idle: 'idle',
+    running: 'running',
+    ended: 'ended',
+    dead: 'dead'
+  };
+  stateBadge.textContent = labels[state] || state;
+  stateBadge.className = 'status badge bg-' + ({
+    idle: 'success', running: 'warning', starting: 'info',
+    ended: 'dark', dead: 'danger'
+  }[state] || 'secondary');
+}
+
+async function refreshState() {
+  try {
+    const r = await fetch(`/api/agents/${agentId}/claude/state`);
+    if (!r.ok) {
+      setBadge(null, false);
+      return;
+    }
+    const j = await r.json();
+    setBadge(j.state, j.connected);
+    stateSession.textContent = j.session_id || '—';
+    stateVersion.textContent = j.claude_version || '—';
+  } catch (e) {
+    setBadge(null, false);
+  }
+}
+
+async function refreshUsage() {
+  try {
+    const r = await fetch(`/api/agents/${agentId}/claude/usage`);
+    if (!r.ok) { return; }
+    const j = await r.json();
+    usageIn.textContent = j.input_tokens || 0;
+    usageOut.textContent = j.output_tokens || 0;
+    usageCr.textContent = j.cache_read || 0;
+    usageCw.textContent = j.cache_write || 0;
+  } catch (e) {}
+}
+
+function connectStream() {
+  if (sse) { try { sse.close(); } catch {} }
+  sse = new EventSource(`/api/agents/${agentId}/claude/events/stream`);
+  sse.onmessage = (e) => {
+    try {
+      const env = JSON.parse(e.data);
+      termBuf += JSON.stringify(env) + '\n';
+      if (termBuf.length > 16384) { termBuf = termBuf.slice(-16384); }
+      screen.textContent = termBuf;
+    } catch {}
+  };
+  sse.onerror = () => {
+    setTimeout(connectStream, 1500);
+  };
+  sse.onopen = () => {
+    refreshState();
+  };
+}
+
+document.getElementById('prompt-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const text = document.getElementById('prompt-text').value;
+  if (!text) return;
+  const r = await fetch(`/api/agents/${agentId}/claude/prompt`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text, wait: false})
+  });
+  document.getElementById('prompt-text').value = '';
+  refreshState();
+});
+
+document.querySelectorAll('button.action').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const action = btn.dataset.action;
+    const body = (action === 'clear' || action === 'restart') ? JSON.stringify({fresh: false}) : null;
+    const r = await fetch(`/api/agents/${agentId}/claude/${action}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body
+    });
+    refreshState();
+    refreshUsage();
+  });
+});
+
+refreshState();
+refreshUsage();
+setInterval(refreshState, 5000);
+setInterval(refreshUsage, 5000);
+connectStream();
+</script>
+{% endblock %}

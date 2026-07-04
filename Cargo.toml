@@ -1,14 +1,23 @@
 [workspace]
 resolver = "2"
-members = ["warren", "warren-cli"]
+members = ["warren", "warren-cli", "rabbit"]
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.85"
 
 [workspace.dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
+dashmap = "6"
+bytes = "1"
+portable-pty = "0.8"
+tokio-tungstenite = { version = "0.24", features = ["connect", "rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+notify = "6"
+futures-util = "0.3"
+parking_lot = "0.12"
+tokio-stream = "0.1"
 sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "chrono", "uuid"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros"] }
 askama = "0.12"

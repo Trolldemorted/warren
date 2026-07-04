@@ -74,6 +74,16 @@ pub struct ChannelsTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "agent_claude.html")]
+pub struct AgentClaudeTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub agent: crate::entity::agent::Model,
+    pub connected: bool,
+}
+
+#[derive(Template)]
 #[template(path = "channel_form.html")]
 pub struct ChannelFormTemplate {
     pub title: Option<&'static str>,

@@ -1,5 +1,5 @@
 use crate::db::Db;
-use crate::entity::{agent, channel, request};
+use crate::entity::{agent, agent_event, channel, request};
 use crate::error::{map_unique_conflict, AppError, AppResult};
 use crate::models::{AgentNew, AgentPatch, ChannelNew, ChannelPatch, RequestNew};
 use sea_orm::sea_query::{Expr, IntoCondition, Order, Query};
@@ -752,4 +752,50 @@ pub async fn channel_authorizes(
         ));
     }
     Ok(())
+}
+
+pub async fn insert_agent_event(
+    db: &Db,
+    id: Uuid,
+    agent_id: Uuid,
+    seq: i64,
+    kind: &str,
+    payload: serde_json::Value,
+) -> AppResult<agent_event::Model> {
+    let am = agent_event::ActiveModel {
+        id: Set(id),
+        agent_id: Set(agent_id),
+        seq: Set(seq),
+        kind: Set(kind.to_string()),
+        payload: Set(payload),
+        ..Default::default()
+    };
+    Ok(am.insert(db).await?)
+}
+
+pub async fn list_events_since(
+    db: &Db,
+    agent_id: Uuid,
+    since_seq: i64,
+    limit: u64,
+) -> AppResult<Vec<agent_event::Model>> {
+    Ok(agent_event::Entity::find()
+        .filter(agent_event::Column::AgentId.eq(agent_id))
+        .filter(agent_event::Column::Seq.gt(since_seq))
+        .order_by_asc(agent_event::Column::Seq)
+        .limit(Some(limit))
+        .all(db)
+        .await?)
+}
+
+#[allow(dead_code)]
+pub async fn next_event_seq(db: &Db, agent_id: Uuid) -> AppResult<i64> {
+    use sea_orm::QuerySelect;
+    let row: Option<agent_event::Model> = agent_event::Entity::find()
+        .filter(agent_event::Column::AgentId.eq(agent_id))
+        .order_by_desc(agent_event::Column::Seq)
+        .limit(Some(1))
+        .one(db)
+        .await?;
+    Ok(row.map(|r| r.seq).unwrap_or(0) + 1)
 }

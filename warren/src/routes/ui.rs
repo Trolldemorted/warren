@@ -3,8 +3,8 @@ use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
 use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew};
 use crate::templates::{
-    AgentFormTemplate, AgentsTemplate, ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate,
-    CommsRow, CommsTemplate, Flash, LoginTemplate, MigrationsTemplate,
+    AgentClaudeTemplate, AgentFormTemplate, AgentsTemplate, ChannelFormTemplate, ChannelsTemplate,
+    CommsInjectTemplate, CommsRow, CommsTemplate, Flash, LoginTemplate, MigrationsTemplate,
 };
 use crate::{auth, AppState};
 use askama::Template;
@@ -69,6 +69,7 @@ pub fn router() -> Router<AppState> {
         .route("/admin/channels/:id/edit", get(channel_edit_page))
         .route("/admin/channels/:id", post(channel_update))
         .route("/admin/channels/:id/delete", post(channel_delete))
+        .route("/agent/:id/claude", get(agent_claude_page))
 }
 
 async fn root() -> Redirect {
@@ -897,6 +898,30 @@ async fn channel_delete(
     }
     match crate::db_ops::delete_channel(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/channels").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn agent_claude_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    match crate::db_ops::get_agent(&state.db, id).await {
+        Ok(Some(agent)) => {
+            let connected = state.live.contains_key(&id);
+            render(AgentClaudeTemplate {
+                title: Some("claude"),
+                nav: Some("agents"),
+                flash: None,
+                agent,
+                connected,
+            })
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => err_page(e),
     }
 }

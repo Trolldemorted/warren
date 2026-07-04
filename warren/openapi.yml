@@ -13,6 +13,8 @@ tags:
     description: Endpoints usable by an admin (warren_session cookie).
   - name: agent
     description: Endpoints usable by an agent (Bearer authtoken).
+  - name: claude
+    description: Claude-Code live session endpoints (admin cookie only).
 components:
   securitySchemes:
     adminSession:
@@ -172,6 +174,74 @@ components:
           type: array
           items: { type: string, format: uuid }
       required: [error, code, eligible_request_ids]
+    AgentState:
+      type: string
+      enum: [starting, idle, running, ended, dead]
+    UsageSnapshot:
+      type: object
+      properties:
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        cache_read: { type: integer, format: int64 }
+        cache_write: { type: integer, format: int64 }
+        context_pct_est:
+          type: number
+          format: float
+          nullable: true
+        source: { type: string }
+      required: [input_tokens, output_tokens, cache_read, cache_write, source]
+    ClaudeStateResponse:
+      type: object
+      properties:
+        state: { $ref: '#/components/schemas/AgentState' }
+        session_id: { type: string, nullable: true }
+        claude_version: { type: string, nullable: true }
+        connected:
+          type: boolean
+          description: True when a rabbit pod is currently connected via /ws/rabbit.
+      required: [state, connected]
+    PromptRequest:
+      type: object
+      properties:
+        text: { type: string }
+        wait:
+          type: boolean
+          default: false
+          description: |
+            If true, block until the turn finishes (matched on the Stop hook).
+            Requires the matching rabbit connection to be live.
+      required: [text]
+    TurnOutcome:
+      type: object
+      properties:
+        prompt_id: { type: string, format: uuid }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+      required: [prompt_id, started_at, ended_at]
+    ClearRequest:
+      type: object
+      properties:
+        hard:
+          type: boolean
+          default: false
+          description: Also clears /compact context.
+    RestartRequest:
+      type: object
+      properties:
+        fresh:
+          type: boolean
+          default: false
+          description: Discard the existing session and start a new one.
+    AgentEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        agent_id: { type: string, format: uuid }
+        seq: { type: integer, format: int64 }
+        ts: { type: string, format: date-time }
+        kind: { type: string }
+        payload: { type: object, additionalProperties: true }
+      required: [id, agent_id, seq, ts, kind, payload]
 paths:
   /api/login:
     post:
@@ -661,3 +731,170 @@ paths:
               schema: { $ref: '#/components/schemas/Request' }
         '400': { description: Unknown status label }
         '404': { description: No request with this id }
+  /api/agents/{id}/claude/prompt:
+    post:
+      tags: [claude]
+      summary: Send a prompt to the running claude session
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PromptRequest' }
+      responses:
+        '200':
+          description: Turn accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TurnOutcome' }
+        '404': { description: Agent not connected }
+        '409': { description: Agent is busy (state=running) }
+  /api/agents/{id}/claude/usage:
+    get:
+      tags: [claude]
+      summary: Latest token usage snapshot
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UsageSnapshot' }
+        '404': { description: Agent not connected }
+  /api/agents/{id}/claude/state:
+    get:
+      tags: [claude]
+      summary: Live state of the claude session
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaudeStateResponse' }
+  /api/agents/{id}/claude/clear:
+    post:
+      tags: [claude]
+      summary: Clear the screen (and optionally the /compact context)
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClearRequest' }
+      responses:
+        '204': { description: Cleared }
+        '404': { description: Agent not connected }
+  /api/agents/{id}/claude/compact:
+    post:
+      tags: [claude]
+      summary: Trigger /compact inside the claude session
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Sent }
+        '404': { description: Agent not connected }
+  /api/agents/{id}/claude/interrupt:
+    post:
+      tags: [claude]
+      summary: Send ESC to interrupt the current turn
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Sent }
+        '404': { description: Agent not connected }
+  /api/agents/{id}/claude/restart:
+    post:
+      tags: [claude]
+      summary: Restart the supervisor (terminate -> 5s sleep -> respawn)
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RestartRequest' }
+      responses:
+        '204': { description: Restart scheduled }
+        '404': { description: Agent not connected }
+  /api/agents/{id}/claude/events:
+    get:
+      tags: [claude]
+      summary: List persisted agent_events rows since a given seq
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: since
+          schema: { type: integer, format: int64, default: 0 }
+        - in: query
+          name: limit
+          schema: { type: integer, format: int64, default: 500, maximum: 5000 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AgentEvent' }
+  /api/agents/{id}/claude/events/stream:
+    get:
+      tags: [claude]
+      summary: SSE feed of live meta events (state, usage, transcript)
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream: {}
+        '404': { description: Agent not connected }

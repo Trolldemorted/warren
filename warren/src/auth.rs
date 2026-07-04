@@ -137,3 +137,41 @@ pub async fn lookup_agent_by_token(db: &Db, token: &str) -> Result<Option<agent:
         .one(db)
         .await?)
 }
+
+pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
+pub async fn extract_agent_token(
+    db: &Db,
+    headers: &HeaderMap,
+) -> Result<Option<AgentAuth>, AppError> {
+    if let Some(token) = bearer_token(headers) {
+        if validate_admin_session(db, &token).await? {
+            return Err(AppError::Unauthorized);
+        }
+        if let Some(agent) = lookup_agent_by_token(db, &token).await? {
+            return Ok(Some(AgentAuth(agent)));
+        }
+    }
+    Ok(None)
+}
+
+#[allow(dead_code)]
+pub async fn extract_admin_session(db: &Db, headers: &HeaderMap) -> Result<bool, AppError> {
+    if let Some(token) = bearer_token(headers) {
+        if validate_admin_session(db, &token).await? {
+            return Ok(true);
+        }
+    }
+    if let Some(cookie) = read_session_cookie(headers) {
+        if validate_admin_session(db, &cookie).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}

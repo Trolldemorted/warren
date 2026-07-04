@@ -1,3 +1,4 @@
+mod agents_live;
 mod auth;
 mod config;
 mod db;
@@ -26,6 +27,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 pub struct AppState {
     pub db: Db,
     pub config: Config,
+    pub live: agents_live::AgentRegistry,
 }
 
 #[derive(Parser)]
@@ -102,6 +104,7 @@ async fn run_server() -> anyhow::Result<()> {
     let state = AppState {
         db,
         config: cfg.clone(),
+        live: agents_live::new_registry(),
     };
     let app = build_router(state);
 
@@ -188,7 +191,7 @@ async fn log_status(database_url: &str, dir_url: &str) {
 }
 
 async fn run_dump_schema() -> anyhow::Result<()> {
-    use entity::{admin_session, agent, channel, request};
+    use entity::{admin_session, agent, agent_event, channel, request};
     use sea_orm::sea_query::PostgresQueryBuilder;
     use sea_orm::{DatabaseBackend, Schema};
 
@@ -198,6 +201,7 @@ async fn run_dump_schema() -> anyhow::Result<()> {
         schema.create_table_from_entity(channel::Entity),
         schema.create_table_from_entity(request::Entity),
         schema.create_table_from_entity(admin_session::Entity),
+        schema.create_table_from_entity(agent_event::Entity),
     ];
     for table in tables {
         println!(
@@ -224,6 +228,12 @@ async fn run_dump_schema() -> anyhow::Result<()> {
         );
     }
     for stmt in schema.create_index_from_entity(admin_session::Entity) {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in agent_event::extra_indexes() {
         println!(
             "{};",
             stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
@@ -273,6 +283,11 @@ fn build_router(state: AppState) -> Router {
         .merge(routes::openapi::router())
         .merge(routes::docs::router(state.clone()))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/ws/rabbit", get(agents_live::ws_rabbit::ws_rabbit))
+        .route(
+            "/agent/:id/claude/ws",
+            get(agents_live::ws_browser::ws_browser),
+        )
         .nest("/static", routes::static_files::router(state.clone()))
         .layer(security_headers)
         .with_state(state)
