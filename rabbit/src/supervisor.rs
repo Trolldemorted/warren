@@ -372,6 +372,28 @@ pub async fn run(config: Config) -> Result<()> {
                                 let _ = sh.tx.send(ShellCmd::Write(data)).await;
                             }
                         } else if chan == TERM_CHAN_CLAUDE {
+                            // §diagnose backspace: opt-in via RUST_LOG=debug.
+                            // Logs every binary frame arriving on the
+                            // Claude channel so we can confirm the byte
+                            // (e.g. 0x7f for Backspace) reaches this
+                            // layer from the link. Compare with the
+                            // browser-side `?debug_typing=1` console log
+                            // to pinpoint any byte mutation.
+                            log::debug!(
+                                "claude binary: {} bytes [{}]",
+                                data.len(),
+                                {
+                                    let head: Vec<String> = data.iter().take(8)
+                                        .map(|b| format!("{b:02x}"))
+                                        .collect();
+                                    let shown = head.join(" ");
+                                    if data.len() > 8 {
+                                        format!("{shown} …")
+                                    } else {
+                                        shown
+                                    }
+                                }
+                            );
                             // Direct write through the shared writer —
                             // bypasses the blocking reader's `pty_rx`
                             // queue, which only drains between
@@ -1813,6 +1835,119 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "typed bytes landed but took {elapsed:?} — bypass path is too slow"
+        );
+    }
+
+    /// Regression for the backspace-starvation report. `0x7f` (DEL) is
+    /// what xterm.js emits for the Backspace key. The same byte path
+    /// that delivers printable characters must also deliver control
+    /// characters, including bytes that would silently look like
+    /// "nothing happened" on the wire (no echo, no prompt change). We
+    /// type "abc<BS>x" through the shared writer, then check that the
+    /// byte stream seen on the master side includes the literal
+    /// `0x7f`. The kernel line discipline in cooked mode would
+    /// translate `\x7f` into a BS-SPACE-BS erase sequence, so we use
+    /// `stty raw` to keep the byte literal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn backspace_byte_reaches_pty_via_shared_writer() {
+        use crate::pty::Pty;
+        use std::io::Read;
+        use std::sync::mpsc as std_mpsc;
+        use std::time::Instant;
+
+        // `/bin/sh -c 'stty raw -echo; exec cat'` puts cat into raw mode
+        // so the kernel doesn't translate 0x7f into an erase sequence
+        // before we can observe the literal byte on the master side.
+        let mut pty = Pty::spawn(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "stty raw -echo; exec cat".to_string(),
+            ],
+            "/tmp",
+            80,
+            24,
+            4096,
+        )
+        .expect("spawn sh+stty+cat");
+        assert!(pty.alive());
+        let mut reader = pty.reader();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
+            pty.master
+                .take_writer()
+                .map_err(|e| anyhow::anyhow!("take_writer: {e}"))
+                .expect("take_writer"),
+        ));
+        let dummy_killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>> = {
+            let mut pty2 = Pty::spawn("/bin/true", &[], "/tmp", 80, 24, 1024)
+                .expect("spawn /bin/true");
+            let _ = pty2.terminate();
+            let _ = pty2.wait();
+            Arc::new(Mutex::new(pty2.killer))
+        };
+        let active = ActiveSession {
+            pty_link_tx: {
+                let (tx, _rx) = mpsc::channel::<PtyCmd>(1);
+                tx
+            },
+            killer: dummy_killer,
+            writer: writer.clone(),
+        };
+
+        let (echo_tx, echo_rx) = std_mpsc::channel::<Vec<u8>>();
+        let reader_join = tokio::task::spawn_blocking(move || {
+            let mut io_buf = [0u8; 64];
+            loop {
+                match reader.read(&mut io_buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if echo_tx.send(io_buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Type "abc<BS>x" — every byte travels through the shared
+        // writer exactly as the War UI's onData handler feeds them in.
+        let started = Instant::now();
+        for c in b"abc\x7fx" {
+            write_claude_terminal_bytes(&[*c], Some(&active)).await;
+        }
+
+        // cat -v visualises control bytes using caret notation: the
+        // DEL byte (0x7f) we type shows up as "^?" on the master's
+        // output side. So we look for that literal substring in the
+        // drained master output. The kernel is in raw mode so the byte
+        // is not translated into an erase sequence before it reaches
+        // cat — cat itself rewrites it on the way out.
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        // The literal DEL byte (0x7f) appearing in the master's output
+        // proves the bypass path delivered the byte untranslated. With
+        // `stty raw -echo`, the kernel passes the byte through verbatim
+        // (no ERASE processing, no echo-control rewriting).
+        while !got.contains(&0x7f) && Instant::now() < deadline {
+            match echo_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(chunk) => got.extend_from_slice(&chunk),
+                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let elapsed = started.elapsed();
+
+        drop(writer);
+        if pty.alive() {
+            let _ = pty.terminate();
+            let _ = pty.wait();
+        }
+        let _ = reader_join.await;
+
+        assert!(
+            got.contains(&0x7f),
+            "backspace (0x7f) did not reach cat; saw {:?} in {elapsed:?}",
+            String::from_utf8_lossy(&got)
         );
     }
 }

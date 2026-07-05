@@ -204,6 +204,31 @@ term.open(document.getElementById('term'));
 fit.fit();
 term.focus();
 
+// §D Firefox mobile (desktop mode) quirk: the browser sometimes delivers
+// Backspace as `key === "Backspace"` (a 9-char string) and/or fails to
+// round-trip through xterm.js's case-8 path so `triggerDataEvent` never
+// sees `\x7f`. End result: the keystroke reaches the textarea but the
+// byte never reaches claude's PTY — claude's readline stays put, the
+// user sees "no visible change". Intercept Backspace at the
+// `attachCustomKeyEventHandler` boundary and emit `\x7f` directly,
+// bypassing xterm.js's internal keymap. Returning `false` from the
+// handler also suppresses the browser's default action (Firefox
+// desktop-mode sometimes still honours "Backspace navigates back"
+// on a focused non-input element), and we want `e.preventDefault()`
+// even when the WS send is a no-op (viewer mode / disconnected).
+term.attachCustomKeyEventHandler(e => {
+  if (e.type !== 'keydown') return true;
+  if (e.key !== 'Backspace' && e.keyCode !== 8) return true;
+  e.preventDefault();
+  e.stopPropagation();
+  if (!connected || !ws || viewerMode) return false;
+  const buf = new Uint8Array(2);
+  buf[0] = 0x01;
+  buf[1] = 0x7f;
+  ws.send(buf);
+  return false;
+});
+
 let ws = null;
 let wsBackoff = 500;
 let connected = false;
@@ -242,6 +267,16 @@ term.onData(data => {
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
+  // §diagnose backspace: opt-in via `?debug_typing=1` on the page URL.
+  // Logs the bytes going out so we can confirm the browser is sending
+  // what xterm.js claims (0x7f for Backspace). Off by default — keystroke
+  // chatter is noisy in devtools.
+  if (location.search.includes('debug_typing=1')) {
+    console.log('term.onData',
+      JSON.stringify(data),
+      '->',
+      Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join(' '));
+  }
   ws.send(buf);
 });
 
