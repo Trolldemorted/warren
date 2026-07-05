@@ -80,6 +80,39 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   margin-top: .25rem;
 }
 #claim-leader-btn[hidden], #release-leader-btn[hidden] { display: none !important; }
+
+/* Action-button toast: bottom-right, fades in on `.visible`, auto-dismisses.
+   See `showActionToast` for the JS that emits one on every action-button
+   response (success or failure). Without this, a Restart click that kills
+   claude + respawns into the same session would *look* like nothing
+   happened for ~½-2s. */
+.action-toast {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 2000;
+  max-width: 28rem;
+  padding: .55rem .9rem;
+  border-radius: .35rem;
+  background: rgba(33, 37, 41, .92);
+  color: #fff;
+  font-size: .85rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .25);
+  opacity: 0;
+  transform: translateY(.4rem);
+  transition: opacity .2s ease-out, transform .2s ease-out;
+  pointer-events: none;
+}
+.action-toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.action-toast-error {
+  background: rgba(220, 53, 69, .95);
+}
+.action-toast-info {
+  background: rgba(13, 110, 253, .95);
+}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>
@@ -329,17 +362,65 @@ function bytesToUtf8(bytes) {
 
 // Action buttons POST to /api/agents/:id/claude/* — cookie-authed and
 // idempotent across the hub actor.
+//
+// Body semantics matter: `restart` carries `{fresh: bool}`. A *fresh*
+// restart starts a brand-new claude session (no `--resume`/`--continue`
+// flag, so no inherited context and no usage warning); a non-fresh
+// restart re-spawns claude into the same session it was last running
+// (or `--continue`s the most recent one). The Restart button is the
+// user-facing way to say "throw away the old context and start over", so
+// it MUST be `fresh: true`. Sending `false` here produced a runtime that
+// looked like "Restart does nothing" because the visible state on the
+// page didn't change — claude was being killed and re-spawned, just back
+// into the same session. `clear` is the `/clear` slash command and takes
+// no body.
 document.querySelectorAll('button.action').forEach(btn => {
   btn.addEventListener('click', async () => {
     const action = btn.dataset.action;
-    const body = (action === 'clear' || action === 'restart') ? JSON.stringify({fresh: false}) : null;
-    await fetch(`/api/agents/${agentId}/claude/${action}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body
-    });
+    let body = null;
+    if (action === 'restart') {
+      body = JSON.stringify({fresh: true});
+    }
+    try {
+      const res = await fetch(`/api/agents/${agentId}/claude/${action}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body,
+      });
+      if (!res.ok) {
+        // Surface server-side rejections (401/403/404/409/5xx) so the
+        // operator sees *why* a click did nothing instead of silently
+        // failing. Best-effort: text body if the server provided one,
+        // otherwise the status line.
+        const detail = await res.text().catch(() => '');
+        showActionToast(
+          `${action} failed (${res.status}${detail ? `: ${detail}` : ''})`,
+          'error',
+        );
+      }
+    } catch (e) {
+      // Network/cookie failure — the request never reached the server.
+      showActionToast(`${action} failed: ${e}`, 'error');
+    }
   });
 });
+
+// Lightweight toast so action-button outcomes are visible. A click on
+// `restart` triggers an async restart on the rabbit side; without this,
+// the user sees the same conversation for ~½-2s until the new claude
+// prints something, and they can't tell whether the click landed at all.
+function showActionToast(msg, kind = 'info') {
+  const el = document.createElement('div');
+  el.className = `action-toast action-toast-${kind}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  // Fade in via a frame so the transition runs, then auto-dismiss.
+  requestAnimationFrame(() => el.classList.add('visible'));
+  setTimeout(() => {
+    el.classList.remove('visible');
+    setTimeout(() => el.remove(), 300);
+  }, 3500);
+}
 
 // §A.6 leader-based resize -------------------------------------------------
 //
