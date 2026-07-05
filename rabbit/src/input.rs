@@ -25,7 +25,7 @@ pub const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 /// body contains the literal end marker would prematurely close the paste;
 /// callers (rabbit's wire path, warren's prompt API) reject such input at
 /// validation time rather than papering over it here.
-pub fn paste<W: Write>(w: &mut W, text: &str) -> Result<()> {
+pub fn paste<W: Write + ?Sized>(w: &mut W, text: &str) -> Result<()> {
     w.write_all(CTRL_U)?;
     w.write_all(BRACKETED_PASTE_START)?;
     for ch in text.chars() {
@@ -43,7 +43,7 @@ pub fn paste<W: Write>(w: &mut W, text: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn slash<W: Write>(w: &mut W, cmd: &str) -> Result<()> {
+pub fn slash<W: Write + ?Sized>(w: &mut W, cmd: &str) -> Result<()> {
     w.write_all(CTRL_U)?;
     let line = format!("/{cmd}");
     w.write_all(line.as_bytes())?;
@@ -52,14 +52,14 @@ pub fn slash<W: Write>(w: &mut W, cmd: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn interrupt<W: Write>(w: &mut W) -> Result<()> {
+pub fn interrupt<W: Write + ?Sized>(w: &mut W) -> Result<()> {
     w.write_all(ESC)?;
     w.flush()?;
     Ok(())
 }
 
 #[allow(dead_code)]
-pub fn raw<W: Write>(w: &mut W, bytes: &[u8]) -> Result<()> {
+pub fn raw<W: Write + ?Sized>(w: &mut W, bytes: &[u8]) -> Result<()> {
     w.write_all(bytes)?;
     w.flush()?;
     Ok(())
