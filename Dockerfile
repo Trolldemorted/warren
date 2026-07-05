@@ -12,7 +12,7 @@ RUN mkdir -p warren/src warren-cli/src rabbit/src \
  && echo 'fn main(){println!("fake main")}' > warren-cli/src/main.rs \
  && echo 'fn main(){println!("fake main")}' > rabbit/src/main.rs \
  && cargo build --release --bin warren --bin warren-cli --bin rabbit \
- && rm -rf warren/src warren-cli/src
+ && rm -rf warren/src warren-cli/src rabbit/src
 COPY warren/src warren/src
 COPY warren/migrations_atlas warren/migrations_atlas
 COPY warren/templates warren/templates
@@ -20,7 +20,7 @@ COPY warren/openapi.yml warren/openapi.yml
 COPY warren/static warren/static
 COPY warren-cli/src warren-cli/src
 COPY rabbit/src rabbit/src
-RUN touch warren/src/main.rs warren-cli/src/main.rs && cargo build --release --bin warren --bin warren-cli --bin rabbit
+RUN touch warren/src/main.rs warren-cli/src/main.rs && cargo build --release --bin warren --bin warren-cli --bin rabbit --bin rabbit-hook
 
 FROM debian:bookworm-slim AS swagger
 ARG SWAGGER_UI_VERSION=5.32.8
@@ -56,6 +56,7 @@ COPY --from=builder /build/target/release/warren /usr/local/bin/warren
 COPY --from=builder /build/target/release/warren-cli /usr/local/bin/warren-cli
 COPY --from=builder /build/warren/static /var/lib/warren/static
 COPY --from=builder /build/target/release/rabbit /usr/local/bin/rabbit
+COPY --from=builder /build/target/release/rabbit-hook /usr/local/bin/rabbit-hook
 COPY --from=swagger /tmp/swagger-ui /var/lib/warren/docs
 COPY warren/migrations_atlas warren/migrations_atlas
 USER warren
