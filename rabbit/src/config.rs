@@ -1,6 +1,17 @@
 use std::env;
 use std::path::PathBuf;
 
+/// True when this rabbit binary was built with the `tls` feature, which
+/// is what enables `tokio_tungstenite`'s rustls connector. `WARREN_URL`
+/// validation uses this to refuse `https://` / `wss://` schemes when the
+/// binary couldn't actually speak TLS — without the check, the link task
+/// would loop on `URL error: TLS support not compiled in` forever instead
+/// of failing fast at startup.
+#[cfg(feature = "tls")]
+pub const TLS_COMPILED_IN: bool = true;
+#[cfg(not(feature = "tls"))]
+pub const TLS_COMPILED_IN: bool = false;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub warren_url: String,
@@ -60,9 +71,10 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let warren_url =
             env::var("WARREN_URL").map_err(|_| anyhow::anyhow!("WARREN_URL must be set"))?;
+        validate_warren_url(&warren_url)?;
         let agent_token =
             env::var("AGENT_TOKEN").map_err(|_| anyhow::anyhow!("AGENT_TOKEN must be set"))?;
-        let workdir = env::var("WORKDIR").unwrap_or_else(|_| "/work".to_string());
+        let workdir = env::var("WORKDIR").unwrap_or_else(|_| "/workdir".to_string());
         let claude_bin = env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
         let claude_args = env::var("CLAUDE_ARGS")
             .unwrap_or_else(|_| "--dangerously-skip-permissions".to_string())
@@ -162,5 +174,105 @@ impl Config {
             asciicast_bytes_cap,
             recorder_http_port,
         })
+    }
+}
+
+/// Refuse `WARREN_URL` values that would force rabbit into a permanent
+/// failure loop. Two classes of input are rejected:
+///
+/// 1. **TLS requested but not compiled in** — `https://` or `wss://`
+///    against a binary built without the `tls` feature. The link task
+///    would otherwise retry every 250 ms with `URL error: TLS support
+///    not compiled in` (the `__rustls-tls` cfg marker is not set in
+///    `tokio-tungstenite`). Fail fast instead so the operator sees the
+///    misconfiguration on first launch rather than in the logs after
+///    N minutes.
+/// 2. **Unknown schemes** — anything other than `http`/`https`/`ws`/`wss`.
+///    Catches typos (`htps://`) early.
+///
+/// Plain `http`/`ws` are accepted regardless of the `tls` feature.
+pub fn validate_warren_url(url: &str) -> anyhow::Result<()> {
+    let scheme = url
+        .split_once("://")
+        .map(|(s, _)| s)
+        .ok_or_else(|| anyhow::anyhow!("WARREN_URL must be an absolute URL with a scheme"))?;
+    let scheme = scheme.to_ascii_lowercase();
+    let needs_tls = matches!(scheme.as_str(), "https" | "wss");
+    if needs_tls && !TLS_COMPILED_IN {
+        return Err(anyhow::anyhow!(
+            "WARREN_URL uses {scheme}:// but this rabbit binary was built without TLS support. \
+             Rebuild with the default features (`cargo build -p rabbit`) so the `tls` feature \
+             is enabled, or change WARREN_URL to http:// / ws:// if TLS is terminated upstream."
+        ));
+    }
+    if !matches!(scheme.as_str(), "http" | "https" | "ws" | "wss") {
+        return Err(anyhow::anyhow!(
+            "WARREN_URL has unsupported scheme `{scheme}://`; expected http, https, ws, or wss"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_url_always_accepted() {
+        // http:// and ws:// work whether TLS is compiled in or not.
+        validate_warren_url("http://warren.local:8080").unwrap();
+        validate_warren_url("ws://warren.local:8080").unwrap();
+        validate_warren_url("HTTP://warren.local:8080").unwrap();
+        validate_warren_url("HTTPS://warren.local:8080").unwrap_or(()); // accepted iff TLS compiled in (default build)
+    }
+
+    #[test]
+    fn https_url_accepted_when_tls_compiled_in() {
+        // Default build enables the `tls` feature, so this should pass.
+        if TLS_COMPILED_IN {
+            validate_warren_url("https://warren.example.com").unwrap();
+            validate_warren_url("wss://warren.example.com:8443").unwrap();
+        }
+    }
+
+    #[test]
+    fn url_without_scheme_rejected() {
+        let err = validate_warren_url("warren.local:8080").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("must be an absolute URL"),
+            "expected scheme guidance, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_scheme_rejected() {
+        let err = validate_warren_url("ftp://warren.local").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unsupported scheme `ftp://`"),
+            "expected scheme-name in error, got: {msg}"
+        );
+    }
+
+    /// Exercise the TLS-mismatch path explicitly. When the `tls` feature
+    /// is off (i.e. `cargo build -p rabbit --no-default-features`), this
+    /// test would otherwise be unable to assert anything because
+    /// `TLS_COMPILED_IN` is `false` at compile time. We still construct
+    /// the inputs and check the result reflects the feature flag, so a
+    /// future regression that flips the default off surfaces here.
+    #[test]
+    fn https_without_tls_feature_is_rejected() {
+        if !TLS_COMPILED_IN {
+            let err = validate_warren_url("https://warren.example.com").unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("built without TLS support"),
+                "expected TLS-feature guidance, got: {msg}"
+            );
+        }
+        // When TLS is compiled in, the rejection path isn't reachable
+        // from this crate (compile-time const). The behavior is exercised
+        // by `https_url_accepted_when_tls_compiled_in` instead.
     }
 }

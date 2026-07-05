@@ -22,7 +22,7 @@ All configuration is via environment variables (see [`config.rs`](src/config.rs)
 |-----|---------|---------|
 | `WARREN_URL` | — (required) | warren base URL (`http(s)://…`; rewritten to `ws(s)://…/ws/rabbit`). |
 | `AGENT_TOKEN` | — (required) | Bearer token presented on the WS upgrade. |
-| `WORKDIR` | `/work` | claude's cwd; also where `settings.json` hooks are installed. |
+| `WORKDIR` | `/workdir` | claude's cwd; also where `settings.json` hooks are installed. |
 | `CLAUDE_BIN` | `claude` | claude executable. |
 | `CLAUDE_ARGS` | `--dangerously-skip-permissions` | Base argv (space-split). |
 | `MODEL` | — | Appended as `--model <MODEL>` if set. |
@@ -38,12 +38,12 @@ All configuration is via environment variables (see [`config.rs`](src/config.rs)
 
 ## Kubernetes deployment (§A.7)
 
-### Persistent volumes — mount **both** `/work` and `~/.claude`
+### Persistent volumes — mount **both** `/workdir` and `~/.claude`
 
 Session resume across pod restarts depends on two independent pieces of on-disk
 state, so **both** must live on a PVC (not `emptyDir`):
 
-- **`/work`** (`$WORKDIR`) — the project tree claude operates on.
+- **`/workdir`** (`$WORKDIR`) — the project tree claude operates on.
 - **`~/.claude`** — where claude stores its session transcripts and the
   encoded-cwd conversation history that `--resume`/`--continue` read back.
 
@@ -61,7 +61,7 @@ Minimal shape:
 
 ```yaml
 volumeMounts:
-  - { name: work,   mountPath: /work }
+  - { name: work,   mountPath: /workdir }
   - { name: claude, mountPath: /home/rabbit/.claude }   # adjust to the image's $HOME
 volumes:
   - { name: work,   persistentVolumeClaim: { claimName: agent-work } }

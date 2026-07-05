@@ -12,7 +12,7 @@ tokio = { version = "1", features = ["full"] }
 dashmap = "6"
 bytes = "1"
 portable-pty = "0.8"
-tokio-tungstenite = { version = "0.24", features = ["connect", "rustls"] }
+tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 notify = "6"
 futures-util = "0.3"
