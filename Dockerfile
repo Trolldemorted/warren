@@ -10,7 +10,8 @@ COPY rabbit/Cargo.toml rabbit/
 RUN mkdir -p warren/src warren-cli/src \
  && echo 'fn main(){println!("fake main")}' > warren/src/main.rs \
  && echo 'fn main(){println!("fake main")}' > warren-cli/src/main.rs \
- && cargo build --release --bin warren --bin warren-cli \
+ && echo 'fn main(){println!("fake main")}' > rabiit/src/main.rs \
+ && cargo build --release --bin warren --bin warren-cli --bin rabbit \
  && rm -rf warren/src warren-cli/src
 COPY warren/src warren/src
 COPY warren/migrations_atlas warren/migrations_atlas
@@ -18,7 +19,8 @@ COPY warren/templates warren/templates
 COPY warren/openapi.yml warren/openapi.yml
 COPY warren/static warren/static
 COPY warren-cli/src warren-cli/src
-RUN touch warren/src/main.rs warren-cli/src/main.rs && cargo build --release --bin warren --bin warren-cli
+COPY rabbit/src rabbit/src
+RUN touch warren/src/main.rs warren-cli/src/main.rs && cargo build --release --bin warren --bin warren-cli --bin rabbit
 
 FROM debian:bookworm-slim AS swagger
 ARG SWAGGER_UI_VERSION=5.32.8
@@ -53,6 +55,7 @@ RUN curl -sSf https://atlasgo.sh | sh
 COPY --from=builder /build/target/release/warren /usr/local/bin/warren
 COPY --from=builder /build/target/release/warren-cli /usr/local/bin/warren-cli
 COPY --from=builder /build/warren/static /var/lib/warren/static
+COPY --from=builder /build/target/release/rabbit /usr/local/bin/rabbit
 COPY --from=swagger /tmp/swagger-ui /var/lib/warren/docs
 COPY warren/migrations_atlas warren/migrations_atlas
 USER warren
