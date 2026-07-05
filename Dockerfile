@@ -6,6 +6,7 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock ./
 COPY warren/Cargo.toml warren/
 COPY warren-cli/Cargo.toml warren-cli/
+COPY rabbit/Cargo.toml rabbit/
 RUN mkdir -p warren/src warren-cli/src \
  && echo 'fn main(){println!("fake main")}' > warren/src/main.rs \
  && echo 'fn main(){println!("fake main")}' > warren-cli/src/main.rs \
