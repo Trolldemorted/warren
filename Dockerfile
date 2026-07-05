@@ -10,7 +10,7 @@ COPY rabbit/Cargo.toml rabbit/
 RUN mkdir -p warren/src warren-cli/src \
  && echo 'fn main(){println!("fake main")}' > warren/src/main.rs \
  && echo 'fn main(){println!("fake main")}' > warren-cli/src/main.rs \
- && echo 'fn main(){println!("fake main")}' > rabiit/src/main.rs \
+ && echo 'fn main(){println!("fake main")}' > rabbit/src/main.rs \
  && cargo build --release --bin warren --bin warren-cli --bin rabbit \
  && rm -rf warren/src warren-cli/src
 COPY warren/src warren/src
