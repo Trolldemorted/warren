@@ -69,22 +69,22 @@ fn slash_command_reaches_the_pty_consumer() {
 }
 
 #[test]
-fn interrupt_sends_escape_to_the_pty() {
+fn interrupt_sends_ctrl_c_to_the_pty() {
     let mut pty = spawn_fake_tui(120, 40);
     let rx = spawn_reader(&pty);
     let mut w = pty.writer();
 
     input::interrupt(&mut w).expect("interrupt");
 
-    // The tty echoes the ESC immediately. Depending on ECHOCTL it appears as a
-    // raw 0x1b or the caret form "^[" — accept either.
+    // The tty echoes the Ctrl-C byte immediately. Depending on ECHOCTL
+    // it appears as a raw 0x03 or the caret form "^C" — accept either.
     let acc = drain_for(&rx, Duration::from_millis(800));
     let _ = pty.terminate();
     let _ = pty.wait();
 
     assert!(
-        contains(&acc, b"\x1b") || contains(&acc, b"^["),
-        "interrupt (ESC) did not reach the PTY; saw {} bytes: {:?}",
+        contains(&acc, b"\x03") || contains(&acc, b"^C"),
+        "interrupt (Ctrl-C byte) did not reach the PTY; saw {} bytes: {:?}",
         acc.len(),
         String::from_utf8_lossy(&acc)
     );

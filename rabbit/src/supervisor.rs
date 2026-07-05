@@ -1558,27 +1558,32 @@ mod tests {
     }
 
     /// Regression: an `EnvelopeBody::Interrupt` arriving at the outer
-    /// supervisor loop must produce `input::ESC` on the PTY master even
-    /// when the blocking reader thread is wedged in `read()` waiting for
-    /// the child to emit something.
+    /// supervisor loop must produce the abort byte on the PTY master
+    /// even when the blocking reader thread is wedged in `read()`
+    /// waiting for the child to emit something.
     ///
-    /// Pre-fix, dispatch_to_pty packed the ESC into `PtyCmd::Write(out)`
-    /// and pushed it into `pty_rx`, which the blocking thread only
-    /// drained between `read()` calls. With claude parked at a TUI
-    /// prompt (no further output), `read()` blocked indefinitely and
-    /// the queued ESC never reached the master.
+    /// The abort byte is the literal Ctrl-C byte (`0x03`) — this is
+    /// what claude's keymap binds to "abort current turn." (For Y/N
+    /// confirmation prompts, the right byte is `ESC`/`0x1b`; that's a
+    /// different UI affordance, not what the Interrupt button does.)
+    ///
+    /// Pre-fix, dispatch_to_pty packed the abort bytes into
+    /// `PtyCmd::Write(out)` and pushed it into `pty_rx`, which the
+    /// blocking thread only drained between `read()` calls. With
+    /// claude parked mid-turn (or at any prompt emitting no output),
+    /// `read()` blocked indefinitely and the queued bytes never
+    /// reached the master. Now the abort bytes go directly through the
+    /// shared writer, bypassing the channel.
     ///
     /// We verify the direct-write path end-to-end against a real PTY:
     /// spawn a `/bin/cat` (which reads stdin forever, just like a
-    /// TUI prompt would), confirm `read()` blocks (the cat is alive and
-    /// waiting — verified via `pty.alive()`), and assert the ESC byte
-    /// lands on the master within 1s when we drive the dispatch.
-    ///
-    /// cat does not actually respond to ESC in any user-visible way,
-    /// but it WILL receive the byte on its stdin and emit nothing in
-    /// return — so we don't try to assert anything on the read side.
-    /// The relevant assertion is that dispatch_to_pty writes the byte
-    /// without blocking on a channel that may be unreachable.
+    /// claude turn would), confirm `read()` blocks (the cat is alive
+    /// and waiting — verified via `pty.alive()`), and assert the
+    /// dispatch returns sub-second — proving the path bypassed the
+    /// channel. cat does not respond to 0x03 in any user-visible way,
+    /// but it WILL receive the byte on its stdin; the relevant
+    /// assertion is that dispatch_to_pty writes the byte without
+    /// blocking on a channel that may be unreachable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn interrupt_reaches_pty_via_shared_writer() {
         use crate::pty::Pty;

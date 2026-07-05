@@ -52,8 +52,22 @@ pub fn slash<W: Write + ?Sized>(w: &mut W, cmd: &str) -> Result<()> {
     Ok(())
 }
 
+/// Abort claude's currently-executing turn. Writes the literal Ctrl-C
+/// byte (`0x03`) — distinct from `ESC`, which is what claude's Y/N
+/// confirmation prompts (e.g. "resuming the full session will consume a
+/// substantial portion of your usage limits") expect.
+///
+/// The War UI's Interrupt button calls this. The intent is "stop what
+/// is happening right now" — NOT to kill claude, NOT to restart the
+/// session. Killing the session is the Restart button's job, which
+/// runs through a different code path (shared `ChildKiller` SIGKILL
+/// in the supervisor's outer loop).
+///
+/// Why Ctrl-C and not ESC: the byte `0x03` is what claude's keymap
+/// binds to "abort current turn"; `0x1b` would only cancel an active
+/// confirmation dialog and is silent if claude is mid-generation.
 pub fn interrupt<W: Write + ?Sized>(w: &mut W) -> Result<()> {
-    w.write_all(ESC)?;
+    w.write_all(b"\x03")?;
     w.flush()?;
     Ok(())
 }
@@ -112,9 +126,14 @@ mod tests {
     }
 
     #[test]
-    fn interrupt_writes_esc() {
+    fn interrupt_writes_ctrl_c_byte() {
+        // Must produce the literal Ctrl-C byte (0x03). The War UI's
+        // Interrupt button calls this; claude's keymap binds 0x03 to
+        // "abort current turn." A regression here would silently fall
+        // back to ESC and only cancel confirmation prompts while
+        // leaving a running turn untouched.
         let mut out = Vec::new();
         interrupt(&mut out).unwrap();
-        assert_eq!(out, b"\x1b".to_vec());
+        assert_eq!(out, b"\x03".to_vec(), "Interrupt must send 0x03, not 0x1b");
     }
 }
