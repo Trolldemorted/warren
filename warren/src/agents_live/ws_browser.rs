@@ -70,10 +70,42 @@ async fn handle(
     agent_id: Uuid,
     viewer_mode: bool,
 ) -> anyhow::Result<()> {
-    let handle = registry
-        .get(&agent_id)
-        .ok_or_else(|| anyhow::anyhow!("agent not connected"))?
-        .clone();
+    // Split the socket first so the wait-for-arrival guard below can
+    // observe early client closes without burning the upgrade — once
+    // we await `notified()` blindly, the only way out of that future
+    // is the registry firing or the client going away. Detecting the
+    // latter requires the read half to be polled concurrently with
+    // the notifier.
+    let (mut sink, mut stream) = socket.split();
+
+    // If no rabbit has registered yet, hold the WS open and wait for
+    // one. Without this gate the handle() would `Err` immediately,
+    // the server would close the WS, and the browser would reconnect
+    // every ~500 ms — flipping the offline overlay and the empty
+    // xterm at 1 Hz ("screen flickers about once a second"). Holding
+    // the WS open and proceeding only when the registry fires keeps
+    // the page in a single stable state.
+    let handle = loop {
+        if let Some(h) = registry.get(&agent_id) {
+            break h.clone();
+        }
+        let mut notified = std::pin::pin!(registry.wait_for_arrival());
+        tokio::select! {
+            // Note: `bias` would be nice here, but we want to react
+            // to a client-side close as quickly as possible — never
+            // park for the full notify cycle if the user closed the
+            // tab.
+            _ = notified.as_mut() => continue,
+            _msg = stream.next() => {
+                // Either `None` (stream closed) or `Some(Err(_))`
+                // (transport error) or `Some(Ok(Message::Close(_)))`
+                // — all of these mean the client gave up. We don't
+                // need to inspect the message to know to drop the
+                // upgrade path.
+                return Ok(());
+            }
+        }
+    };
     let mut term_rx = handle.subscribe_term();
     let mut meta_rx = handle.subscribe_meta();
 
@@ -82,8 +114,6 @@ async fn handle(
     // `ClaimLeader` / `ReleaseLeader` / `Resize` frames. Generated once
     // per WS upgrade; sent to this tab verbatim in `ConnectionAssigned`.
     let connection_id: Uuid = Uuid::new_v4();
-
-    let (mut sink, mut stream) = socket.split();
 
     // §A.6: send `ConnectionAssigned` directly on this WS rather than via
     // `meta_tx` — only *this* tab needs to learn its own id. The browser

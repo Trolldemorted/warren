@@ -23,7 +23,16 @@ pub struct AgentHandle {
     /// otherwise see an empty screen. This ring fills the gap.
     term_ring: Arc<Mutex<VecDeque<Bytes>>>,
     meta_tx: broadcast::Sender<EnvelopeBody>,
-    cmd_tx: mpsc::Sender<Command>,
+    /// Shared handle to the actor's command channel. Wrapped in
+    /// `Arc<Mutex<Sender>>` (not a bare `mpsc::Sender`) so that
+    /// `install_cmd_tx` — called by `ws_rabbit` when a fresh actor
+    /// takes over after a reconnect — propagates to *every* clone of
+    /// the handle, not just the registry entry that the install path
+    /// happens to mutate. Without this, a browser WS that opened
+    /// before the rabbit connected would keep sending commands into a
+    /// disconnected (no-receiver) mpsc, and every action button click
+    /// on that tab would 500 until the tab reconnected.
+    cmd_tx: Arc<Mutex<mpsc::Sender<Command>>>,
     /// §D Milestone 5: recorder base URL advertised by rabbit in its Hello
     /// envelope. `None` when recording is disabled or rabbit hasn't
     /// (re)connected with a fresh Hello yet.
@@ -94,7 +103,7 @@ impl AgentHandle {
             term_tx,
             term_ring: Arc::new(Mutex::new(VecDeque::with_capacity(TERM_RING_MAX_CHUNKS))),
             meta_tx,
-            cmd_tx,
+            cmd_tx: Arc::new(Mutex::new(cmd_tx)),
             recorder_url: Arc::new(Mutex::new(None)),
             leader: Arc::new(Mutex::new(None)),
         }
@@ -109,22 +118,54 @@ impl AgentHandle {
             term_tx,
             term_ring: Arc::new(Mutex::new(VecDeque::with_capacity(TERM_RING_MAX_CHUNKS))),
             meta_tx,
-            cmd_tx,
+            cmd_tx: Arc::new(Mutex::new(cmd_tx)),
             recorder_url: Arc::new(Mutex::new(None)),
             leader: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn install_cmd_tx(&mut self, cmd_tx: mpsc::Sender<Command>) {
-        self.cmd_tx = cmd_tx;
+    /// Install a fresh command sender so all clones of this handle start
+    /// dispatching to the new channel. Used by `ws_rabbit` after a fresh
+    /// actor starts (post-rabbit-reconnect). The shared `Arc<Mutex<>>`
+    /// indirection means the registry entry AND every other clone of
+    /// the handle (a browser WS that cloned it before reconnect, an
+    /// HTTP action handler that cached a clone, etc.) all see the
+    /// replacement on their next `cmd_tx()` call.
+    pub fn install_cmd_tx(&self, cmd_tx: mpsc::Sender<Command>) {
+        *self.cmd_tx.lock().expect("cmd_tx poisoned") = cmd_tx;
+    }
+
+    /// Returns a clone of the currently-installed command sender. The
+    /// sender is cheap to clone (it shares an inner `Arc` with all
+    /// other clones), but we still take the brief `Mutex` lock to
+    /// ensure the returned sender matches the live install — a
+    /// concurrent `install_cmd_tx` can swap in a new sender at any
+    /// time, and we want callers to send on the freshest one.
+    pub fn cmd_tx(&self) -> mpsc::Sender<Command> {
+        self.cmd_tx
+            .lock()
+            .expect("cmd_tx poisoned")
+            .clone()
     }
 
     pub fn split_for_actor(self) -> (AgentHandle, mpsc::Sender<Command>, mpsc::Receiver<Command>) {
+        // Create a fresh channel for the new actor. The returned handle
+        // shares the SAME `Arc<Mutex<Sender>>` as the input self — the
+        // outer Arc is cloned, not moved, so all clones of the handle
+        // (including ones a browser WS made before this rabbit arrived)
+        // see the inner sender swap when we update it below. Without
+        // the explicit share, `..self` would `move` the inner `Arc`,
+        // leaving other clones with a now-frozen sender.
         let (tx, rx) = mpsc::channel(64);
+        let cmd_arc = self.cmd_tx.clone();
         let handle = AgentHandle {
-            cmd_tx: tx.clone(),
+            cmd_tx: cmd_arc,
             ..self
         };
+        // Install the fresh sender into the shared slot. Equivalent to
+        // `handle.install_cmd_tx(tx.clone())` — done inline to keep the
+        // function self-contained.
+        *handle.cmd_tx.lock().expect("cmd_tx poisoned") = tx.clone();
         (handle, tx, rx)
     }
 
@@ -192,17 +233,6 @@ impl AgentHandle {
     /// than fabricating a default — otherwise dead-link 404s.
     pub fn recorder_url(&self) -> Option<String> {
         self.recorder_url.lock().expect("recorder_url poisoned").clone()
-    }
-
-    /// §A.6 leader-based resize: borrow the command channel so callers
-    /// (e.g. `ws_browser.rs`) can dispatch fire-and-forget commands like
-    /// `ClaimLeader`, `ReleaseLeader`, `ResizeFromConnection`, and
-    /// `ConnectionClosed` without round-tripping through dedicated
-    /// per-command methods. The actor consumes these serially, so any
-    /// out-of-band command the browser wants to add in the future can
-    /// ride the same channel.
-    pub fn cmd_tx(&self) -> &mpsc::Sender<Command> {
-        &self.cmd_tx
     }
 
     // §A.6 leader-based resize -------------------------------------------
@@ -329,7 +359,7 @@ impl AgentHandle {
             wait,
             reply: if wait { Some(tx) } else { None },
         };
-        if self.cmd_tx.send(cmd).await.is_err() {
+        if self.cmd_tx().send(cmd).await.is_err() {
             return Err(AppError::Internal(anyhow::anyhow!(
                 "agent actor not running"
             )));
@@ -359,7 +389,7 @@ impl AgentHandle {
 
     pub async fn clear(&self, hard: bool) -> AppResult<()> {
         let (tx, rx) = oneshot::channel();
-        self.cmd_tx
+        self.cmd_tx()
             .send(Command::Clear {
                 hard,
                 reply: Some(tx),
@@ -371,21 +401,21 @@ impl AgentHandle {
     }
 
     pub async fn compact(&self) -> AppResult<()> {
-        self.cmd_tx
+        self.cmd_tx()
             .send(Command::Compact)
             .await
             .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))
     }
 
     pub async fn interrupt(&self) -> AppResult<()> {
-        self.cmd_tx
+        self.cmd_tx()
             .send(Command::Interrupt)
             .await
             .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))
     }
 
     pub async fn restart(&self, fresh: bool) -> AppResult<()> {
-        self.cmd_tx
+        self.cmd_tx()
             .send(Command::Restart { fresh })
             .await
             .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))
@@ -395,7 +425,7 @@ impl AgentHandle {
     /// (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`). The channel decides which
     /// PTY on the rabbit side receives the keystrokes.
     pub async fn send_terminal_bytes(&self, chan: u8, bytes: Bytes) -> AppResult<()> {
-        self.cmd_tx
+        self.cmd_tx()
             .send(Command::SendKeys { chan, data: bytes })
             .await
             .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
@@ -406,7 +436,7 @@ impl AgentHandle {
     /// Called by the browser WS join path after the bounded replay buffer
     /// has been pushed into a fresh xterm.js pane.
     pub async fn repaint(&self) -> AppResult<()> {
-        self.cmd_tx
+        self.cmd_tx()
             .send(Command::Repaint)
             .await
             .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
@@ -419,7 +449,7 @@ impl AgentHandle {
     /// browser paint an authoritative terminal state, replacing the v1
     /// SIGWINCH-jiggle heuristic.
     pub async fn snapshot_request(&self, chan: u8) -> AppResult<()> {
-        self.cmd_tx
+        self.cmd_tx()
             .send(Command::SnapshotRequest { chan })
             .await
             .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
@@ -432,7 +462,7 @@ impl AgentHandle {
     /// claude's PTY. The actor's `Command::Resize { cols, rows }` variant
     /// already exists from the late-join jiggle flow.
     pub async fn resize(&self, cols: u16, rows: u16) -> AppResult<()> {
-        self.cmd_tx
+        self.cmd_tx()
             .send(Command::Resize { cols, rows })
             .await
             .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
@@ -457,6 +487,103 @@ mod tests {
     fn cid(byte: u8) -> Uuid {
         // Stable, distinct ids per test byte.
         Uuid::from_bytes([byte; 16])
+    }
+
+    /// Regression: `install_cmd_tx` must propagate the new sender to *every*
+    /// clone of the handle, not just the registry entry that the install
+    /// path happens to mutate. Before this was fixed, a browser WS that
+    /// cloned the handle before a rabbit connected kept an orphaned sender
+    /// (a `mpsc::Sender` whose receiver had never been wired) and every
+    /// action-button click on that tab failed until the tab reloaded. The
+    /// fix wraps `cmd_tx` in `Arc<Mutex<Sender>>` so `cmd_tx()` always
+    /// returns the freshest installed sender.
+    #[tokio::test]
+    async fn install_cmd_tx_propagates_to_existing_clones() {
+        let handle = h();
+        // Take two clones BEFORE any install — they share the original
+        // sender via the inner `Arc`.
+        let stale_a = handle.clone();
+        let stale_b = handle.clone();
+
+        // Install a fresh sender with its own receiver. The actor will
+        // take this sender and consume from `rx_post`.
+        let (fresh_tx, mut rx_post) = tokio::sync::mpsc::channel::<Command>(8);
+        handle.install_cmd_tx(fresh_tx);
+
+        // Both stale clones must dispatch on the FRESH channel now.
+        stale_a
+            .cmd_tx()
+            .send(Command::Compact)
+            .await
+            .expect("fresh channel is open");
+        let cmd = rx_post
+            .recv()
+            .await
+            .expect("fresh receiver got the command");
+        assert!(matches!(cmd, Command::Compact));
+
+        // And the second stale clone — proves the inner Arc is genuinely
+        // shared, not just refreshed on one clone.
+        stale_b
+            .cmd_tx()
+            .send(Command::Interrupt)
+            .await
+            .expect("fresh channel is open");
+        let cmd = rx_post
+            .recv()
+            .await
+            .expect("fresh receiver got the second command");
+        assert!(matches!(cmd, Command::Interrupt));
+
+        // Original handle still routes to fresh — sanity check that
+        // `..self` in `split_for_actor` doesn't accidentally drop the
+        // inner Arc.
+        handle
+            .cmd_tx()
+            .send(Command::Compact)
+            .await
+            .expect("fresh channel is open");
+        drop(stale_a);
+        drop(stale_b);
+        let _ = rx_post.recv().await;
+    }
+
+    /// Pure unit test of the same guarantee without channels: cloning a
+    /// handle and calling `install_cmd_tx` on the original must change
+    /// what `cmd_tx()` returns on the clones. (Tokio mpsc bridges this to
+    /// the runtime; this is the synchronous form, useful for diagnosing
+    /// any future regression where the lock stops being shared.)
+    #[test]
+    fn install_cmd_tx_changes_cmd_tx_return_on_clones() {
+        let handle = h();
+        let stale = handle.clone();
+
+        // Capture the original sender identity via `Sender::same_channel`
+        // (tokio 1.13+): two senders point to the same channel iff they
+        // compare equal on `same_channel`. `AgentHandle::new` creates
+        // an mpsc::channel(64) and drops the receiver immediately, so
+        // the sender is "closed for sending" but still has its own
+        // identity — we use that identity to detect the install.
+        let original_sender = handle.cmd_tx();
+
+        // Replace with a new sender.
+        let (fresh_tx, _fresh_rx) = tokio::sync::mpsc::channel::<Command>(8);
+        handle.install_cmd_tx(fresh_tx);
+
+        // Stale clone must now route to the fresh sender — call
+        // `cmd_tx()` on the stale clone and compare with the freshly-
+        // installed sender (which we can recover from the original
+        // handle via `cmd_tx()` again).
+        let from_stale = stale.cmd_tx();
+        let from_handle = handle.cmd_tx();
+        assert!(
+            from_stale.same_channel(&from_handle),
+            "stale clone must share its sender slot with the original handle"
+        );
+        assert!(
+            !from_stale.same_channel(&original_sender),
+            "stale clone must NOT still point at the original sender"
+        );
     }
 
     #[test]

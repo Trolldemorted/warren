@@ -62,13 +62,24 @@ async fn handle(
     agent_id: Uuid,
     viewer_mode: bool,
 ) -> anyhow::Result<()> {
-    let handle = registry
-        .get(&agent_id)
-        .ok_or_else(|| anyhow::anyhow!("agent not connected"))?
-        .clone();
-    let mut term_rx = handle.subscribe_term();
-
+    // Split the socket first so the wait-for-arrival guard below can
+    // observe early client closes without burning the upgrade. Mirrors
+    // the gate in `ws_browser::handle` — see the comment there for the
+    // full rationale.
     let (mut sink, mut stream) = socket.split();
+    let handle = loop {
+        if let Some(h) = registry.get(&agent_id) {
+            break h.clone();
+        }
+        let mut notified = std::pin::pin!(registry.wait_for_arrival());
+        tokio::select! {
+            _ = notified.as_mut() => continue,
+            _msg = stream.next() => {
+                return Ok(());
+            }
+        }
+    };
+    let mut term_rx = handle.subscribe_term();
 
     // Replay any buffered shell frames so a late joiner sees the recent
     // shell history (mirrors `ws_browser`'s replay buffer pattern, just

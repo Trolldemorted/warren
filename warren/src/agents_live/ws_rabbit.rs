@@ -36,12 +36,14 @@ async fn handle_session(
     socket: WebSocket,
     agent_id: uuid::Uuid,
 ) -> anyhow::Result<()> {
-    use crate::agents_live::handle::AgentHandle;
-
-    let initial = registry
-        .entry(agent_id)
-        .or_insert_with(|| AgentHandle::new(agent_id))
-        .clone();
+    // Use `register` (vs. `entry(...).or_insert_with(...)`) so any
+    // browser WS already past its "no rabbit yet" wait_for_arrival
+    // guard wakes up the moment we're committed to running the actor.
+    // Inserting happens lazily — a browser WS open before the rabbit
+    // arrived would have created the entry already with stale (orphan)
+    // cmd_tx / no actor; `register` reuses that entry and just signals
+    // the notifier.
+    let initial = registry.register(agent_id);
     log::info!("rabbit ws connected: agent={}", agent_id);
 
     let (handle_for_actor, cmd_tx, cmd_rx) = initial.split_for_actor();
