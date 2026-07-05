@@ -14,7 +14,18 @@ use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::time::Duration;
 use uuid::Uuid;
+
+/// How often the server pings a browser WS to keep it alive through
+/// reverse proxies / load balancers / TLS-terminating ingress. axum's
+/// `WebSocketUpgrade` does NOT ship a default heartbeat; without this
+/// ping, intermediaries close the connection at their idle timeout,
+/// the browser sees `onclose`, and the page "flickers" as it
+/// reconnects with exponential backoff. 20s is comfortably below the
+/// common 60s idle-timeout floor and high enough that the extra
+/// frames are noise on the wire.
+const BROWSER_WS_PING_INTERVAL: Duration = Duration::from_secs(20);
 
 /// §D read-only viewer mode: query params for `ws_browser`. When
 /// `viewer=true`, the server drops every inbound input frame from this WS
@@ -117,6 +128,16 @@ async fn handle(
         }
     });
 
+    // Heartbeat: the WS has no application-level keepalive by default,
+    // so any reverse proxy in front of warren (the user is on
+    // warren-patrician3.stronk.pw, almost certainly behind TLS-
+    // terminating ingress) will close the connection at its idle
+    // timeout. The browser then sees `onclose`, reconnects with
+    // exponential backoff, and the screen visibly flickers. Pinging
+    // every 20s keeps the path active without flooding the wire.
+    let mut ping_interval = tokio::time::interval(BROWSER_WS_PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
             biased;
@@ -196,7 +217,24 @@ async fn handle(
                         }
                     }
                     Message::Close(_) => break,
+                    // Incoming Pings get a Pong reply automatically at the
+                    // tungstenite protocol layer; we drop both Ping and
+                    // Pong from the application loop (their only purpose
+                    // here is keepalive, which we drive ourselves in the
+                    // 4th select arm below).
                     Message::Ping(_) | Message::Pong(_) => {}
+                }
+            }
+            _ = ping_interval.tick() => {
+                // Server-initiated heartbeat. axum/tungstenite does NOT
+                // ship a default keepalive, so without this arm the
+                // connection dies at the first intermediary idle
+                // timeout. An empty payload is fine — the protocol
+                // allows arbitrary application data, and the peer only
+                // needs the frame header to refresh the proxy's
+                // activity timer.
+                if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
                 }
             }
         }
