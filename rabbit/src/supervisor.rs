@@ -371,8 +371,26 @@ pub async fn run(config: Config) -> Result<()> {
                             if let Some(sh) = &shell {
                                 let _ = sh.tx.send(ShellCmd::Write(data)).await;
                             }
-                        } else if let Some(tx) = &active_link_tx {
-                            let _ = tx.send(PtyCmd::Write(data)).await;
+                        } else if chan == TERM_CHAN_CLAUDE {
+                            // Direct write through the shared writer —
+                            // bypasses the blocking reader's `pty_rx`
+                            // queue, which only drains between
+                            // `read()` calls. When claude is mid-turn
+                            // or sitting at a prompt with no further
+                            // output, that queue is starved; the user
+                            // sees multi-second delays or dropped
+                            // keystrokes. The War UI's typing path
+                            // (one binary frame per keystroke) is the
+                            // hardest-hit victim.
+                            write_claude_terminal_bytes(&data, active.as_ref()).await;
+                        } else {
+                            // Unknown channel — be lenient and drop
+                            // (matches `link.rs`'s filter against the
+                            // known terminal channels).
+                            log::debug!(
+                                "ignoring binary frame on unknown chan {chan} ({} bytes)",
+                                data.len()
+                            );
                         }
                     }
                     None => {
@@ -1084,6 +1102,42 @@ pub(crate) fn terminate_and_report_exited(pty: &mut Pty, evt_tx: &mpsc::Sender<P
     let _ = evt_tx.blocking_send(PtyEvt::Exited(status));
 }
 
+/// Direct-write path for terminal bytes coming back from the War UI.
+///
+/// Each keystroke the operator types in the browser arrives as a binary
+/// WS frame (`[TERM_CHAN_CLAUDE, byte]`). Before this helper, those
+/// bytes were queued as `PtyCmd::Write(data)` on the blocking PTY
+/// thread's `pty_rx` channel — drained only between `read()` calls.
+/// When the child was alive but emitting no output (idle TUI, mid-
+/// prompt, mid-tool), `read()` blocked indefinitely and the keystrokes
+/// sat in the queue until the next time data flowed. The operator saw
+/// multi-second input lag and dropped characters.
+///
+/// This helper bypasses `pty_rx` entirely: lock the shared writer and
+/// write straight to the master. Latency is bounded by the mutex
+/// acquisition — sub-millisecond in practice.
+///
+/// Extracted from the outer select! `LinkEvent::Binary` arm so the
+/// regression test can drive it without standing up the whole
+/// supervisor (which would require a live `claude` child).
+async fn write_claude_terminal_bytes(
+    data: &[u8],
+    active: Option<&ActiveSession>,
+) {
+    use std::io::Write;
+    let Some(active) = active else {
+        log::debug!(
+            "claude terminal write of {} bytes dropped: no active session",
+            data.len()
+        );
+        return;
+    };
+    let mut g = active.writer.lock();
+    let w: &mut dyn Write = &mut *g;
+    let _ = w.write_all(data);
+    let _ = w.flush();
+}
+
 async fn dispatch_to_pty(
     env: &Envelope,
     shared_writer: Option<&Arc<Mutex<Box<dyn Write + Send>>>>,
@@ -1640,5 +1694,125 @@ mod tests {
         // harness reaping the process via SIGTERM when the parent
         // exits — `/bin/cat` doesn't outlive the test in our tokio
         // test harness.)
+    }
+
+    /// Regression: a stream of single-byte terminal writes — exactly
+    /// what the War UI's typing path produces (one binary WS frame
+    /// per keystroke) — must reach the PTY master immediately and
+    /// unbroken, even if the child is alive and waiting for input.
+    ///
+    /// Pre-fix, this path packed each byte into `PtyCmd::Write(data)`
+    /// and queued it on `pty_rx`, which the blocking PTY thread only
+    /// drains between `read()` calls. With a child that's alive but
+    /// idle (`/bin/cat` here), `read()` blocks indefinitely and the
+    /// queued keystrokes are starved.
+    ///
+    /// We drive the helper against a real cat over a PTY, type six
+    /// characters with no delay between them, and verify the cat
+    /// echoes all six back within a 2s budget. Without the fix, the
+    /// echoes land seconds later (or not at all within the budget).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn typed_bytes_reach_pty_via_shared_writer() {
+        use crate::pty::Pty;
+        use std::io::Read;
+        use std::sync::mpsc as std_mpsc;
+        use std::time::Instant;
+
+        // Real PTY, /bin/cat as the child — matches the production shape.
+        // `take_writer()` gives us the side of the master that the outer
+        // supervisor's shared slot would hold.
+        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 4096)
+            .expect("spawn cat");
+        assert!(pty.alive(), "cat must be alive and waiting for input");
+        let mut reader = pty.reader();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
+            pty.master
+                .take_writer()
+                .map_err(|e| anyhow::anyhow!("take_writer: {e}"))
+                .expect("take_writer"),
+        ));
+
+        // Build a mock `ActiveSession`. `killer` is unused by the helper
+        // we're testing, but the struct requires one — borrow a real
+        // one from a throwaway Pty rather than fabricating a dummy.
+        let dummy_killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>> = {
+            let mut pty2 = Pty::spawn("/bin/true", &[], "/tmp", 80, 24, 1024)
+                .expect("spawn /bin/true");
+            let _ = pty2.terminate();
+            let _ = pty2.wait();
+            Arc::new(Mutex::new(pty2.killer))
+        };
+        let active = ActiveSession {
+            pty_link_tx: {
+                let (tx, _rx) = mpsc::channel::<PtyCmd>(1);
+                tx
+            },
+            killer: dummy_killer,
+            writer: writer.clone(),
+        };
+
+        // Reader thread drains whatever cat echoes back. This mirrors
+        // the supervisor's blocking PTY reader — it WILL wedge on
+        // `read()` when cat is alive and idle, which is exactly the bug
+        // condition. We don't join it before the writes; it accumulates
+        // echoes that the test body asserts on.
+        let (echo_tx, echo_rx) = std_mpsc::channel::<Vec<u8>>();
+        let reader_join = tokio::task::spawn_blocking(move || {
+            let mut io_buf = [0u8; 64];
+            loop {
+                match reader.read(&mut io_buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if echo_tx.send(io_buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Type six characters back-to-back — no delays. Under the
+        // pre-fix code, these would queue in `pty_rx` and only reach
+        // cat the next time the blocking reader happened to wake.
+        let started = Instant::now();
+        for c in b"hijklm" {
+            write_claude_terminal_bytes(&[*c], Some(&active)).await;
+        }
+
+        // Drain echoes for up to 2s. We watch for the six-byte substring
+        // "hijklm" appearing somewhere in cat's output (the kernel tty
+        // may echo CRLF or LF, but the body bytes are preserved).
+        let mut got = Vec::new();
+        let needle: &[u8] = b"hijklm";
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !got.windows(needle.len()).any(|w| w == needle)
+            && Instant::now() < deadline
+        {
+            match echo_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(chunk) => got.extend_from_slice(&chunk),
+                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        let elapsed = started.elapsed();
+
+        // Tear down cat + reader so the test exits cleanly.
+        drop(writer);
+        if pty.alive() {
+            let _ = pty.terminate();
+            let _ = pty.wait();
+        }
+        let _ = reader_join.await;
+
+        let found = got.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            found,
+            "typed bytes did not reach /bin/cat intact; saw {:?} in {elapsed:?}",
+            String::from_utf8_lossy(&got)
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "typed bytes landed but took {elapsed:?} — bypass path is too slow"
+        );
     }
 }
