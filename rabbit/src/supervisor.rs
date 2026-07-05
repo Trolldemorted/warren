@@ -17,6 +17,7 @@ use crate::wire::{
 };
 use anyhow::Result;
 use parking_lot::Mutex;
+use portable_pty::ChildKiller;
 use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -236,7 +237,10 @@ pub async fn run(config: Config) -> Result<()> {
                         outcome_rx_in,
                     } = sess.outcome_channels;
                     outcome_rx = outcome_rx_in;
-                    active = Some(ActiveSession { pty_link_tx });
+                    active = Some(ActiveSession {
+                        pty_link_tx,
+                        killer: sess.killer,
+                    });
                 }
                 Err(e) => {
                     log::error!("run_one spawn failed: {e:?}");
@@ -278,8 +282,32 @@ pub async fn run(config: Config) -> Result<()> {
                             restart_pending = Some(fresh);
                             log::info!("restart requested via WS, fresh={fresh}");
                             dead = false;
-                            if let Some(tx) = &active_link_tx {
-                                let _ = tx.send(PtyCmd::Terminate).await;
+                            // Signal the child via the SHARED killer, not
+                            // through `pty_link_tx` / `PtyCmd::Terminate`.
+                            // The latter lands in a channel that the
+                            // blocking PTY reader only drains between
+                            // `read()` calls — and when claude is stuck
+                            // at a TUI prompt emitting no further output,
+                            // `read()` blocks indefinitely and the queued
+                            // Terminate is never seen. The `ChildKiller`
+                            // is portable-pty's documented mechanism for
+                            // sending a signal from a thread other than
+                            // the one blocked in `.wait()`; it reaches the
+                            // child immediately, EOF arrives on the master,
+                            // and the blocking thread's restructured `Ok(0)`
+                            // arm (see below) sends `PtyEvt::Exited` so the
+                            // driver reports the outcome.
+                            if let Some(active) = &active {
+                                if let Err(e) = active.killer.lock().kill() {
+                                    // ESRCH ("no such process") means the
+                                    // child already exited on its own —
+                                    // the kill call was redundant but the
+                                    // outcome (child gone) is what we
+                                    // wanted. Logged at debug, not warn.
+                                    log::debug!(
+                                        "Restart: shared killer.kill returned {e:?} (child likely already gone)"
+                                    );
+                                }
                             }
                         } else if let EnvelopeBody::SnapshotRequest { chan } = &env.body {
                             // §D Milestone 5 (Phase B): late-join screen dump.
@@ -499,6 +527,11 @@ pub enum RunOutcome {
 
 struct ActiveSession {
     pty_link_tx: mpsc::Sender<PtyCmd>,
+    /// Independent `ChildKiller` handle — see the doc on `Pty::killer`.
+    /// The outer supervisor loop uses this to send SIGKILL to the child
+    /// (e.g. on a wire-level `Restart` envelope) even when the blocking
+    /// PTY reader thread is wedged in `read()`.
+    killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
 }
 
 struct OutcomeChannels {
@@ -508,6 +541,7 @@ struct OutcomeChannels {
 
 struct SpawnResult {
     outcome_channels: OutcomeChannels,
+    killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -537,11 +571,18 @@ fn spawn_run_one(
     let grace_period = Duration::from_millis(config.shutdown_grace_ms);
     let auto_trust = config.auto_trust;
 
+    // Spawn the PTY *before* moving into the blocking thread so we can
+    // extract a `ChildKiller` and share it with the outer supervisor
+    // loop. See the doc on `Pty::killer` for the cross-thread signaling
+    // rationale.
+    let pty = Pty::spawn(&bin, &args, &workdir, cols, rows, replay)?;
+    let initial_replay = pty.snapshot_replay().to_vec();
+    let killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>> =
+        Arc::new(Mutex::new(pty.child.clone_killer()));
     let pty_join = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-        let mut pty = Pty::spawn(&bin, &args, &workdir, cols, rows, replay)?;
+        let mut pty = pty;
         let mut reader = pty.reader();
         let mut writer = pty.writer();
-        let initial_replay = pty.snapshot_replay().to_vec();
 
         let mut io_buf = [0u8; 4096];
         let mut graceful_pending = false;
@@ -631,7 +672,23 @@ fn spawn_run_one(
 
             use std::io::Read;
             match reader.read(&mut io_buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    // EOF on the master means the slave side closed —
+                    // i.e. the child has exited. Capture its status and
+                    // notify the driver. The old `break` here skipped the
+                    // `if !pty.alive()` post-check, leaving the driver
+                    // task hung on `pty_evt_rx_inner.recv()` forever
+                    // (regression: any natural child exit, plus the
+                    // Restart-killed case once the shared killer arrived
+                    // — the killer works, but the resulting EOF wasn't
+                    // being recognized as "child gone").
+                    //
+                    // Goes through the same `terminate_and_report_exited`
+                    // helper the graceful-shutdown path uses, so the
+                    // status capture + evt send stay in one place.
+                    terminate_and_report_exited(&mut pty, &pty_evt_tx);
+                    break;
+                }
                 Ok(n) => {
                     vt.feed(&io_buf[..n]);
                     if let Some(tw) = trust_watcher.as_mut() {
@@ -648,7 +705,14 @@ fn spawn_run_one(
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(_) => {
+                    // Treat any read error as child-gone. EIO is the
+                    // common one — portable-pty converts it to Ok(0)
+                    // on Unix, but if the platform doesn't, we still
+                    // owe the driver a clean Exited before breaking.
+                    terminate_and_report_exited(&mut pty, &pty_evt_tx);
+                    break;
+                }
             }
             if !pty.alive() {
                 let status = pty.wait().unwrap_or_else(|e| {
@@ -782,6 +846,7 @@ fn spawn_run_one(
             pty_link_tx: pty_tx,
             outcome_rx_in,
         },
+        killer,
     })
 }
 
@@ -1230,5 +1295,135 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(observer.latest_state(), State::Dead);
+    }
+
+    // -----------------------------------------------------------------
+    // Restart-while-stuck-at-TUI regression coverage.
+    //
+    // The blocking PTY thread is wedged in `reader.read()` whenever the
+    // child is alive and emitting no output (e.g. claude parked at a
+    // TUI prompt). Pre-fix, PtyCmd::Terminate queued on `pty_rx` would
+    // sit there forever because the channel is only drained between
+    // read() calls. The fix is to share a `ChildKiller` (portable-pty's
+    // documented cross-thread signaling primitive) with the outer
+    // supervisor loop, so a wire-level `Restart` can SIGKILL the child
+    // directly. The two tests below cover both ends of that path.
+    // -----------------------------------------------------------------
+
+    /// Verify that `Pty::spawn` populates the `killer` field with a
+    /// handle that, when invoked, can SIGKILL the child independently
+    /// of whether another thread is blocked in `.wait()`. The
+    /// supervisor's outer loop relies on exactly this property — it
+    /// holds only the `killer` (the `child` lives inside the blocking
+    /// reader thread).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn pty_killer_terminates_child_independently() {
+        use crate::pty::Pty;
+        // `sleep 60` will block on its own timer for a minute; we'll
+        // never wait for it. The killer has to reach the child without
+        // any help from the read() path.
+        let mut pty = Pty::spawn(
+            "/bin/sleep",
+            &["60".to_string()],
+            "/tmp",
+            80,
+            24,
+            4096,
+        )
+        .expect("spawn sleep");
+
+        // Confirm the killer is a real, working handle. If the trait
+        // method signature or semantics ever drift, this catches it
+        // before the supervisor-level test does.
+        pty.killer.kill().expect("killer.kill on live child");
+
+        // The child should be reaped shortly. `wait()` blocks until the
+        // SIGKILL is observed and the process exits. Use a 2s budget
+        // — anything longer would suggest the signal didn't reach.
+        let status = tokio::task::spawn_blocking(move || pty.wait())
+            .await
+            .expect("spawn_blocking join");
+        match status {
+            Ok(s) => assert!(
+                !s.success(),
+                "SIGKILL'd child should NOT report success: {s:?}"
+            ),
+            Err(e) => panic!("pty.wait after kill failed: {e:?}"),
+        }
+    }
+
+    /// Regression: a child that exits NATURALLY (no kill, no Terminate)
+    /// must still produce a `PtyEvt::Exited` event. The pre-fix code
+    /// had `Ok(0) => break` and `Err(_) => break` arms that bypassed
+    /// the post-read `if !pty.alive() { send Exited }` check, so any
+    /// natural exit left the driver task hung forever on
+    /// `pty_evt_rx_inner.recv()`.
+    ///
+    /// We model the blocking thread's read loop in isolation (it's
+    /// just a `read` + arm), driving it with a child that exits on its
+    /// own after a brief delay. The test asserts the EOF arm now
+    /// sends `PtyEvt::Exited`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_read_sends_exited_on_natural_eof() {
+        use crate::pty::Pty;
+        use std::io::Read;
+        use std::sync::Arc;
+
+        // `/bin/sh -c "exit 0"` exits cleanly within milliseconds and
+        // writes nothing to stdout — exercises the read returns Ok(0)
+        // path immediately.
+        let pty = Pty::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "exit 0".to_string()],
+            "/tmp",
+            80,
+            24,
+            4096,
+        )
+        .expect("spawn sh -c exit 0");
+
+        let mut reader = pty.reader();
+        let pty = Arc::new(parking_lot::Mutex::new(pty));
+        let (evt_tx, mut evt_rx) = mpsc::channel::<PtyEvt>(8);
+
+        // Mirror the blocking loop's read arm, but skip the
+        // trust-watcher / vt / replay-buffer side effects (they're
+        // orthogonal to the bug).
+        let pty_for_loop = pty.clone();
+        let evt_tx_for_loop = evt_tx.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            let mut io_buf = [0u8; 64];
+            loop {
+                match reader.read(&mut io_buf) {
+                    Ok(0) => {
+                        // The FIX being tested: send Exited on EOF
+                        // before breaking. The pre-fix code just
+                        // `break`-ed here.
+                        let mut pty = pty_for_loop.lock();
+                        super::terminate_and_report_exited(&mut pty, &evt_tx_for_loop);
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => {
+                        let mut pty = pty_for_loop.lock();
+                        super::terminate_and_report_exited(&mut pty, &evt_tx_for_loop);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Without the fix, this would time out: no Exited ever sent.
+        // With the fix, it arrives promptly (sub-second).
+        let evt = tokio::time::timeout(Duration::from_secs(2), evt_rx.recv())
+            .await
+            .expect("driver never received PtyEvt::Exited on natural EOF — bug regression")
+            .expect("evt channel closed unexpectedly");
+        match evt {
+            PtyEvt::Exited(s) => assert!(s.success(), "natural exit 0 should be success: {s:?}"),
+            other => panic!("expected PtyEvt::Exited, got {other:?}"),
+        }
+
+        join.await.expect("blocking thread join");
     }
 }

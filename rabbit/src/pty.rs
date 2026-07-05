@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -28,6 +28,19 @@ impl ExitKind {
 pub struct Pty {
     pub master: Box<dyn MasterPty + Send>,
     pub child: Box<dyn Child + Send + Sync>,
+    /// Independent handle that can signal the child even when the primary
+    /// `child` is blocked in `.wait()` on another thread. Sourced from
+    /// `Child::clone_killer` (portable-pty's documented mechanism for exactly
+    /// this case — see the doc on `ChildKiller::clone_killer`). Sharing
+    /// this with the supervisor's outer loop lets an admin-driven `Restart`
+    /// reach the child even while the blocking PTY reader thread is wedged
+    /// in `reader.read()` waiting for output that never arrives (e.g. claude
+    /// parked at a TUI prompt).
+    ///
+    /// `Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>` is the canonical
+    /// shape when handing a kill-capable handle off to a non-owning thread;
+    /// callers lock, call `.kill()`, drop. Cheap; never blocks on I/O.
+    pub killer: Box<dyn ChildKiller + Send + Sync>,
     pub replay: Arc<Mutex<VecDeque<u8>>>,
     #[allow(dead_code)]
     pub replay_cap: usize,
@@ -63,10 +76,12 @@ impl Pty {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         let child = pair.slave.spawn_command(cmd).context("spawning child")?;
+        let killer = child.clone_killer();
         drop(pair.slave);
         Ok(Self {
             master: pair.master,
             child,
+            killer,
             replay: Arc::new(Mutex::new(VecDeque::with_capacity(replay_cap))),
             replay_cap,
             cols,

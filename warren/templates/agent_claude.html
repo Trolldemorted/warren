@@ -327,10 +327,26 @@ function connectWs() {
 
   ws.onopen = () => {
     wsBackoff = 500;
-    setConnected(true);
+    // Don't flip `connected` to true on the WS handshake alone. The
+    // server now holds the WS open indefinitely when no rabbit has
+    // registered yet (so the browser doesn't reconnect-loop), but
+    // that also means `onopen` fires for an "empty" connection — no
+    // actor is running, no Hello is coming, no terminal bytes are
+    // flowing. Until something *arrives* on the wire the page should
+    // stay in its initial "agent offline — connect a rabbit" state
+    // rather than reveal an empty/black xterm behind the overlay.
+    // `onmessage` below is the single transition point.
   };
 
   ws.onmessage = (ev) => {
+    if (!connected) {
+      // First arrival from the server — by construction this means a
+      // rabbit has registered and the actor is running, because the
+      // server only sends after `ConnectionAssigned` (which itself
+      // only fires after `wait_for_arrival` resolved). Safest point
+      // to drop the offline overlay.
+      setConnected(true);
+    }
     if (ev.data instanceof ArrayBuffer) {
       const view = new Uint8Array(ev.data);
       if (view.length === 0) return;
