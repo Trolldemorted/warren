@@ -6,17 +6,29 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct HealthState {
     pub child_alive: Arc<AtomicBool>,
+    pub shutting_down: Arc<AtomicBool>,
+}
+
+impl Default for HealthState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HealthState {
     pub fn new() -> Self {
         Self {
             child_alive: Arc::new(AtomicBool::new(false)),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn set_alive(&self, alive: bool) {
         self.child_alive.store(alive, Ordering::Relaxed);
+    }
+
+    pub fn set_shutting_down(&self, value: bool) {
+        self.shutting_down.store(value, Ordering::SeqCst);
     }
 }
 
@@ -37,6 +49,9 @@ async fn healthz() -> impl IntoResponse {
 }
 
 async fn readyz(State(state): State<HealthState>) -> impl IntoResponse {
+    if state.shutting_down.load(Ordering::SeqCst) {
+        return (StatusCode::SERVICE_UNAVAILABLE, "shutting down");
+    }
     if state.child_alive.load(Ordering::Relaxed) {
         (StatusCode::OK, "ready")
     } else {

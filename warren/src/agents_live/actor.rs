@@ -1,6 +1,6 @@
 use crate::agents_live::handle::AgentStateSnapshot;
 use crate::agents_live::wire::{
-    Envelope, EnvelopeBody, HelloDown, UsageSnapshot, PROTOCOL_VERSION,
+    Envelope, EnvelopeBody, HelloDown, TermSize, UsageSnapshot, PROTOCOL_VERSION,
 };
 use crate::agents_live::AgentHandle;
 use crate::db::Db;
@@ -11,9 +11,11 @@ use bytes::Bytes;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+#[derive(Debug)]
 pub enum Command {
     Prompt {
         id: Uuid,
@@ -35,7 +37,50 @@ pub enum Command {
         cols: u16,
         rows: u16,
     },
-    SendKeys(Bytes),
+    /// Ask rabbit to force a full TUI repaint by emitting two SIGWINCHs
+    /// (jiggle by one column, settle, restore). Used after a late-join
+    /// replay buffer has landed in a fresh xterm.js pane.
+    Repaint,
+    /// Raw bytes typed into a terminal pane, tagged with the channel they
+    /// belong to (`TERM_CHAN_CLAUDE` for the claude pane, `TERM_CHAN_SHELL`
+    /// for the `/shell` pane). The actor prepends `chan` on the wire so rabbit
+    /// routes them to the right PTY.
+    SendKeys { chan: u8, data: Bytes },
+    /// §D Milestone 5 (Phase B): ask rabbit for a current `ScreenSnapshot`
+    /// of the given channel. Sent by the browser WS right after flushing
+    /// the bounded replay buffer; rabbit responds with a `ScreenSnapshot`
+    /// envelope that the browser applies verbatim.
+    SnapshotRequest { chan: u8 },
+    // §A.6 leader-based resize ------------------------------------------
+    /// Browser tab asks to claim leadership for `connection_id` at
+    /// `(cols, rows)`. Claims always succeed (transfers from a prior
+    /// leader if one is set). The actor broadcasts `LeaderChanged` to all
+    /// browsers and, if the claimed size differs from the current PTY size,
+    /// pushes a `Resize` envelope to rabbit.
+    ClaimLeader {
+        connection_id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
+    /// Leader voluntarily releases control. No-op if a different
+    /// connection holds leadership. On success the actor broadcasts
+    /// `LeaderChanged { leader_id: None, ... }`.
+    ReleaseLeader { connection_id: Uuid },
+    /// Browser tab asks to resize the kernel PTY to `(cols, rows)`. Only
+    /// forwarded to rabbit when `connection_id` matches the current leader
+    /// — non-leader resizes are dropped at the `ws_browser.rs` boundary
+    /// before they reach this command, but a defense-in-depth check is
+    /// worth keeping here too.
+    ResizeFromConnection {
+        connection_id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
+    /// Browser WS closed (any reason — graceful close, network drop, or
+    /// server-side teardown). If the closing connection was the leader,
+    /// the actor clears leadership and broadcasts `LeaderChanged { None }`.
+    /// No auto-promotion: a new leader must explicitly claim.
+    ConnectionClosed { connection_id: Uuid },
 }
 
 #[derive(Debug, Clone)]
@@ -45,12 +90,6 @@ pub struct TurnOutcomeMsg {
     pub ended_at: chrono::DateTime<chrono::Utc>,
     pub usage: Option<UsageSnapshot>,
     pub error: Option<String>,
-}
-
-#[allow(dead_code)]
-pub struct ActorHandle {
-    pub cmd_tx: mpsc::Sender<Command>,
-    pub join: tokio::task::JoinHandle<()>,
 }
 
 pub async fn run(
@@ -117,7 +156,18 @@ async fn run_inner(
             source: "transcript".to_string(),
             ..Default::default()
         },
+        recorder_url: hello.recorder_url.clone(),
+        // §A.6 leader-based resize: capture the boot-time PTY size from
+        // the Hello envelope. Refreshed later when a leader-driven Resize
+        // flows through; the broadcast `LeaderChanged { leader_id: None }`
+        // uses this as the (cols, rows) payload so followers always see
+        // a real grid (never 0×0).
+        term_size: Some(hello.term_size),
     });
+    // §D Milestone 5: stash the recorder URL on the handle so the
+    // history-page handlers can resolve it without re-querying rabbit.
+    // (Cheap Arc clone; the handle dedupes inside `set_recorder_url`.)
+    handle.set_recorder_url(hello.recorder_url.clone());
 
     let mut pending: std::collections::VecDeque<(Uuid, oneshot::Sender<TurnOutcomeMsg>)> =
         std::collections::VecDeque::new();
@@ -126,13 +176,36 @@ async fn run_inner(
         source: "transcript".to_string(),
         ..Default::default()
     };
+    // Ack bookkeeping: we send EnvelopeBody::Ack{highest_persisted_seq}
+    // back to rabbit periodically so its meta ring can trim. Cadence is
+    // every ACK_BATCH events or every ACK_INTERVAL — whichever fires first.
+    // We start by acking everything that already exists in the DB (seq - 1
+    // after the hello persist above) so a reconnecting rabbit immediately
+    // drops anything it had buffered from the previous session.
+    let mut last_acked_seq: i64 = seq - 1;
+    let mut events_since_ack: usize = 0;
+    let mut last_ack_at: Instant = Instant::now();
+    const ACK_BATCH: usize = 16;
+    const ACK_INTERVAL: Duration = Duration::from_secs(2);
+    let mut ack_ticker = tokio::time::interval(ACK_INTERVAL);
+    ack_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // First tick fires immediately; we'd rather not ack-empty on tick 0
+    // unless there's actually something to ack — check inside the loop.
+    ack_ticker.tick().await;
+    // Send the initial ack for everything already in the DB. seq - 1 here
+    // is the highest seq the hello was persisted at (it was incremented
+    // right after the persist above).
+    if last_acked_seq >= 0 {
+        send_ack(&mut sink, last_acked_seq).await;
+        last_ack_at = Instant::now();
+    }
 
     loop {
         tokio::select! {
             biased;
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break; };
-                if let Err(e) = dispatch(cmd, &mut sink, &mut pending, &mut started_at).await {
+                if let Err(e) = dispatch(cmd, &handle, &mut sink, &mut pending, &mut started_at).await {
                     log::warn!("dispatch error: {e:?}");
                 }
             }
@@ -160,6 +233,11 @@ async fn run_inner(
                                 session_id: s.session_id.clone(),
                                 claude_version: None,
                                 last_usage: last_usage.clone(),
+                                recorder_url: None,
+                                // State updates don't carry a fresh term_size;
+                                // leave it None so `update_state` keeps the
+                                // cached value sticky.
+                                term_size: None,
                             });
                         }
                         if let EnvelopeBody::PromptEcho(pe) = &env.body {
@@ -186,21 +264,79 @@ async fn run_inner(
                         }
                         let payload_json = serde_json::to_value(&env).unwrap_or(serde_json::Value::Null);
                         let kind = envelope_kind(&env.body).to_string();
-                        if !matches!(&env.body, EnvelopeBody::Ack { .. }) {
-                            persist_event(&db, agent_id, &payload_json, &kind, seq).await.ok();
+                        if matches!(&env.body, EnvelopeBody::Ack { .. }) {
+                            // rabbit shouldn't ack warren; ignore if it does.
+                            continue;
+                        }
+                        // Dedup: events replayed from a previous session
+                        // arrive with seq <= (seq - 1), which is the highest
+                        // we've already persisted. Persist returns Err on
+                        // the unique-index collision, which we swallow.
+                        if env.seq < seq {
+                            log::debug!(
+                                "skipping duplicate seq={} (already persisted up to {})",
+                                env.seq,
+                                seq - 1
+                            );
+                        } else {
+                            persist_event(&db, agent_id, &payload_json, &kind, seq)
+                                .await
+                                .ok();
                             seq += 1;
+                            events_since_ack += 1;
+                            if events_since_ack >= ACK_BATCH
+                                || last_ack_at.elapsed() >= ACK_INTERVAL
+                            {
+                                let new_acked = seq - 1;
+                                if new_acked > last_acked_seq {
+                                    send_ack(&mut sink, new_acked).await;
+                                    last_acked_seq = new_acked;
+                                    events_since_ack = 0;
+                                    last_ack_at = Instant::now();
+                                }
+                            }
                         }
                         handle.publish_meta(env.body);
                     }
-                    Message::Binary(mut b) => {
+                    Message::Binary(b) => {
                         if b.is_empty() { continue; }
-                        let _chan = b.remove(0);
+                        // §D multi-channel: pass the channel byte through
+                        // unchanged. Subscribers (ws_browser, ws_shell, …)
+                        // filter by the leading byte. The previous
+                        // implementation stripped the channel byte here,
+                        // which silently collapsed everything onto a single
+                        // terminal stream — fine for one PTY, broken for
+                        // /shell.
                         handle.publish_term(Bytes::from(b));
                     }
                     Message::Close(_) => break,
                     Message::Ping(_) | Message::Pong(_) => {}
                 }
             }
+            _ = ack_ticker.tick() => {
+                let new_acked = seq - 1;
+                if new_acked > last_acked_seq
+                    && (events_since_ack > 0 || last_ack_at.elapsed() >= ACK_INTERVAL)
+                {
+                    send_ack(&mut sink, new_acked).await;
+                    last_acked_seq = new_acked;
+                    events_since_ack = 0;
+                    last_ack_at = Instant::now();
+                }
+            }
+        }
+    }
+}
+
+async fn send_ack(sink: &mut futures_util::stream::SplitSink<WebSocket, Message>, ack_seq: i64) {
+    let env = Envelope {
+        v: PROTOCOL_VERSION,
+        seq: 0,
+        body: EnvelopeBody::Ack { ack_seq },
+    };
+    if let Ok(s) = serde_json::to_string(&env) {
+        if sink.send(Message::Text(s)).await.is_err() {
+            log::debug!("ack send failed (sink closed)");
         }
     }
 }
@@ -225,6 +361,7 @@ async fn read_hello(
 
 async fn dispatch(
     cmd: Command,
+    handle: &AgentHandle,
     sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     pending: &mut std::collections::VecDeque<(Uuid, oneshot::Sender<TurnOutcomeMsg>)>,
     started_at: &mut HashMap<Uuid, chrono::DateTime<Utc>>,
@@ -302,10 +439,133 @@ async fn dispatch(
             sink.send(Message::Text(serde_json::to_string(&env)?))
                 .await?;
         }
-        Command::SendKeys(b) => {
-            let mut frame = vec![crate::agents_live::wire::TERM_CHAN_CLAUDE];
-            frame.extend_from_slice(&b);
+        Command::Repaint => {
+            let env = Envelope {
+                v: PROTOCOL_VERSION,
+                seq: 0,
+                body: EnvelopeBody::Repaint,
+            };
+            sink.send(Message::Text(serde_json::to_string(&env)?))
+                .await?;
+        }
+        Command::SendKeys { chan, data } => {
+            let mut frame = vec![chan];
+            frame.extend_from_slice(&data);
             sink.send(Message::Binary(frame)).await?;
+        }
+        Command::SnapshotRequest { chan } => {
+            let env = Envelope {
+                v: PROTOCOL_VERSION,
+                seq: 0,
+                body: EnvelopeBody::SnapshotRequest { chan },
+            };
+            sink.send(Message::Text(serde_json::to_string(&env)?))
+                .await?;
+        }
+        // §A.6 leader-based resize — see `handle_leader_command` for the
+        // full rationale. Each arm mutates `handle` (leader state, term_size
+        // cache) and may push a `Resize` envelope to rabbit when the
+        // claimed/dropped size differs from the current PTY size. The
+        // browser-side `LeaderChanged` broadcast fires on every state
+        // change (claim, release, disconnect) so followers can resize
+        // their xterm grids accordingly.
+        Command::ClaimLeader {
+            connection_id,
+            cols,
+            rows,
+        } => {
+            // Read the *prior* term_size *before* mutating, so the
+            // inherit-then-resize comparison is correct. After
+            // `update_state` below the snapshot would already equal the
+            // new size and the conditional below would never fire — that
+            // bug would silently swallow every leader-driven Resize.
+            let prior = handle
+                .snapshot()
+                .term_size
+                .unwrap_or(TermSize { cols: 0, rows: 0 });
+            // Claims always succeed — transfers from a prior leader if one
+            // is connected. The bool return is informational; the broadcast
+            // fires regardless.
+            let _was_prior = handle.claim_leader(connection_id, cols, rows);
+            // Refresh the cached term_size so the broadcast carries the
+            // claimed size (the snapshot's pre-claim value would otherwise
+            // persist).
+            handle.update_state(AgentStateSnapshot {
+                term_size: Some(TermSize { cols, rows }),
+                ..AgentStateSnapshot::default()
+            });
+            handle.publish_meta(EnvelopeBody::LeaderChanged {
+                leader_id: Some(connection_id),
+                cols,
+                rows,
+            });
+            // Inherit-then-resize: if the claimed size differs from the
+            // pre-claim PTY size, push a Resize to rabbit so the kernel
+            // winsize follows the new leader. On the first claim the
+            // prior size is (0, 0) and we always push — desirable, since
+            // the PTY needs its winsize set anyway.
+            if prior.cols != cols || prior.rows != rows {
+                let env = Envelope {
+                    v: PROTOCOL_VERSION,
+                    seq: 0,
+                    body: EnvelopeBody::Resize { cols, rows },
+                };
+                sink.send(Message::Text(serde_json::to_string(&env)?))
+                    .await?;
+            }
+        }
+        Command::ReleaseLeader { connection_id } => {
+            if handle.release_leader(connection_id) {
+                let cur = handle
+                    .snapshot()
+                    .term_size
+                    .unwrap_or(TermSize { cols: 0, rows: 0 });
+                handle.publish_meta(EnvelopeBody::LeaderChanged {
+                    leader_id: None,
+                    cols: cur.cols,
+                    rows: cur.rows,
+                });
+            }
+        }
+        Command::ResizeFromConnection {
+            connection_id,
+            cols,
+            rows,
+        } => {
+            // Defense in depth — non-leader resizes should already be
+            // dropped at the ws_browser.rs boundary.
+            if !handle.is_leader(connection_id) {
+                log::debug!(
+                    "actor dropped ResizeFromConnection from non-leader {connection_id}"
+                );
+                return Ok(());
+            }
+            // Refresh the cached size and forward to rabbit (no broadcast
+            // — the leader's own browser already knows its own size).
+            handle.update_state(AgentStateSnapshot {
+                term_size: Some(TermSize { cols, rows }),
+                ..AgentStateSnapshot::default()
+            });
+            let env = Envelope {
+                v: PROTOCOL_VERSION,
+                seq: 0,
+                body: EnvelopeBody::Resize { cols, rows },
+            };
+            sink.send(Message::Text(serde_json::to_string(&env)?))
+                .await?;
+        }
+        Command::ConnectionClosed { connection_id } => {
+            if handle.clear_leader_if(connection_id) {
+                let cur = handle
+                    .snapshot()
+                    .term_size
+                    .unwrap_or(TermSize { cols: 0, rows: 0 });
+                handle.publish_meta(EnvelopeBody::LeaderChanged {
+                    leader_id: None,
+                    cols: cur.cols,
+                    rows: cur.rows,
+                });
+            }
         }
     }
     Ok(())
@@ -332,6 +592,13 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::Resize { .. } => "resize",
         EnvelopeBody::Repaint => "repaint",
         EnvelopeBody::StopHook { .. } => "stop_hook",
+        EnvelopeBody::PromptRejected { .. } => "prompt_rejected",
+        EnvelopeBody::ScreenSnapshot { .. } => "screen_snapshot",
+        EnvelopeBody::SnapshotRequest { .. } => "snapshot_request",
+        EnvelopeBody::ConnectionAssigned { .. } => "connection_assigned",
+        EnvelopeBody::ClaimLeader { .. } => "claim_leader",
+        EnvelopeBody::ReleaseLeader => "release_leader",
+        EnvelopeBody::LeaderChanged { .. } => "leader_changed",
     }
 }
 
@@ -345,4 +612,143 @@ async fn persist_event(
     let id = Uuid::new_v4();
     db_ops::insert_agent_event(db, id, agent_id, seq, kind, payload.clone()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! §A.6 leader-based resize: actor-level dispatch tests.
+    //!
+    //! The `dispatch` function takes a `SplitSink<WebSocket, Message>`,
+    //! which is hard to construct without a real `WebSocketStream` (e.g.
+    //! over a `tokio::io::DuplexStream`); that requires `tokio_tungstenite`
+    //! integration in `Cargo.toml`'s `[dev-dependencies]` and a fair amount
+    //! of boilerplate to wire into the actor's `dispatch` signature.
+    //!
+    //! The leader-state side-effects (claim/release/clear, the
+    //! `LeaderChanged` broadcast) are fully covered by `handle.rs::tests`
+    //! and the meta-broadcast assertions below. The remaining gap —
+    //! asserting that a `Resize` envelope is sent to rabbit only when the
+    //! claimed size differs — is pinned down at the handle level
+    //! (`is_leader`, `update_leader_size`) and at the ws_browser level
+    //! (the `Resize` drop-rule tests).
+
+    use super::*;
+    use crate::agents_live::handle::AgentHandle;
+
+    #[tokio::test]
+    async fn claim_leader_broadcasts_leader_changed_to_subscribers() {
+        let handle = AgentHandle::new(Uuid::nil());
+        let mut meta_rx = handle.subscribe_meta();
+        let id = Uuid::from_bytes([1; 16]);
+
+        // Mimic the dispatch arm: claim + update_state + publish_meta.
+        handle.claim_leader(id, 120, 40);
+        handle.update_state(AgentStateSnapshot {
+            term_size: Some(TermSize { cols: 120, rows: 40 }),
+            ..AgentStateSnapshot::default()
+        });
+        handle.publish_meta(EnvelopeBody::LeaderChanged {
+            leader_id: Some(id),
+            cols: 120,
+            rows: 40,
+        });
+
+        let mut saw_changed = false;
+        for _ in 0..8 {
+            match meta_rx.recv().await {
+                Ok(EnvelopeBody::LeaderChanged {
+                    leader_id,
+                    cols,
+                    rows,
+                }) => {
+                    assert_eq!(leader_id, Some(id));
+                    assert_eq!(cols, 120);
+                    assert_eq!(rows, 40);
+                    saw_changed = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(saw_changed, "LeaderChanged must have been broadcast");
+    }
+
+    #[tokio::test]
+    async fn release_leader_broadcasts_with_none_id() {
+        let handle = AgentHandle::new(Uuid::nil());
+        let id = Uuid::from_bytes([2; 16]);
+        handle.claim_leader(id, 100, 30);
+        handle.update_state(AgentStateSnapshot {
+            term_size: Some(TermSize { cols: 100, rows: 30 }),
+            ..AgentStateSnapshot::default()
+        });
+        let mut meta_rx = handle.subscribe_meta();
+        // Clear the prior broadcasts so we can observe the release cleanly.
+        while meta_rx.try_recv().is_ok() {}
+
+        // Mimic the dispatch arm: release + publish_meta.
+        assert!(handle.release_leader(id));
+        let cur = handle
+            .snapshot()
+            .term_size
+            .unwrap_or(TermSize { cols: 0, rows: 0 });
+        handle.publish_meta(EnvelopeBody::LeaderChanged {
+            leader_id: None,
+            cols: cur.cols,
+            rows: cur.rows,
+        });
+
+        let got = meta_rx.recv().await.unwrap();
+        match got {
+            EnvelopeBody::LeaderChanged {
+                leader_id,
+                cols,
+                rows,
+            } => {
+                assert_eq!(leader_id, None);
+                assert_eq!(cols, 100);
+                assert_eq!(rows, 30);
+            }
+            other => panic!("expected LeaderChanged, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_closed_clears_leader_when_caller_was_leader() {
+        let handle = AgentHandle::new(Uuid::nil());
+        let id = Uuid::from_bytes([3; 16]);
+        handle.claim_leader(id, 100, 30);
+        assert_eq!(handle.current_leader(), Some((id, 100, 30)));
+        // Mimic the dispatch arm for ConnectionClosed.
+        let cleared = handle.clear_leader_if(id);
+        assert!(cleared, "ConnectionClosed from leader must clear");
+        assert_eq!(handle.current_leader(), None);
+    }
+
+    #[tokio::test]
+    async fn connection_closed_no_op_when_caller_was_not_leader() {
+        let handle = AgentHandle::new(Uuid::nil());
+        let leader_id = Uuid::from_bytes([4; 16]);
+        let other_id = Uuid::from_bytes([5; 16]);
+        handle.claim_leader(leader_id, 100, 30);
+        let cleared = handle.clear_leader_if(other_id);
+        assert!(!cleared, "non-leader's ConnectionClosed must not clear");
+        assert_eq!(handle.current_leader(), Some((leader_id, 100, 30)));
+    }
+
+    #[tokio::test]
+    async fn resize_from_non_leader_dropped_at_handle_level() {
+        // The actor's `Command::ResizeFromConnection` arm double-checks
+        // `is_leader` before forwarding to rabbit. Mirror that gate here.
+        let handle = AgentHandle::new(Uuid::nil());
+        let leader_id = Uuid::from_bytes([6; 16]);
+        let other_id = Uuid::from_bytes([7; 16]);
+        handle.claim_leader(leader_id, 120, 40);
+        assert!(handle.is_leader(leader_id));
+        assert!(
+            !handle.is_leader(other_id),
+            "non-leader's resize would be dropped at the dispatch boundary"
+        );
+    }
 }

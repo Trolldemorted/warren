@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block body %}
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
+<style>
+.shell-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+.shell-grid .term-wrap {
+  background: #0d1117;
+  border-radius: .375rem;
+  padding: .5rem;
+  position: relative;
+}
+.shell-grid #term { width: 100%; font-family: ui-monospace, monospace; }
+.shell-grid .offline-overlay {
+  position: absolute;
+  inset: .5rem;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 17, 23, .85);
+  color: #c9d1d9;
+  border-radius: .25rem;
+  font-family: ui-monospace, monospace;
+  pointer-events: none;
+  text-align: center;
+  padding: 1rem;
+}
+.shell-grid.disconnected .offline-overlay { display: flex; }
+/* §D read-only viewer mode (`?viewer=true`) — same contract as
+   agent_claude.html: CSS hides input affordances; the server-side
+   ws_shell handler drops typed bytes regardless. */
+body.viewer-mode #term { pointer-events: none; }
+#viewer-mode-banner {
+  display: none;
+  margin-top: .5rem;
+  padding: .5rem .75rem;
+  background: #1e3a8a;
+  color: #dbeafe;
+  border-radius: .375rem;
+  font-family: ui-monospace, monospace;
+  font-size: .85rem;
+}
+body.viewer-mode #viewer-mode-banner { display: block; }
+</style>
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">shell · {{ agent.name }}</h1>
+  <a class="btn btn-sm btn-outline-secondary" href="/agent/{{ agent.id }}/claude">→ claude</a>
+</div>
+<div class="shell-grid {% if !connected %}disconnected{% endif %}" id="shell-grid">
+  <div class="term-wrap">
+    <div id="term"></div>
+    <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its shell</div>
+  </div>
+</div>
+<div id="viewer-mode-banner" role="status" aria-live="polite">
+  read-only viewer mode — input disabled
+</div>
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/xterm-addon-fit.js"></script>
+<script>
+const agentId = "{{ agent.id }}";
+const grid = document.getElementById('shell-grid');
+const viewerMode = new URLSearchParams(location.search).get('viewer') === 'true';
+if (viewerMode) document.body.classList.add('viewer-mode');
+
+const TERM_COLS = 120;
+const TERM_ROWS = 40;
+
+const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
+  fontFamily: 'ui-monospace, monospace',
+  fontSize: 13,
+  scrollback: 5000,
+  theme: { background: '#0d1117', foreground: '#c9d1d9' } });
+term.open(document.getElementById('term'));
+term.focus();
+
+let ws = null;
+let wsBackoff = 500;
+let connected = false;
+
+function setConnected(c) {
+  connected = c;
+  grid.classList.toggle('disconnected', !c);
+}
+
+term.onData(data => {
+  if (!connected || !ws) return;
+  // §D read-only viewer mode: skip sending typed bytes.
+  if (viewerMode) return;
+  const buf = new Uint8Array(1 + data.length);
+  // TERM_CHAN_SHELL = 0x02 — must match warren::agents_live::wire.
+  buf[0] = 0x02;
+  for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
+  ws.send(buf);
+});
+
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const viewerQuery = viewerMode ? '?viewer=true' : '';
+  ws = new WebSocket(`${proto}//${location.host}/agent/${agentId}/shell/ws${viewerQuery}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => { wsBackoff = 500; setConnected(true); };
+
+  ws.onmessage = (ev) => {
+    if (!(ev.data instanceof ArrayBuffer)) return;
+    const view = new Uint8Array(ev.data);
+    if (view.length === 0) return;
+    // Drop frames for any channel other than shell (0x02).
+    if (view[0] !== 0x02) return;
+    term.write(bytesToUtf8(view.subarray(1)));
+  };
+
+  ws.onclose = () => {
+    setConnected(false);
+    setTimeout(connectWs, wsBackoff);
+    wsBackoff = Math.min(wsBackoff * 2, 15000);
+  };
+
+  ws.onerror = () => { try { ws.close(); } catch {} };
+}
+
+function bytesToUtf8(bytes) {
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+
+connectWs();
+</script>
+{% endblock %}

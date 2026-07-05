@@ -1,0 +1,14 @@
+xterm.js and xterm-addon-fit are vendored from
+https://github.com/xtermjs/xterm.js (and the
+@xterm/addon-fit package in the same monorepo).
+
+Files:
+
+  xterm.js            @xterm/xterm@5.5.0         MIT
+  xterm.css           @xterm/xterm@5.5.0         MIT
+  xterm-addon-fit.js  @xterm/addon-fit@0.10.0    MIT
+
+Upstream copyright notices are preserved in each bundle (xterm.js
+is a UMD wrapper whose body retains the original license header).
+See https://github.com/xtermjs/xterm.js/blob/master/LICENSE for the
+full text.

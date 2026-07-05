@@ -3,6 +3,7 @@ use crate::wire::UsageSnapshot;
 use anyhow::Result;
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -52,6 +53,24 @@ fn normalize_kind(kind: &str) -> String {
 pub struct ObserverHandle {
     pub tx: broadcast::Sender<ObserverEvent>,
     pub latest_session: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Latest lifecycle state observed from hook events (§D prompt policy).
+    /// The supervisor consults this to decide whether an inbound prompt is
+    /// allowed: prompts arriving while `Running` are rejected rather than
+    /// injected mid-turn. Transitions to `Running` on `UserPromptSubmit` and
+    /// back to `Idle` on `Stop`. Starts `Starting` until the first hook fires.
+    latest_state: Arc<parking_lot::Mutex<State>>,
+    /// Path to the on-disk transcript file, reported by the `SessionStart`
+    /// hook payload as `transcript_path` (§A.3). `None` until the hook fires.
+    /// The transcript tailer consults this so it follows the *real* path —
+    /// `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` — instead of
+    /// guessing.
+    latest_transcript_path: Arc<parking_lot::Mutex<Option<PathBuf>>>,
+}
+
+impl Default for ObserverHandle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ObserverHandle {
@@ -60,7 +79,45 @@ impl ObserverHandle {
         Self {
             tx,
             latest_session: Arc::new(parking_lot::Mutex::new(None)),
+            latest_state: Arc::new(parking_lot::Mutex::new(State::Starting)),
+            latest_transcript_path: Arc::new(parking_lot::Mutex::new(None)),
         }
+    }
+
+    pub fn latest_session(&self) -> Option<String> {
+        self.latest_session.lock().clone()
+    }
+
+    /// Current lifecycle state as last reported by a hook event.
+    pub fn latest_state(&self) -> State {
+        *self.latest_state.lock()
+    }
+
+    /// Directly set the lifecycle state from the supervisor's *own* transitions
+    /// (spawn→`idle`, clean exit→`ended`, crash/shutdown→`dead`). Hook-derived
+    /// states (`running`/`idle`) flow through [`ObserverHandle::ingest`]; these
+    /// supervisor-side transitions flow through here, so `latest_state()`
+    /// reflects the full lifecycle rather than only the hook subset.
+    pub fn set_state(&self, state: State) {
+        *self.latest_state.lock() = state;
+    }
+
+    pub fn latest_transcript_path(&self) -> Option<PathBuf> {
+        self.latest_transcript_path.lock().clone()
+    }
+
+    /// Parse a hook event and fold it into the handle's tracked state.
+    /// Returns the `ObserverEvent` for broadcast. Kept separate from the HTTP
+    /// handler so the state-tracking semantics are unit-testable without axum.
+    pub fn ingest(&self, kind: &str, payload: &serde_json::Value) -> ObserverEvent {
+        let parsed = parse(kind, payload, self);
+        // Track the latest lifecycle state so the supervisor can gate inbound
+        // prompts (reject-when-Running policy, §D). Only events that carry a
+        // concrete state advance it; log/notification events leave it unchanged.
+        if let Some(st) = parsed.state {
+            *self.latest_state.lock() = st;
+        }
+        parsed
     }
 }
 
@@ -75,7 +132,7 @@ async fn handle_hook(
     Path(kind): Path<String>,
     Json(ev): Json<HookEvent>,
 ) -> impl IntoResponse {
-    let parsed = parse(&kind, &ev.payload, &handle);
+    let parsed = handle.ingest(&kind, &ev.payload);
     let _ = handle.tx.send(parsed);
     (StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
@@ -90,6 +147,26 @@ fn parse(kind: &str, payload: &serde_json::Value, handle: &ObserverHandle) -> Ob
                 .map(String::from);
             if let Some(s) = &session_id {
                 *handle.latest_session.lock() = Some(s.clone());
+            }
+            // §A.3: the SessionStart payload carries the absolute path to the
+            // transcript jsonl file (`~/.claude/projects/<encoded-cwd>/<id>.jsonl`).
+            // Capture it so the transcript tailer can follow the real file
+            // instead of guessing. Some hook implementations nest the field
+            // under `payload.transcript_path`; others put it at top level.
+            // Probe both.
+            let transcript_path = payload
+                .get("transcript_path")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    payload
+                        .get("payload")
+                        .and_then(|p| p.get("transcript_path"))
+                        .and_then(|v| v.as_str())
+                        .map(PathBuf::from)
+                });
+            if let Some(p) = transcript_path {
+                *handle.latest_transcript_path.lock() = Some(p);
             }
             ObserverEvent {
                 kind: "session",
@@ -179,4 +256,42 @@ pub async fn serve(port: u16, handle: ObserverHandle) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn latest_state_starts_starting() {
+        let h = ObserverHandle::new();
+        assert_eq!(h.latest_state(), State::Starting);
+    }
+
+    #[test]
+    fn user_prompt_submit_marks_running_then_stop_marks_idle() {
+        let h = ObserverHandle::new();
+        h.ingest("UserPromptSubmit", &json!({}));
+        assert_eq!(h.latest_state(), State::Running);
+        h.ingest("Stop", &json!({}));
+        assert_eq!(h.latest_state(), State::Idle);
+    }
+
+    #[test]
+    fn notification_does_not_clobber_running_state() {
+        // Log/notification events carry no state; they must leave the tracked
+        // state intact so the reject-when-Running gate stays correct mid-turn.
+        let h = ObserverHandle::new();
+        h.ingest("UserPromptSubmit", &json!({}));
+        h.ingest("Notification", &json!({"message": "waiting"}));
+        assert_eq!(h.latest_state(), State::Running);
+    }
+
+    #[test]
+    fn session_end_marks_ended() {
+        let h = ObserverHandle::new();
+        h.ingest("SessionEnd", &json!({"session_id": "abc"}));
+        assert_eq!(h.latest_state(), State::Ended);
+    }
 }

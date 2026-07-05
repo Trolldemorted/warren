@@ -5,6 +5,7 @@ pub mod registry;
 pub mod wire;
 pub mod ws_browser;
 pub mod ws_rabbit;
+pub mod ws_shell;
 
 pub use handle::AgentHandle;
 pub use registry::{new_registry, AgentRegistry};

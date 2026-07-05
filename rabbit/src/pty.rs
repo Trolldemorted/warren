@@ -1,10 +1,29 @@
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, ExitStatus, MasterPty, PtySize};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::time::Duration;
+
+pub type PtyExitStatus = ExitStatus;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitKind {
+    Clean,
+    Crashed,
+}
+
+impl ExitKind {
+    pub fn from(status: &PtyExitStatus) -> Self {
+        if status.success() {
+            Self::Clean
+        } else {
+            Self::Crashed
+        }
+    }
+}
 
 pub struct Pty {
     pub master: Box<dyn MasterPty + Send>,
@@ -75,6 +94,20 @@ impl Pty {
         Ok(())
     }
 
+    /// Nudge the kernel winsize so a SIGWINCH reaches the child. The kernel
+    /// only emits SIGWINCH when the winsize actually changes, so calling
+    /// `resize` with the same dimensions twice is a no-op. To force the
+    /// child's TUI to redraw (e.g. after a late-join replay buffer landed
+    /// in a fresh xterm.js), we go +1 column, settle, then back to the
+    /// original. Two SIGWINCHs; one full repaint.
+    pub fn jiggle(&self, cols: u16, rows: u16) -> Result<()> {
+        self.resize(cols.saturating_add(1), rows)
+            .context("jiggle widen")?;
+        std::thread::sleep(Duration::from_millis(50));
+        self.resize(cols, rows).context("jiggle restore")?;
+        Ok(())
+    }
+
     pub fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
@@ -82,6 +115,11 @@ impl Pty {
     pub fn terminate(&mut self) -> Result<()> {
         self.child.kill().context("killing child")?;
         Ok(())
+    }
+
+    /// Block until the child exits, returning the captured exit status.
+    pub fn wait(&mut self) -> Result<PtyExitStatus> {
+        self.child.wait().context("waiting on child")
     }
 
     #[allow(dead_code)]
@@ -107,5 +145,75 @@ impl Pty {
             return Vec::new();
         }
         vec![Bytes::copy_from_slice(g.as_slices().0)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_kind_clean_for_zero_code() {
+        let s = PtyExitStatus::with_exit_code(0);
+        assert_eq!(ExitKind::from(&s), ExitKind::Clean);
+    }
+
+    #[test]
+    fn exit_kind_crashed_for_signal() {
+        let s = PtyExitStatus::with_signal("SIGKILL");
+        assert_eq!(ExitKind::from(&s), ExitKind::Crashed);
+    }
+
+    #[test]
+    fn exit_kind_crashed_for_nonzero_code() {
+        let s = PtyExitStatus::with_exit_code(2);
+        assert_eq!(ExitKind::from(&s), ExitKind::Crashed);
+    }
+
+    /// jiggle returns the kernel winsize to the requested (cols, rows) after
+    /// the +1/settle/restore sequence. We can't directly observe SIGWINCH
+    /// delivery from the test process, but the post-condition is observable
+    /// via the master PTY's winsize, and that's the thing the caller cares
+    /// about anyway.
+    #[test]
+    fn jiggle_restores_original_size() {
+        let mut pty = Pty::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 0.5".to_string()],
+            ".",
+            120,
+            40,
+            4096,
+        )
+        .expect("spawn sh");
+        let original = pty.master.get_size().expect("get_size");
+        assert_eq!(original.cols, 120);
+        assert_eq!(original.rows, 40);
+        pty.jiggle(120, 40).expect("jiggle");
+        let after = pty.master.get_size().expect("get_size after jiggle");
+        assert_eq!(after.cols, 120, "jiggle must end at original cols");
+        assert_eq!(after.rows, 40, "jiggle must end at original rows");
+        let _ = pty.terminate();
+        let _ = pty.wait();
+    }
+
+    #[test]
+    fn jiggle_handles_max_cols_without_overflow() {
+        // saturating_add(1) at u16::MAX must stay at u16::MAX rather than wrap
+        // to zero (which would be a giant resize and probably fail ioctl).
+        let mut pty = Pty::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "sleep 0.5".to_string()],
+            ".",
+            u16::MAX,
+            24,
+            4096,
+        )
+        .expect("spawn sh");
+        // Some platforms reject u16::MAX as a column count; ignore resize
+        // errors here — what we're asserting is the math, not the ioctl.
+        let _ = pty.jiggle(u16::MAX, 24);
+        let _ = pty.terminate();
+        let _ = pty.wait();
     }
 }

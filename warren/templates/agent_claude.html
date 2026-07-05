@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block body %}
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <style>
 .claude-grid {
   display: grid;
@@ -7,36 +8,92 @@
   gap: 1rem;
   margin-top: 1rem;
 }
-.claude-grid pre {
+.claude-grid .term-wrap {
   background: #0d1117;
-  color: #c9d1d9;
-  padding: 1rem;
   border-radius: .375rem;
-  min-height: 24rem;
-  max-height: 32rem;
-  overflow: auto;
+  padding: .5rem;
+  position: relative;
+}
+.claude-grid #term {
+  width: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: .875rem;
-  white-space: pre;
-  margin: 0;
 }
-.claude-grid .status {
+.claude-grid .offline-overlay {
+  position: absolute;
+  inset: .5rem;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 17, 23, .85);
+  color: #c9d1d9;
+  border-radius: .25rem;
   font-family: ui-monospace, monospace;
+  pointer-events: none;
+  text-align: center;
+  padding: 1rem;
 }
+.claude-grid.disconnected .offline-overlay { display: flex; }
+.claude-grid .status { font-family: ui-monospace, monospace; }
 button.action { width: 100%; margin-bottom: .25rem; }
+
+/* §D prompt-rejection banner. Driven by `prompt_rejected` meta events from
+   rabbit (EnvelopeBody::PromptRejected). Distinct from `Log { warn }` so
+   the banner can be tied to the original prompt id and dismissed on the
+   next state transition (or a fresh prompt echo). */
+#prompt-rejected-banner {
+  display: none;
+  margin-top: .5rem;
+  padding: .5rem .75rem;
+  background: #4c1d95;
+  color: #ede9fe;
+  border-radius: .375rem;
+  font-family: ui-monospace, monospace;
+  font-size: .85rem;
+}
+#prompt-rejected-banner.visible { display: block; }
+
+/* §D read-only viewer mode. Activated by `?viewer=true` on the URL. The
+   server-side handler drops all input frames in this mode regardless of
+   what the JS sends; these styles just hide the affordances so a viewer
+   can't even try to type or click. */
+body.viewer-mode .claude-grid { grid-template-columns: minmax(0, 1fr); }
+body.viewer-mode aside { display: none; }
+body.viewer-mode #term { pointer-events: none; }
+#viewer-mode-banner {
+  display: none;
+  margin-top: .5rem;
+  padding: .5rem .75rem;
+  background: #1e3a8a;
+  color: #dbeafe;
+  border-radius: .375rem;
+  font-family: ui-monospace, monospace;
+  font-size: .85rem;
+}
+body.viewer-mode #viewer-mode-banner { display: block; }
+
+/* §A.6 leader-based resize. The Claim/Release buttons and the leader
+   badge are children of `aside` (which viewer-mode CSS already hides),
+   so a viewer never sees them; the WS server also drops inbound
+   ClaimLeader/ReleaseLeader frames for viewers as a defense. */
+#leader-badge {
+  font-family: ui-monospace, monospace;
+  margin-top: .25rem;
+}
+#claim-leader-btn[hidden], #release-leader-btn[hidden] { display: none !important; }
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>
   <span id="state-badge" class="status badge bg-{% if connected %}success{% else %}secondary{% endif %}">{% if connected %}idle{% else %}disconnected{% endif %}</span>
 </div>
-<div class="claude-grid">
-  <div>
-    <pre id="claude-screen" aria-label="Claude terminal output">(no output yet)</pre>
-    <form id="prompt-form" class="mt-2 d-flex gap-2">
-      <textarea id="prompt-text" name="text" class="form-control" rows="2" placeholder="Send a prompt to claude..." required></textarea>
-      <button class="btn btn-primary align-self-start" type="submit">Send</button>
-    </form>
+<div class="claude-grid {% if !connected %}disconnected{% endif %}" id="claude-grid">
+  <div class="term-wrap">
+    <div id="term"></div>
+    <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its terminal</div>
   </div>
+  <div id="prompt-rejected-banner" role="status" aria-live="polite"></div>
+<div id="viewer-mode-banner" role="status" aria-live="polite">
+  read-only viewer mode — input disabled
+</div>
   <aside>
     <h2 class="h6">Status</h2>
     <dl class="small mb-3">
@@ -59,11 +116,29 @@ button.action { width: 100%; margin-bottom: .25rem; }
     <button class="btn btn-outline-secondary action" data-action="clear">Clear</button>
     <button class="btn btn-outline-secondary action" data-action="compact">Compact</button>
     <button class="btn btn-outline-danger action" data-action="restart">Restart</button>
+    {# §A.6 leader-based resize. Visibility is JS-driven from
+       `ConnectionAssigned` (button show) and `LeaderChanged` (toggle).
+       Hidden until the WS assigns us an id — see `myConnectionId`. #}
+    <button id="claim-leader-btn"
+            class="btn btn-outline-primary action mt-2"
+            hidden>Claim control</button>
+    <button id="release-leader-btn"
+            class="btn btn-outline-warning action mt-2"
+            hidden>Release control</button>
+    <div id="leader-badge" class="badge bg-secondary mt-1">no leader</div>
+    {% if recorder_enabled %}
+    {# §D Milestone 5: link to the recorded-session history. Only shown
+       when rabbit advertised a recorder URL on its most recent Hello —
+       avoids a guaranteed-404 link when recording is off. #}
+    <a class="btn btn-outline-info action mt-2" href="/agent/{{ agent.id }}/claude/history">→ history</a>
+    {% endif %}
   </aside>
 </div>
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/xterm-addon-fit.js"></script>
 <script>
 const agentId = "{{ agent.id }}";
-const screen = document.getElementById('claude-screen');
+const grid = document.getElementById('claude-grid');
 const stateBadge = document.getElementById('state-badge');
 const stateSession = document.getElementById('state-session');
 const stateVersion = document.getElementById('state-version');
@@ -71,22 +146,49 @@ const usageIn = document.getElementById('usage-in');
 const usageOut = document.getElementById('usage-out');
 const usageCr = document.getElementById('usage-cr');
 const usageCw = document.getElementById('usage-cw');
+const promptRejectedBanner = document.getElementById('prompt-rejected-banner');
 
-let sse = null;
-let termBuf = '';
+// §D read-only viewer mode: `?viewer=true` on the URL puts the page into
+// viewer mode. We pass the flag to the WS so the server drops input
+// frames (the *real* enforcement), and we add `viewer-mode` to <body> so
+// the CSS hides input affordances.
+const viewerMode = new URLSearchParams(location.search).get('viewer') === 'true';
+if (viewerMode) document.body.classList.add('viewer-mode');
 
-function setBadge(state, connected) {
-  if (!connected) {
+// Fixed size per rabbit.md §A.6 — per-client resize would require a leader
+// concept that doesn't exist yet.
+const TERM_COLS = 120;
+const TERM_ROWS = 40;
+
+const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  fontSize: 13,
+  scrollback: 5000,
+  theme: { background: '#0d1117', foreground: '#c9d1d9' } });
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById('term'));
+fit.fit();
+term.focus();
+
+let ws = null;
+let wsBackoff = 500;
+let connected = false;
+
+function setConnected(c) {
+  connected = c;
+  grid.classList.toggle('disconnected', !c);
+  if (!c) {
     stateBadge.textContent = 'disconnected';
     stateBadge.className = 'status badge bg-secondary';
-    return;
   }
+}
+
+function setBadge(state) {
+  if (!connected) return;
   const labels = {
-    starting: 'starting',
-    idle: 'idle',
-    running: 'running',
-    ended: 'ended',
-    dead: 'dead'
+    starting: 'starting', idle: 'idle', running: 'running',
+    ended: 'ended', dead: 'dead'
   };
   stateBadge.textContent = labels[state] || state;
   stateBadge.className = 'status badge bg-' + ({
@@ -95,84 +197,251 @@ function setBadge(state, connected) {
   }[state] || 'secondary');
 }
 
-async function refreshState() {
-  try {
-    const r = await fetch(`/api/agents/${agentId}/claude/state`);
-    if (!r.ok) {
-      setBadge(null, false);
-      return;
-    }
-    const j = await r.json();
-    setBadge(j.state, j.connected);
-    stateSession.textContent = j.session_id || '—';
-    stateVersion.textContent = j.claude_version || '—';
-  } catch (e) {
-    setBadge(null, false);
+// Local keystroke forwarding: typed bytes go to the browser WS so they reach
+// claude's PTY through warren. Server-side handler strips the channel byte
+// and ships them to rabbit, which feeds the pty master.
+term.onData(data => {
+  if (!connected || !ws) return;
+  // §D read-only viewer mode: don't even *send* typed bytes to the WS.
+  // The server drops them, but skipping the send saves a round trip and
+  // means a misconfigured proxy can't log viewer keystrokes.
+  if (viewerMode) return;
+  const buf = new Uint8Array(1 + data.length);
+  buf[0] = 0x01;
+  for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
+  ws.send(buf);
+});
+
+// Envelope body shapes per warren/src/agents_live/wire.rs::EnvelopeBody.
+function applyMeta(env) {
+  const t = env && env.t;
+  switch (t) {
+    case 'state':
+      setBadge(env.state);
+      if (env.session_id) stateSession.textContent = env.session_id;
+      // §D reject-when-Running: when the agent leaves Running (turn ends or
+      // the session dies), the gate lifts — hide any stale rejection
+      // banner so it doesn't pile up across multiple bounces.
+      if (env.state && env.state !== 'running') {
+        promptRejectedBanner.classList.remove('visible');
+      }
+      break;
+    case 'session':
+      stateSession.textContent = env.session_id || '—';
+      break;
+    case 'hello':
+      stateSession.textContent = env.session_id || '—';
+      stateVersion.textContent = env.claude_version || '—';
+      setBadge(env.state);
+      break;
+    case 'usage':
+      if (env.input_tokens != null)  usageIn.textContent = env.input_tokens;
+      if (env.output_tokens != null) usageOut.textContent = env.output_tokens;
+      if (env.cache_read != null)   usageCr.textContent = env.cache_read;
+      if (env.cache_write != null)  usageCw.textContent = env.cache_write;
+      break;
+    case 'cleared':
+      if (env.hard) term.reset();
+      break;
+    case 'prompt_rejected':
+      // §D reject-when-Running: surface the bounce with a dedicated banner
+      // tied to the original prompt id. The banner clears itself on the
+      // next state transition (turn finishes) so it doesn't pile up if
+      // several back-to-back rejections arrive.
+      promptRejectedBanner.textContent =
+        `prompt #${(env.id || '').slice(0, 8)} rejected: ${env.reason || 'agent is busy'}`;
+      promptRejectedBanner.classList.add('visible');
+      break;
+    case 'screen_snapshot':
+      // §D Milestone 5 (Phase B): authoritative late-join screen dump
+      // from rabbit's server-side VT. Reset xterm.js and write the rows
+      // joined with CRLF (so each row returns to column 0), then
+      // reposition the cursor via ANSI CSI H (1-indexed). Eventually
+      // replaces the SIGWINCH jiggle on browser join.
+      if (!Array.isArray(env.text)) break;
+      term.reset();
+      term.write(env.text.join('\r\n') + '\r\n');
+      const r = (env.cursor_row || 0) + 1;
+      const c = (env.cursor_col || 0) + 1;
+      term.write(`\x1b[${r};${c}H`);
+      break;
+    // §A.6 leader-based resize — see `connection_assigned` /
+    // `leader_changed` cases below. Server-sent on WS open and on every
+    // leader transition (initial claim, transfer, release, disconnect).
+    case 'connection_assigned':
+      myConnectionId = env.connection_id || null;
+      // Reveal the Claim button once we have an id; if a leader is
+      // already active the server's first `LeaderChanged` will hide it
+      // again via `setLeaderUi`.
+      if (myConnectionId && !viewerMode && !isLeader) {
+        claimBtn.hidden = false;
+      }
+      break;
+    case 'leader_changed':
+      setLeaderUi(env.leader_id || null, env.cols || term.cols, env.rows || term.rows);
+      break;
   }
 }
 
-async function refreshUsage() {
-  try {
-    const r = await fetch(`/api/agents/${agentId}/claude/usage`);
-    if (!r.ok) { return; }
-    const j = await r.json();
-    usageIn.textContent = j.input_tokens || 0;
-    usageOut.textContent = j.output_tokens || 0;
-    usageCr.textContent = j.cache_read || 0;
-    usageCw.textContent = j.cache_write || 0;
-  } catch (e) {}
-}
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // §D read-only viewer mode: append `?viewer=true` to the WS URL so the
+  // server enforces the read-only contract even if a hostile client
+  // bypasses the JS UI gates.
+  const viewerQuery = viewerMode ? '?viewer=true' : '';
+  ws = new WebSocket(`${proto}//${location.host}/agent/${agentId}/claude/ws${viewerQuery}`);
+  ws.binaryType = 'arraybuffer';
 
-function connectStream() {
-  if (sse) { try { sse.close(); } catch {} }
-  sse = new EventSource(`/api/agents/${agentId}/claude/events/stream`);
-  sse.onmessage = (e) => {
+  ws.onopen = () => {
+    wsBackoff = 500;
+    setConnected(true);
+  };
+
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) {
+      const view = new Uint8Array(ev.data);
+      if (view.length === 0) return;
+      // Only the Claude channel (0x01) is defined; drop other ids.
+      if (view[0] !== 0x01) return;
+      term.write(bytesToUtf8(view.subarray(1)));
+      return;
+    }
     try {
-      const env = JSON.parse(e.data);
-      termBuf += JSON.stringify(env) + '\n';
-      if (termBuf.length > 16384) { termBuf = termBuf.slice(-16384); }
-      screen.textContent = termBuf;
-    } catch {}
+      applyMeta(JSON.parse(ev.data));
+    } catch (e) {}
   };
-  sse.onerror = () => {
-    setTimeout(connectStream, 1500);
+
+  ws.onclose = () => {
+    setConnected(false);
+    setTimeout(connectWs, wsBackoff);
+    wsBackoff = Math.min(wsBackoff * 2, 15000);
   };
-  sse.onopen = () => {
-    refreshState();
-  };
+
+  ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
-document.getElementById('prompt-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const text = document.getElementById('prompt-text').value;
-  if (!text) return;
-  const r = await fetch(`/api/agents/${agentId}/claude/prompt`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text, wait: false})
-  });
-  document.getElementById('prompt-text').value = '';
-  refreshState();
-});
+function bytesToUtf8(bytes) {
+  // xterm.write takes a UTF-8 string. The PTY is mostly UTF-8 but repaints
+  // may produce partial sequences; TextDecoder surfaces replacement chars
+  // which xterm renders as � without crashing.
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
 
+// Action buttons POST to /api/agents/:id/claude/* — cookie-authed and
+// idempotent across the hub actor.
 document.querySelectorAll('button.action').forEach(btn => {
   btn.addEventListener('click', async () => {
     const action = btn.dataset.action;
     const body = (action === 'clear' || action === 'restart') ? JSON.stringify({fresh: false}) : null;
-    const r = await fetch(`/api/agents/${agentId}/claude/${action}`, {
+    await fetch(`/api/agents/${agentId}/claude/${action}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body
     });
-    refreshState();
-    refreshUsage();
   });
 });
 
-refreshState();
-refreshUsage();
-setInterval(refreshState, 5000);
-setInterval(refreshUsage, 5000);
-connectStream();
+// §A.6 leader-based resize -------------------------------------------------
+//
+// `myConnectionId` arrives in the `ConnectionAssigned` envelope that the
+// server sends on WS open. Until then we have no id to compare against,
+// so the Claim button stays hidden.
+//
+// `isLeader` is set from `LeaderChanged` broadcasts. When `false`, this
+// tab is a follower: `term.resize(env.cols, env.rows)` snaps our grid to
+// the leader's grid, and `term.onResize` MUST NOT echo a Resize frame
+// back to the server (we'd be a ghost-leader). When `true`, our `term`
+// is the source of truth and the rAF-throttled `window.resize` listener
+// below forwards the new grid.
+let myConnectionId = null;
+let isLeader = false;
+const claimBtn = document.getElementById('claim-leader-btn');
+const releaseBtn = document.getElementById('release-leader-btn');
+const leaderBadge = document.getElementById('leader-badge');
+
+function setLeaderUi(leaderId, cols, rows) {
+  isLeader = (leaderId !== null && leaderId === myConnectionId);
+  if (isLeader) {
+    claimBtn.hidden = true;
+    releaseBtn.hidden = false;
+    leaderBadge.textContent = `leader (you): ${cols}×${rows}`;
+    leaderBadge.className = 'badge bg-success mt-1';
+  } else if (leaderId) {
+    claimBtn.hidden = false;
+    releaseBtn.hidden = true;
+    leaderBadge.textContent = `leader ${leaderId.slice(0, 8)}: ${cols}×${rows}`;
+    leaderBadge.className = 'badge bg-info mt-1';
+    // Follower: snap our grid to the leader's grid. xterm rejects very
+    // small or very large sizes; clamp to a sane range so the broadcast
+    // `cols` from a misbehaving leader doesn't brick our pane.
+    const safeCols = Math.max(20, Math.min(500, cols | 0));
+    const safeRows = Math.max(5, Math.min(200, rows | 0));
+    if (term.cols !== safeCols || term.rows !== safeRows) {
+      term.resize(safeCols, safeRows);
+    }
+  } else {
+    claimBtn.hidden = (myConnectionId == null) || viewerMode;
+    releaseBtn.hidden = true;
+    leaderBadge.textContent = 'no leader';
+    leaderBadge.className = 'badge bg-secondary mt-1';
+  }
+}
+
+claimBtn.addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  // Re-fit before reporting: if the user dragged their window before
+  // claiming, the DOM is wider than `term.cols` reports (xterm only
+  // updates its reported cols/rows via `term.resize()` or `fit.fit()`).
+  // Without this we'd inherit the old 120×40 even on a 200-wide pane.
+  fit.fit();
+  // The claiming browser's CURRENT xterm grid becomes the new PTY grid.
+  // On the first claim this is the fit-to-pane size; on a re-claim the
+  // grid tracks the previous leader's last known size.
+  ws.send(JSON.stringify({ t: 'claim_leader', cols: term.cols, rows: term.rows }));
+});
+
+releaseBtn.addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ t: 'release_leader' }));
+});
+
+// Re-fit on window resize and forward the new grid to rabbit — but only
+// when *we* are the leader. Followers have their grid locked to the
+// leader's via `term.resize()` in `setLeaderUi`, so they must not echo
+// a Resize frame back to the server.
+//
+// `requestAnimationFrame` coalesces a flurry of resize events (window
+// drag, devtools toggling, mobile rotation) to one Resize per paint
+// frame. The server-side actor's `is_leader` double-check is the final
+// guard: even if we somehow lose leadership mid-frame, the actor drops
+// a stale Resize from a non-leader.
+let resizeRaf = null;
+function scheduleLeaderResize() {
+  if (!isLeader || resizeRaf != null) return;
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = null;
+    if (!isLeader) return;  // leadership may have changed mid-frame
+    fit.fit();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
+  });
+}
+window.addEventListener('resize', scheduleLeaderResize);
+// `term.onResize` fires for *every* grid change — including the
+// follower's `term.resize()` triggered by `setLeaderUi` above. Gate it
+// on `isLeader` (re-checked inside the closure each tick) so followers
+// never echo their syncd grid back as a Resize.
+term.onResize(() => {
+  if (!isLeader || viewerMode) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
+});
+
+// On reconnect, the server fires a fresh `LeaderChanged` for whatever
+// leadership state exists. Until that arrives, the badge correctly
+// shows "no leader" and the Claim button stays hidden (myConnectionId
+// is null until the new `ConnectionAssigned` lands).
+
+connectWs();
 </script>
 {% endblock %}

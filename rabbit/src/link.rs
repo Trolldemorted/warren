@@ -1,4 +1,7 @@
-use crate::wire::{Envelope, EnvelopeBody, HelloUp, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE};
+use crate::meta_ring::MetaRing;
+use crate::wire::{
+    Envelope, EnvelopeBody, HelloUp, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -10,17 +13,23 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 pub enum LinkEvent {
-    /// Raw PTY bytes forwarded from warren (channel byte already stripped).
-    /// Only the Claude channel (0x01) is forwarded; other channel ids are dropped.
-    Binary(Vec<u8>),
+    /// Raw PTY bytes forwarded from warren, tagged with the terminal channel
+    /// they belong to (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`). The supervisor
+    /// routes each frame to the matching PTY. Unknown channel ids are dropped
+    /// in `attempt` before they ever reach here.
+    Binary { chan: u8, data: Vec<u8> },
     Text(Envelope),
 }
 
 pub enum LinkCmd {
-    SendBinary(Vec<u8>),
+    /// Raw PTY bytes from a terminal → warren → viewers, tagged with the
+    /// channel byte the frame should carry on the wire (claude vs. shell).
+    SendBinary { chan: u8, data: Vec<u8> },
+    /// Structured meta event. The link assigns the next seq, buffers the
+    /// serialized frame in the meta ring, then sends. The frame is replayed
+    /// on the next WS attempt until warren sends `Ack{seq}` for it.
+    SendMeta(EnvelopeBody),
     #[allow(dead_code)]
-    SendText(Envelope),
-    SendTextRaw(String),
     Shutdown,
 }
 
@@ -38,6 +47,14 @@ pub struct Link {
     /// construction (cheap Arc clone); queried per reconnect so a rabbit
     /// that drops and reconnects sends the current state, not a stale one.
     replay_snap: ReplaySnapFn,
+    /// Bounded queue of recently-sent meta events awaiting Ack. Survives
+    /// across WS attempts within a single Link lifetime.
+    meta_ring: Arc<MetaRing>,
+    /// §D Milestone 5: absolute base URL of this rabbit's recorder HTTP
+    /// server, advertised in the Hello envelope so warren can fetch `.cast`
+    /// files for `/agent/:id/claude/history`. `None` when recording is
+    /// disabled.
+    recorder_url: Option<String>,
 }
 
 /// Returns the current replay bytes (concatenated, in order) to send as the
@@ -55,6 +72,8 @@ impl Link {
         cmd_rx: mpsc::Receiver<LinkCmd>,
         event_tx: mpsc::Sender<LinkEvent>,
         replay_snap: ReplaySnapFn,
+        meta_ring: Arc<MetaRing>,
+        recorder_url: Option<String>,
     ) -> Self {
         Self {
             warren_url,
@@ -66,6 +85,8 @@ impl Link {
             cmd_rx,
             event_tx,
             replay_snap,
+            meta_ring,
+            recorder_url,
         }
     }
 
@@ -97,9 +118,7 @@ impl Link {
         // Rewrite the scheme at the use site rather than asking the operator
         // to remember the difference. The rabbit WS endpoint lives at
         // /ws/rabbit on warren; GET / would 303 to /admin/agents.
-        let base = self
-            .warren_url
-            .trim_end_matches('/');
+        let base = self.warren_url.trim_end_matches('/');
         let ws_url = if let Some(rest) = base.strip_prefix("https://") {
             format!("wss://{rest}/ws/rabbit")
         } else if let Some(rest) = base.strip_prefix("http://") {
@@ -132,6 +151,7 @@ impl Link {
                 session_id: None,
                 state: "starting".to_string(),
                 term_size: self.term_size,
+                recorder_url: self.recorder_url.clone(),
             }),
         };
         let hello_json = serde_json::to_string(&hello)?;
@@ -143,6 +163,12 @@ impl Link {
             frame.extend_from_slice(&replay_bytes);
             sink.send(Message::Binary(frame)).await?;
         }
+        // Replay any meta events warren hasn't acked yet. Seq numbers carry
+        // over across reconnects (the AtomicI64 lives on the Link struct, not
+        // the WS attempt), so warren's dedup-by-seq catches duplicates.
+        for frame in self.meta_ring.snapshot() {
+            sink.send(Message::Text(frame)).await?;
+        }
 
         loop {
             tokio::select! {
@@ -150,18 +176,22 @@ impl Link {
                 cmd = self.cmd_rx.recv() => {
                     let Some(cmd) = cmd else { break; };
                     match cmd {
-                        LinkCmd::SendBinary(mut b) => {
-                            if b.is_empty() { continue; }
-                            let mut frame = vec![TERM_CHAN_CLAUDE];
-                            frame.append(&mut b);
+                        LinkCmd::SendBinary { chan, mut data } => {
+                            if data.is_empty() { continue; }
+                            let mut frame = vec![chan];
+                            frame.append(&mut data);
                             sink.send(Message::Binary(frame)).await?;
                         }
-                        LinkCmd::SendText(env) => {
-                            let s = serde_json::to_string(&env)?;
-                            sink.send(Message::Text(s)).await?;
-                        }
-                        LinkCmd::SendTextRaw(s) => {
-                            sink.send(Message::Text(s)).await?;
+                        LinkCmd::SendMeta(body) => {
+                            let seq = self.next_seq();
+                            let env = Envelope {
+                                v: PROTOCOL_VERSION,
+                                seq,
+                                body,
+                            };
+                            let frame = serde_json::to_string(&env)?;
+                            self.meta_ring.push(seq, frame.clone());
+                            sink.send(Message::Text(frame)).await?;
                         }
                         LinkCmd::Shutdown => {
                             sink.send(Message::Close(None)).await.ok();
@@ -174,19 +204,32 @@ impl Link {
                     match msg? {
                         Message::Text(t) => {
                             if let Ok(env) = serde_json::from_str::<Envelope>(&t) {
+                                if let EnvelopeBody::Ack { ack_seq } = env.body {
+                                    let freed = self.meta_ring.trim_through(ack_seq);
+                                    if freed > 0 {
+                                        log::debug!(
+                                            "warren acked through seq={ack_seq} (freed {freed} bytes of buffered meta)"
+                                        );
+                                    }
+                                    continue;
+                                }
                                 let _ = self.event_tx.send(LinkEvent::Text(env)).await;
                             }
                         }
                         Message::Binary(mut b) => {
                             // warren frames every binary with a leading channel byte.
-                            // Currently only the Claude channel is defined; drop
-                            // anything else rather than feeding it to the PTY.
+                            // Route the known terminal channels (claude + shell)
+                            // through to the supervisor tagged with their channel;
+                            // drop anything else rather than feeding it to a PTY.
                             if b.is_empty() {
                                 continue;
                             }
                             let chan = b.remove(0);
-                            if chan == TERM_CHAN_CLAUDE {
-                                let _ = self.event_tx.send(LinkEvent::Binary(b)).await;
+                            if chan == TERM_CHAN_CLAUDE || chan == TERM_CHAN_SHELL {
+                                let _ = self
+                                    .event_tx
+                                    .send(LinkEvent::Binary { chan, data: b })
+                                    .await;
                             }
                         }
                         Message::Close(_) => break,

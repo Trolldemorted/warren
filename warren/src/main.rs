@@ -288,6 +288,11 @@ fn build_router(state: AppState) -> Router {
             "/agent/:id/claude/ws",
             get(agents_live::ws_browser::ws_browser),
         )
+        // §D Milestone 5: secondary `/shell` WS for the bash PTY.
+        .route(
+            "/agent/:id/shell/ws",
+            get(agents_live::ws_shell::ws_shell),
+        )
         .nest("/static", routes::static_files::router(state.clone()))
         .layer(security_headers)
         .with_state(state)

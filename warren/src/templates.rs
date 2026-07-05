@@ -81,6 +81,52 @@ pub struct AgentClaudeTemplate {
     pub flash: Option<Flash>,
     pub agent: crate::entity::agent::Model,
     pub connected: bool,
+    /// §D Milestone 5: true iff rabbit advertised a recorder URL on its
+    /// most recent Hello envelope. Gates the "→ history" button in the
+    /// actions aside so dead agents don't get a 404 link.
+    pub recorder_enabled: bool,
+}
+
+/// §D Milestone 5: `/agent/:id/claude/history` — list view, one row per
+/// recorded session, most recent first. `recorder_error` is `Some` when
+/// the recorder URL is unknown OR the HTTP fetch failed; the template
+/// renders a friendlier empty state instead of a 500.
+#[derive(Template)]
+#[template(path = "agent_claude_history_list.html")]
+pub struct AgentClaudeHistoryListTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub agent: crate::entity::agent::Model,
+    pub sessions: Vec<crate::routes::recording::SessionRecordings>,
+    pub recorder_error: Option<String>,
+}
+
+/// §D Milestone 5: `/agent/:id/claude/history/:session` — single-session
+/// play page. Embeds an `<asciinema-player>` pointing at the recorder
+/// URL for that session.
+#[derive(Template)]
+#[template(path = "agent_claude_history_play.html")]
+pub struct AgentClaudeHistoryPlayTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub agent: crate::entity::agent::Model,
+    pub session_id: String,
+    pub cast_url: String,
+}
+
+#[derive(Template)]
+#[template(path = "agent_shell.html")]
+/// §D Milestone 5: secondary bash PTY page. Same shape as
+/// `AgentClaudeTemplate` — same xterm.js pane, different WS endpoint
+/// and a smaller UI (no action buttons, just the live terminal).
+pub struct AgentShellTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub agent: crate::entity::agent::Model,
+    pub connected: bool,
 }
 
 #[derive(Template)]

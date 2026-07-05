@@ -68,6 +68,7 @@ pub fn _placeholder_hello(agent_id: uuid::Uuid) -> Envelope {
                 cols: 120,
                 rows: 40,
             },
+            recorder_url: None,
         }),
     }
 }
