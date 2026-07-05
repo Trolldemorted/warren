@@ -127,6 +127,7 @@ pub async fn run(config: Config) -> Result<()> {
         replay_snap,
         meta_ring,
         recorder_url_opt,
+        shutdown.clone(),
     );
     {
         tokio::spawn(async move {
@@ -159,6 +160,15 @@ pub async fn run(config: Config) -> Result<()> {
     let mut dead = false;
     let mut active: Option<ActiveSession> = None;
     let mut outcome_rx: mpsc::Receiver<RunOutcome> = mpsc::channel(8).1;
+    // Dedup the shutdown arms. Without this, every iteration of the
+    // outer loop re-creates fresh `wait_for_shutdown()` futures in the
+    // select! below; once `shutdown` is `true`, those futures all
+    // return Ready immediately and the handler fires once per loop
+    // spin (visible as N copies of "shutdown signal received; …" in
+    // the log during the graceful-exit grace window). The flag ensures
+    // the log message + `PtyCmd::GracefulShutdown` are emitted exactly
+    // once.
+    let mut shutdown_acked = false;
 
     // Fold `MODEL` env into the base claude args once, at startup, so it's
     // stable across the spawn loop and doesn't depend on the operator also
@@ -247,6 +257,11 @@ pub async fn run(config: Config) -> Result<()> {
         }
 
         if shutdown.load(Ordering::SeqCst) && active.is_none() {
+            // Politely close the WS so warren sees the agent go away before
+            // we exit. The link also polls `shutdown` itself, so this is
+            // best-effort — if the send fails (channel full / closed), the
+            // flag will still break the link's reconnect loop.
+            let _ = cmd_tx.send(LinkCmd::Shutdown).await;
             break;
         }
 
@@ -348,14 +363,15 @@ pub async fn run(config: Config) -> Result<()> {
                     break;
                 }
             }
-            _ = wait_for_shutdown(shutdown.clone()), if active.is_some() => {
+            _ = wait_for_shutdown(shutdown.clone()), if active.is_some() && !shutdown_acked => {
+                shutdown_acked = true;
                 log::info!("shutdown signal received; signaling graceful exit");
                 health.set_shutting_down(true);
                 if let Some(tx) = &active_link_tx {
                     let _ = tx.send(PtyCmd::GracefulShutdown).await;
                 }
             }
-            _ = wait_for_shutdown(shutdown.clone()), if active.is_none() => {
+            _ = wait_for_shutdown(shutdown.clone()), if active.is_none() && !shutdown_acked => {
                 log::info!("shutdown signal received; exiting");
                 health.set_shutting_down(true);
                 break;

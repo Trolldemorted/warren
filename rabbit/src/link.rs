@@ -4,7 +4,7 @@ use crate::wire::{
 };
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -29,7 +29,10 @@ pub enum LinkCmd {
     /// serialized frame in the meta ring, then sends. The frame is replayed
     /// on the next WS attempt until warren sends `Ack{seq}` for it.
     SendMeta(EnvelopeBody),
-    #[allow(dead_code)]
+    /// Sent by the supervisor just before its outer loop exits so the link's
+    /// `attempt()` issues `Message::Close` to warren and returns cleanly. The
+    /// `Arc<AtomicBool>` `shutdown` flag is the backstop that breaks the
+    /// reconnect loop even when this never reaches the link.
     Shutdown,
 }
 
@@ -55,6 +58,14 @@ pub struct Link {
     /// files for `/agent/:id/claude/history`. `None` when recording is
     /// disabled.
     recorder_url: Option<String>,
+    /// Supervisor-shared shutdown flag. When `true`, `run()` exits its
+    /// reconnect loop instead of bouncing forever — without this, a clean
+    /// supervisor shutdown still leaves a forever-retriying link task that
+    /// holds the runtime open. The supervisor also pushes
+    /// `LinkCmd::Shutdown` for a graceful WS close; this flag is the
+    /// backstop that breaks the outer reconnect loop no matter how
+    /// `attempt()` returned.
+    shutdown: Arc<AtomicBool>,
 }
 
 /// Returns the current replay bytes (concatenated, in order) to send as the
@@ -74,6 +85,7 @@ impl Link {
         replay_snap: ReplaySnapFn,
         meta_ring: Arc<MetaRing>,
         recorder_url: Option<String>,
+        shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self {
             warren_url,
@@ -87,6 +99,7 @@ impl Link {
             replay_snap,
             meta_ring,
             recorder_url,
+            shutdown,
         }
     }
 
@@ -98,12 +111,30 @@ impl Link {
     pub async fn run(mut self) -> Result<()> {
         let mut backoff = Duration::from_millis(250);
         loop {
+            // Check shutdown before each attempt and after each return so a
+            // successful connect+close doesn't trigger an immediate reconnect.
+            // Without this the link task would live forever, holding the
+            // tokio runtime open even after the supervisor's `run()` returns
+            // — a graceful supervisor shutdown would still leave a forever
+            // bouncing link task.
+            if self.shutdown.load(Ordering::SeqCst) {
+                log::info!("warren link shutting down");
+                return Ok(());
+            }
             match self.attempt().await {
                 Ok(()) => {
                     log::info!("warren link closed cleanly");
                     backoff = Duration::from_millis(250);
+                    if self.shutdown.load(Ordering::SeqCst) {
+                        log::info!("warren link shutdown requested after clean close");
+                        return Ok(());
+                    }
                 }
                 Err(e) => {
+                    if self.shutdown.load(Ordering::SeqCst) {
+                        log::info!("warren link error during shutdown ({e:?}); exiting");
+                        return Ok(());
+                    }
                     log::warn!("warren link error: {e:?}; reconnecting in {backoff:?}");
                     sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -244,5 +275,83 @@ impl Link {
 
     fn next_seq(&self) -> i64 {
         self.seq.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `Link::run` shutdown-exit contract. Without this, a graceful
+    //! supervisor shutdown leaves the link task alive forever in its
+    //! reconnect loop, which would prevent the binary from exiting on a
+    //! clean `^C`.
+
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    /// Build a `Link` pointing at `127.0.0.1:{port}`. The caller is
+    /// responsible for actually listening on that port (or not). The
+    /// returned shutdown flag is shared with the link so tests can flip
+    /// it mid-flight.
+    fn spawn_test_link(
+        port: u16,
+        shutdown: Arc<AtomicBool>,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<LinkCmd>(128);
+        let (event_tx, _event_rx) = mpsc::channel::<LinkEvent>(128);
+        let ring = Arc::new(MetaRing::new(262_144));
+        let replay_snap: ReplaySnapFn = Arc::new(Vec::new);
+
+        let link = Link::new(
+            format!("http://127.0.0.1:{port}"),
+            "test-token".into(),
+            uuid::Uuid::nil(),
+            "test-1.0".into(),
+            TermSize { cols: 80, rows: 24 },
+            cmd_rx,
+            event_tx,
+            replay_snap,
+            ring,
+            None,
+            shutdown,
+        );
+        tokio::spawn(async move { link.run().await })
+    }
+
+    #[tokio::test]
+    async fn run_exits_immediately_when_shutdown_set_before_start() {
+        // Top-of-loop guard: if shutdown is already true when `run()` is
+        // entered, the loop returns `Ok(())` before any WS attempt. We
+        // point at an unreachable port; if the guard is broken, the loop
+        // would bounce on connect errors and never finish in 2s.
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let h = spawn_test_link(1, shutdown);
+        let () = tokio::time::timeout(Duration::from_secs(2), h)
+            .await
+            .expect("run must exit within 2s when shutdown is pre-set")
+            .expect("join")
+            .expect("Ok exit");
+    }
+
+    #[tokio::test]
+    async fn run_exits_mid_backoff_when_shutdown_flipped() {
+        // Err-path guard: connect fails fast (no listener), the Err arm
+        // is about to enter its 250 ms sleep. We flip shutdown during
+        // that window and assert run returns rather than sleeping through.
+        let shutdown = Arc::new(AtomicBool::new(false));
+        // Port 1 is reserved / unbindable on most platforms so connect()
+        // fails immediately.
+        let h = spawn_test_link(1, shutdown.clone());
+
+        // Give the run loop time to attempt once and land in the backoff
+        // sleep. 50 ms is generous on any reasonable host.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        shutdown.store(true, Ordering::SeqCst);
+
+        let () = tokio::time::timeout(Duration::from_secs(2), h)
+            .await
+            .expect("run must exit within 2s after shutdown is flipped mid-flight")
+            .expect("join")
+            .expect("Ok exit");
     }
 }
