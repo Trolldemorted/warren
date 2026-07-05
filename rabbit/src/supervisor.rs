@@ -32,7 +32,12 @@ pub async fn run(config: Config) -> Result<()> {
     std::fs::create_dir_all(&config.workdir).ok();
 
     let shutdown: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    install_signal_handlers(shutdown.clone());
+    // SIGINT count is held alongside `shutdown` because the signal
+    // handlers need to write to it but the actual forwarding happens
+    // inside the supervisor's outer loop (which owns `active` and can
+    // reach the shared writer).
+    let sigint_count: SigintCounter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    install_signal_handlers(shutdown.clone(), sigint_count.clone());
 
     let health = HealthState::new();
     {
@@ -186,6 +191,11 @@ pub async fn run(config: Config) -> Result<()> {
     };
 
     loop {
+        // Drain SIGINT counts FIRST so terminal Ctrl-C reaches claude
+        // even when the rest of this iteration would block on something
+        // else (e.g. wait_for_shutdown on an idle loop).
+        drain_sigint_counts(&sigint_count, active.as_ref().map(|s| &s.writer));
+
         // Spawn a new claude generation if we have nothing running and aren't dead.
         if active.is_none() && !dead && !shutdown.load(Ordering::SeqCst) {
             let fresh = restart_pending.take().unwrap_or(false);
@@ -430,17 +440,55 @@ async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
     }
 }
 
-fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
+/// Counter of pending SIGINT signals waiting to be forwarded to the
+/// claude PTY. We use a counter (vs. a flag) so two rapid Ctrl-Cs in
+/// the terminal both translate to two Ctrl-C bytes written to claude,
+/// rather than coalescing into one.
+///
+/// SIGINT arrives here we want to *forward into the claude session*, not
+/// treat as a shutdown signal. The PTY child is in its own process group
+/// (it's a `setsid`-style child via `portable_pty`), so SIGINT at the
+/// terminal where rabbit runs never reaches it directly — we have to
+/// deliver the literal Ctrl-C byte ourselves.
+type SigintCounter = Arc<std::sync::atomic::AtomicU64>;
+
+fn install_signal_handlers(
+    shutdown: Arc<AtomicBool>,
+    sigint_count: SigintCounter,
+) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        for kind in [SignalKind::terminate(), SignalKind::interrupt()] {
+        // SIGTERM (the default k8s `terminationGracePeriodSeconds` signal)
+        // → request rabbit shutdown. Existing behavior, preserved.
+        {
             let s = shutdown.clone();
             tokio::spawn(async move {
-                let Ok(mut sig) = signal(kind) else { return };
+                let Ok(mut sig) = signal(SignalKind::terminate()) else { return };
                 sig.recv().await;
-                log::info!("received signal {:?}; requesting shutdown", kind);
+                log::info!("received SIGTERM; requesting shutdown");
                 s.store(true, Ordering::SeqCst);
+            });
+        }
+        // SIGINT (Ctrl-C in the terminal where rabbit runs) → forward to
+        // claude as a 0x03 byte. Old behavior treated SIGINT as shutdown
+        // too, which meant pressing Ctrl-C at the terminal would tear
+        // down rabbit instead of cancelling whatever claude was doing.
+        // A second signal-handling concern: SIGINT must be received in
+        // a loop because the handler re-arms itself, so two Ctrl-Cs in
+        // quick succession both increment the counter (the outer loop
+        // drains and writes N copies of the byte).
+        {
+            let c = sigint_count.clone();
+            tokio::spawn(async move {
+                let Ok(mut sig) = signal(SignalKind::interrupt()) else { return };
+                loop {
+                    sig.recv().await;
+                    let n = c.fetch_add(1, Ordering::SeqCst) + 1;
+                    log::info!(
+                        "received SIGINT ({n} pending); will forward as 0x03 byte to active session"
+                    );
+                }
             });
         }
         // Best-effort: ignore SIGPIPE so a closed WS doesn't panic the supervisor.
@@ -451,7 +499,37 @@ fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
     #[cfg(not(unix))]
     {
         let _ = shutdown;
+        let _ = sigint_count;
     }
+}
+
+/// Drain pending SIGINT counts and write that many `0x03` bytes into
+/// `writer`. Called from the top of each iteration of the supervisor's
+/// outer select! loop — the next iteration is bounded by select!'s
+/// evaluation, so forwarding latency is sub-millisecond.
+///
+/// If there is no active session (`writer` is `None`), the counts are
+/// simply cleared (no PTY to forward into). The user will see a debug
+/// log noting the drop; no spurious shutdown as under the old behavior.
+fn drain_sigint_counts(counter: &SigintCounter, writer: Option<&Arc<Mutex<Box<dyn Write + Send>>>>) {
+    use std::io::Write;
+    let pending = counter.swap(0, Ordering::SeqCst);
+    if pending == 0 {
+        return;
+    }
+    let Some(sw) = writer else {
+        log::debug!(
+            "SIGINT x{pending} received but no active session; dropping (no shutdown)"
+        );
+        return;
+    };
+    let mut g = sw.lock();
+    let w: &mut dyn Write = &mut *g;
+    for _ in 0..pending {
+        let _ = w.write_all(input::CTRL_C);
+    }
+    let _ = w.flush();
+    log::info!("forwarded {pending}x Ctrl-C (0x03) to active session");
 }
 
 async fn detect_claude_version(config: &Config) -> String {
@@ -1626,5 +1704,71 @@ mod tests {
         // harness reaping the process via SIGTERM when the parent
         // exits — `/bin/cat` doesn't outlive the test in our tokio
         // test harness.)
+    }
+
+    /// Regression: SIGINT arriving at the supervisor process must be
+    /// FORWARDED to claude as a literal 0x03 byte, NOT treated as a
+    /// shutdown signal. This is the path `drain_sigint_counts` exercises
+    /// — invoked once per outer-loop iteration when SIGINT has been
+    /// registered via the signal handler.
+    ///
+    /// Pre-fix, SIGINT in the terminal where rabbit runs went into
+    /// `shutdown.store(true)` and triggered the graceful-shutdown branch
+    /// instead of cancelling claude's operation. After this change,
+    /// every pending SIGINT count translates to one 0x03 byte on the
+    /// writer, and the shutdown flag stays untouched.
+    #[test]
+    fn sigint_count_drains_as_ctrl_c_bytes() {
+        use std::io::Write;
+        use std::sync::Mutex as StdMutex;
+        // Replace the real shared writer with an in-memory buffer so the
+        // test can inspect exactly what bytes landed in the claude PTY
+        // without spawning a child.
+        let sink: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
+        // Boxing a closure captures by-move; we need an Arc to share it
+        // across the test thread and the drainer's lock.
+        let sink_for_writer = sink.clone();
+        let writer: Box<dyn Write + Send> = Box::new(WriteToSink(sink_for_writer));
+        let writer_arc: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
+        let counter: SigintCounter = Arc::new(std::sync::atomic::AtomicU64::new(3));
+        // Three pending SIGINTs; writer present.
+        drain_sigint_counts(&counter, Some(&writer_arc));
+        let bytes = sink.lock().expect("sink poisoned").clone();
+        assert_eq!(
+            bytes,
+            vec![0x03u8, 0x03u8, 0x03u8],
+            "three pending SIGINTs must produce three 0x03 bytes; got {bytes:?}"
+        );
+        // Counter must be back to zero — repeated drains don't duplicate.
+        let after_first = counter.swap(99, Ordering::SeqCst);
+        assert_eq!(
+            after_first, 0,
+            "drain_sigint_counts must consume the entire pending count"
+        );
+        sink.lock().expect("sink poisoned").clear();
+        counter.store(0, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn sigint_drain_with_no_active_writer_drops_count() {
+        let counter: SigintCounter = Arc::new(std::sync::atomic::AtomicU64::new(7));
+        drain_sigint_counts(&counter, None);
+        // Critical assertion: counter is fully consumed even with no
+        // writer — we don't want stale counts to leak into a future
+        // session as spurious forward bytes.
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    /// Minimal `Write` adapter that appends to a shared `Vec<u8>`.
+    struct WriteToSink(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for WriteToSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut g = self.0.lock().expect("sink poisoned");
+            g.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

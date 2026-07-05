@@ -4,6 +4,17 @@ use std::io::Write;
 pub const ENTER: &[u8] = b"\r";
 pub const ESC: &[u8] = b"\x1b";
 pub const CTRL_U: &[u8] = b"\x15";
+/// Ctrl-C byte (`0x03` / ETX). Used to forward a real Ctrl-C
+/// keystroke into claude — distinct from `ESC`, which is what the
+/// `EnvelopeBody::Interrupt` UI button sends (claude's "resuming the
+/// full session will consume a substantial portion of your usage limits"
+/// choice reacts to ESC, not Ctrl-C).
+///
+/// Resolved to the literal byte so the SIGINT-terminal-passthrough path
+/// (when the user presses Ctrl+C in the terminal where rabbit runs)
+/// can write the same byte claude would have received if rabbit were
+/// not in front of it.
+pub const CTRL_C: &[u8] = b"\x03";
 /// Bracketed-paste start marker (`ESC[200~`). When the receiver is in
 /// bracketed-paste mode, everything between START and END lands as a single
 /// paste event instead of being interpreted keystroke-by-keystroke. This is
