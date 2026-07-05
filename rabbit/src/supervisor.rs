@@ -623,10 +623,7 @@ fn spawn_run_one(
                 if let Some(since) = graceful_since {
                     let alive = pty.alive();
                     if graceful_expired(since.elapsed(), grace_period, alive) {
-                        if alive {
-                            log::warn!("grace period elapsed; terminating claude");
-                            let _ = pty.terminate();
-                        }
+                        terminate_and_report_exited(&mut pty, &pty_evt_tx);
                         break;
                     }
                 }
@@ -934,6 +931,31 @@ pub fn graceful_expired(elapsed: Duration, grace_period: Duration, child_alive: 
     !child_alive || elapsed >= grace_period
 }
 
+/// Hard-kill `pty` if it is still alive, block until the child has been
+/// reaped, and notify the driver via `evt_tx` with the captured status.
+///
+/// Mirrors the natural-exit branch at the end of the blocking PTY loop.
+/// Without this, when the graceful-shutdown grace window elapses the
+/// blocking thread calls `pty.terminate()` and `break`s out of its loop
+/// without ever sending `PtyEvt::Exited` — the driver task then hangs
+/// forever on `pty_evt_rx_inner.recv()` and the tokio runtime refuses to
+/// exit even after the supervisor's outer loop has broken. Reproduced
+/// by `^C` against a `claude` child that ignored the graceful ESC.
+///
+/// Extracted so the regression test in `tests::*` can drive it against a
+/// real `/bin/sleep` child without standing up the whole supervisor.
+pub(crate) fn terminate_and_report_exited(pty: &mut Pty, evt_tx: &mpsc::Sender<PtyEvt>) {
+    if pty.alive() {
+        log::warn!("grace period elapsed; terminating claude");
+        let _ = pty.terminate();
+    }
+    let status = pty.wait().unwrap_or_else(|e| {
+        log::warn!("pty.wait failed during grace kill: {e:?}");
+        PtyExitStatus::with_exit_code(1)
+    });
+    let _ = evt_tx.blocking_send(PtyEvt::Exited(status));
+}
+
 async fn dispatch_to_pty(env: &Envelope, pty_tx: &mpsc::Sender<PtyCmd>, cols: u16, rows: u16) {
     let mut out: Vec<u8> = Vec::with_capacity(64);
     {
@@ -1109,6 +1131,55 @@ mod tests {
             Duration::from_millis(1500),
             true
         ));
+    }
+
+    /// Regression test for the runtime-hang on `^C`. The blocking PTY
+    /// thread's grace-expired branch used to call `pty.terminate()` and
+    /// `break` without sending `PtyEvt::Exited`, so the driver task was
+    /// left hung on `pty_evt_rx_inner.recv()` and the tokio runtime
+    /// refused to exit even after the supervisor's outer loop broke.
+    ///
+    /// We exercise `terminate_and_report_exited` against a real `/bin/sleep`
+    /// child — the closest reproduction without standing up the whole
+    /// supervisor (which spawns `claude`, which we don't have in CI). The
+    /// helper uses `Sender::blocking_send`, so the call site has to live
+    /// off the runtime thread (just like in production, where the helper
+    /// runs inside `spawn_blocking`). A 2s timeout on the receive proves
+    /// the event actually fires (no hang) — without the fix, `recv()`
+    /// would block forever and the test would time out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn terminate_and_report_exited_unblocks_driver_after_grace_kill() {
+        use crate::pty::Pty;
+        use std::sync::{Arc, Mutex};
+        let pty = Pty::spawn("/bin/sleep", &["2".into()], "/tmp", 80, 24, 4096)
+            .expect("spawn sleep");
+        let pty = Arc::new(Mutex::new(pty));
+        let (evt_tx, mut evt_rx) = mpsc::channel::<PtyEvt>(8);
+
+        // Run the helper on a blocking thread — production invokes it
+        // from inside `spawn_blocking`, and `blocking_send` cannot be
+        // called from inside the runtime.
+        let pty_for_helper = pty.clone();
+        let evt_tx_clone = evt_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut guard = pty_for_helper.lock().expect("pty mutex poisoned");
+            terminate_and_report_exited(&mut guard, &evt_tx_clone);
+        })
+        .await
+        .expect("spawn_blocking join");
+
+        let evt = tokio::time::timeout(Duration::from_secs(2), evt_rx.recv())
+            .await
+            .expect("driver never received PtyEvt::Exited within 2s — bug regression")
+            .expect("evt channel closed unexpectedly");
+        match evt {
+            PtyEvt::Exited(_) => {} // expected
+            other => panic!("expected PtyEvt::Exited, got {other:?}"),
+        }
+        assert!(
+            !pty.lock().expect("pty mutex poisoned").alive(),
+            "child should be reaped after terminate_and_report_exited"
+        );
     }
 
     #[tokio::test]
