@@ -9,7 +9,7 @@ publish = true
 repository = "https://github.com/Trolldemorted/warren"
 homepage = "https://github.com/Trolldemorted/warren"
 readme = "README.md"
-keywords = ["claude", "pty", "supervisor", "agent", "warren", "websocket"]
+keywords = ["claude", "pty", "agent", "headless", "websocket"]
 categories = ["api-bindings", "asynchronous", "development-tools"]
 
 [package.metadata.docs.rs]
