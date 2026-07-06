@@ -1942,16 +1942,7 @@ name = "rabbit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "rabbit-lib",
-]
-
-[[package]]
-name = "rabbit-lib"
-version = "0.1.0"
-dependencies = [
- "anyhow",
  "async-stream",
- "async-trait",
  "avt",
  "axum",
  "bytes",
@@ -1961,6 +1952,7 @@ dependencies = [
  "log",
  "parking_lot",
  "portable-pty",
+ "rabbit-lib",
  "reqwest",
  "rustls",
  "serde",
@@ -1972,6 +1964,27 @@ dependencies = [
  "tokio-stream",
  "tokio-tungstenite",
  "tower",
+ "uuid",
+]
+
+[[package]]
+name = "rabbit-lib"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "futures-util",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
  "uuid",
 ]
 
