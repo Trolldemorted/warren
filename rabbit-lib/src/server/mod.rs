@@ -91,17 +91,11 @@ pub trait AuthBackend: Send + Sync + 'static {
     /// Validate the `Authorization: Bearer …` header against the
     /// agent-token table. Returns the authenticated `agent_id` on
     /// success.
-    async fn authenticate_agent(
-        &self,
-        headers: &axum::http::HeaderMap,
-    ) -> Result<Uuid, AuthError>;
+    async fn authenticate_agent(&self, headers: &axum::http::HeaderMap) -> Result<Uuid, AuthError>;
 
     /// Validate the session cookie / header for admin endpoints.
     /// Returns `true` iff the caller is an authenticated admin.
-    async fn authenticate_admin(
-        &self,
-        headers: &axum::http::HeaderMap,
-    ) -> Result<bool, AuthError>;
+    async fn authenticate_admin(&self, headers: &axum::http::HeaderMap) -> Result<bool, AuthError>;
 }
 
 /// Reasons the auth trait can reject a request. War maps this onto its

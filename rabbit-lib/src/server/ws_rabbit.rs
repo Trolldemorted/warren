@@ -1,11 +1,9 @@
+use super::ServerState;
 use crate::server::actor;
 use crate::server::registry::AgentRegistry;
 use crate::server::ServerResult;
-use super::ServerState;
 use crate::server::SessionStore;
-use crate::wire::{
-    AgentState, Envelope, EnvelopeBody, HelloDown, TermSize, PROTOCOL_VERSION,
-};
+use crate::wire::{AgentState, Envelope, EnvelopeBody, HelloDown, TermSize, PROTOCOL_VERSION};
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::HeaderMap;

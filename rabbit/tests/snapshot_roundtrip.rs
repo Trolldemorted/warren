@@ -10,7 +10,7 @@
 //! including cursor + grid + UTF-8 reassembly). What this file pins down is
 //! the wire format: the envelopes serialize and deserialize cleanly across
 //! a real WebSocket through the `Link`, and the channel byte / field names
-//! match what `rabbit_lib::wire` expects. A failure here
+//! match what `rabbit::wire` expects. A failure here
 //! means warren's `applyMeta` (or `envelope_kind`) would silently misroute
 //! the snapshot.
 
@@ -25,9 +25,9 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use uuid::Uuid;
 
-use rabbit_lib::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
-use rabbit_lib::meta_ring::MetaRing;
-use rabbit_lib::wire::{
+use rabbit::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
+use rabbit::meta_ring::MetaRing;
+use rabbit::wire::{
     Envelope, EnvelopeBody, ScreenSnapshotBody, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
     TERM_CHAN_SHELL,
 };
@@ -131,8 +131,7 @@ async fn snapshot_request_arrives_as_text_event_with_chan_byte() {
         LinkEvent::Text(env) => match env.body {
             EnvelopeBody::SnapshotRequest { chan } => {
                 assert_eq!(
-                    chan,
-                    TERM_CHAN_CLAUDE,
+                    chan, TERM_CHAN_CLAUDE,
                     "channel byte must survive the wire intact"
                 );
             }
@@ -150,7 +149,7 @@ async fn snapshot_request_arrives_as_text_event_with_chan_byte() {
 /// warren as a structured meta envelope via `LinkCmd::SendMeta`. The link
 /// assigns a `seq` and the broker stores it; on the wire the JSON must
 /// carry the channel byte, dimensions, cursor, and grid text in the exact
-/// shape `rabbit_lib::wire::ScreenSnapshotBody` parses.
+/// shape `rabbit::wire::ScreenSnapshotBody` parses.
 #[tokio::test]
 async fn screen_snapshot_serializes_with_all_fields_and_correct_tag() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -177,7 +176,9 @@ async fn screen_snapshot_serializes_with_all_fields_and_correct_tag() {
         after_seq: 0,
     };
     cmd_tx
-        .send(LinkCmd::SendMeta(EnvelopeBody::ScreenSnapshot(snap.clone())))
+        .send(LinkCmd::SendMeta(EnvelopeBody::ScreenSnapshot(
+            snap.clone(),
+        )))
         .await
         .expect("send snapshot to link");
 
@@ -251,7 +252,7 @@ async fn envelope_tags_are_snake_case_to_match_warren_derive() {
 
 // §A.7 — `after_seq` field round-trip. The body shape now carries a
 // per-channel seq watermark; the JSON must include it (when set) and the
-// browser-side deserializer (covered by `rabbit_lib::wire`
+// browser-side deserializer (covered by `rabbit::wire`
 // tests + `rabbit/src/wire.rs::tests`) must read it back exactly.
 #[tokio::test]
 async fn screen_snapshot_body_after_seq_field_roundtrips_through_wire() {
@@ -274,7 +275,9 @@ async fn screen_snapshot_body_after_seq_field_roundtrips_through_wire() {
         after_seq: 1024,
     };
     cmd_tx
-        .send(LinkCmd::SendMeta(EnvelopeBody::ScreenSnapshot(snap.clone())))
+        .send(LinkCmd::SendMeta(EnvelopeBody::ScreenSnapshot(
+            snap.clone(),
+        )))
         .await
         .expect("send snapshot to link");
 
@@ -283,7 +286,10 @@ async fn screen_snapshot_body_after_seq_field_roundtrips_through_wire() {
         EnvelopeBody::ScreenSnapshot(b) => b,
         other => panic!("expected ScreenSnapshot, got {other:?}"),
     };
-    assert_eq!(body.after_seq, 1024, "after_seq must survive the round-trip");
+    assert_eq!(
+        body.after_seq, 1024,
+        "after_seq must survive the round-trip"
+    );
     assert_eq!(body.text[0], "abcd    ");
 }
 
@@ -353,10 +359,18 @@ async fn link_emits_widened_binary_frame_for_sendbinary_cmd() {
             other => panic!("unexpected ws frame: {other:?}"),
         }
     };
-    assert_eq!(frames.len(), 3, "expected three binary frames, got {}", frames.len());
+    assert_eq!(
+        frames.len(),
+        3,
+        "expected three binary frames, got {}",
+        frames.len()
+    );
     let _ = cmd_tx;
     let f1 = &frames[0];
-    assert_eq!(f1[0], TERM_CHAN_CLAUDE, "frame 1 must start with claude chan");
+    assert_eq!(
+        f1[0], TERM_CHAN_CLAUDE,
+        "frame 1 must start with claude chan"
+    );
     let mut seq_bytes = [0u8; 8];
     seq_bytes.copy_from_slice(&f1[1..9]);
     assert_eq!(

@@ -1,10 +1,10 @@
 use crate::meta_ring::MetaRing;
-use crate::wire::{
-    Envelope, EnvelopeBody, HelloUp, TermFrame, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
-    TERM_CHAN_SHELL, AgentState,
-};
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use rabbit_lib::wire::{
+    AgentState, Envelope, EnvelopeBody, HelloUp, TermFrame, TermSize, PROTOCOL_VERSION,
+    TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +18,10 @@ pub enum LinkEvent {
     /// they belong to (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`). The supervisor
     /// routes each frame to the matching PTY. Unknown channel ids are dropped
     /// in `attempt` before they ever reach here.
-    Binary { chan: u8, data: Vec<u8> },
+    Binary {
+        chan: u8,
+        data: Vec<u8>,
+    },
     Text(Envelope),
 }
 

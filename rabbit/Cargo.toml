@@ -4,8 +4,59 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Thin wrapper crate for the `rabbit` and `rabbit-hook` binaries. The actual implementation lives in `rabbit-lib`."
+description = "Per-agent Claude supervisor: spawns claude in a PTY, observes its lifecycle, and bridges to warren over a single WebSocket."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rabbit"
+path = "src/main.rs"
+
+# `rabbit-hook` is the stdin→HTTP hook shim that Claude's settings.json
+# points at. Lives here so the .claude/settings.json install path
+# (which embeds the literal binary name `rabbit-hook`) stays stable.
+[[bin]]
+name = "rabbit-hook"
+path = "src/bin/rabbit-hook.rs"
+
+# `tls` enables the rustls TLS connector on `tokio-tungstenite`, which is
+# what makes `https://` and `wss://` URLs work in `WARREN_URL`. Without it,
+# `tokio_tungstenite::connect_async` returns "TLS support not compiled in"
+# on every attempt and the link task would loop forever on a permanent
+# misconfiguration. Default-on because production rabbit pods normally
+# reach warren over TLS; strip it when a TLS-terminating reverse proxy
+# fronts both services and only `http://` is in use.
+[features]
+default = ["tls"]
+tls = ["tokio-tungstenite/rustls-tls-webpki-roots"]
+shell = []             # the bash PTY sidecar (`rabbit::shell`)
+asciicast = []         # the asciicast v2 recorder + http_server
 
 [dependencies]
 rabbit-lib = { path = "../rabbit-lib" }
+axum.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+rustls.workspace = true
+portable-pty.workspace = true
+futures-util.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+simple_logger.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+tokio-stream.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+avt = "0.18"
+async-stream = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { workspace = true, features = ["util"] }

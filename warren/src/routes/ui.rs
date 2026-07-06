@@ -3,7 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
 use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew};
 use crate::templates::{
-    AgentClaudeTemplate, AgentFormTemplate, AgentsTemplate, AgentShellTemplate,
+    AgentClaudeTemplate, AgentFormTemplate, AgentShellTemplate, AgentsTemplate,
     ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate, CommsRow, CommsTemplate, Flash,
     LoginTemplate, MigrationsTemplate,
 };

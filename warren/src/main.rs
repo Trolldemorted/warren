@@ -369,7 +369,7 @@ async fn refresh_cookie_middleware(
                         .insert(HeaderName::from_static("set-cookie"), hv);
                 }
             }
-            Ok(_) => {} // valid but not below threshold — no refresh needed
+            Ok(_) => {}  // valid but not below threshold — no refresh needed
             Err(_) => {} // expired or DB hiccup; let the handler decide
         }
     }

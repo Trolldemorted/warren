@@ -8,8 +8,8 @@
 //! Run explicitly:
 //!   cargo test -p rabbit --test claude_smoke -- --ignored --nocapture claude_pt_roundtrip
 
-use rabbit_lib::input::paste;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use rabbit::input::paste;
 use std::io::Read;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -48,11 +48,11 @@ impl ChildPty {
     }
 }
 
-/// Trust-dialog detection uses the production markers in `rabbit_lib::trust` so
+/// Trust-dialog detection uses the production markers in `rabbit::trust` so
 /// the smoke test and the supervisor's auto-accept path can never drift apart.
 /// The smoke test detects any marker in the PTY output and accepts the dialog
 /// by sending Enter, then re-sends the prompt.
-use rabbit_lib::trust::has_trust_marker;
+use rabbit::trust::has_trust_marker;
 
 /// Spawn `claude` with the nested-Code env markers stripped. claude reads
 /// `CLAUDECODE` and `CLAUDE_CODE_*` to detect "I'm being driven by another
@@ -327,7 +327,7 @@ fn strip_ansi(bytes: &[u8]) -> String {
 // hit the Anthropic API in CI.
 
 // Shared smoke harness: spawns claude, drains the boot banner (and accepts
-// any trust dialog via `rabbit_lib::trust::has_trust_marker`), then exposes a
+// any trust dialog via `rabbit::trust::has_trust_marker`), then exposes a
 // writer + receiver pair for the test to drive.
 struct SmokeHarness {
     pty: ChildPty,
@@ -384,11 +384,7 @@ fn spawn_smoke_harness(workdir: &str) -> SmokeHarness {
         std::thread::sleep(Duration::from_millis(800));
     }
 
-    SmokeHarness {
-        pty,
-        rx,
-        writer,
-    }
+    SmokeHarness { pty, rx, writer }
 }
 
 impl SmokeHarness {
@@ -397,11 +393,11 @@ impl SmokeHarness {
     }
 
     fn slash(&mut self, cmd: &str) {
-        rabbit_lib::input::slash(&mut self.writer, cmd).expect("slash");
+        rabbit::input::slash(&mut self.writer, cmd).expect("slash");
     }
 
     fn interrupt(&mut self) {
-        rabbit_lib::input::interrupt(&mut self.writer).expect("interrupt");
+        rabbit::input::interrupt(&mut self.writer).expect("interrupt");
     }
 
     /// Drain the receiver for `dur`. Returns the ANSI-stripped text so
@@ -519,9 +515,8 @@ fn slash_usage_returns_context_readout() {
     // claude's /usage panel mentions at least one of: usage, context,
     // tokens. We allow any of them so the test doesn't lock to a specific
     // label that future versions might rename.
-    let has_signal = lower.contains("usage")
-        || lower.contains("context")
-        || lower.contains("token");
+    let has_signal =
+        lower.contains("usage") || lower.contains("context") || lower.contains("token");
     assert!(
         has_signal,
         "/usage produced no usage/context/token signal; got tail: {}",
@@ -532,5 +527,11 @@ fn slash_usage_returns_context_readout() {
 }
 
 fn tail(s: &str, n: usize) -> String {
-    s.chars().rev().take(n).collect::<String>().chars().rev().collect()
+    s.chars()
+        .rev()
+        .take(n)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }

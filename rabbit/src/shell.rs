@@ -20,10 +20,10 @@
 use crate::config::Config;
 use crate::link::LinkCmd;
 use crate::pty::Pty;
-use crate::wire::TERM_CHAN_SHELL;
+use rabbit_lib::wire::TERM_CHAN_SHELL;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -32,7 +32,10 @@ use tokio::sync::mpsc;
 pub enum ShellCmd {
     Write(Vec<u8>),
     #[allow(dead_code)]
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
 }
 
 /// Supervisor-side handle to the shell task: a sender for inbound bytes.
@@ -58,9 +61,7 @@ pub fn spawn(
     let workdir = config.workdir.clone();
     let cols = config.term_cols;
     let rows = config.term_rows;
-    tokio::spawn(manage(
-        bin, args, workdir, cols, rows, cmd_tx, rx, shutdown,
-    ));
+    tokio::spawn(manage(bin, args, workdir, cols, rows, cmd_tx, rx, shutdown));
     ShellHandle { tx }
 }
 
@@ -87,7 +88,9 @@ async fn manage(
         let shutdown_g = shutdown.clone();
 
         let mut gen = tokio::task::spawn_blocking(move || {
-            run_generation(&bin_g, &args_g, &workdir_g, cols, rows, cmd_tx_g, gen_rx, shutdown_g)
+            run_generation(
+                &bin_g, &args_g, &workdir_g, cols, rows, cmd_tx_g, gen_rx, shutdown_g,
+            )
         });
 
         loop {
@@ -231,16 +234,7 @@ mod tests {
 
         let shutdown_g = shutdown.clone();
         let gen = tokio::task::spawn_blocking(move || {
-            run_generation(
-                "/bin/cat",
-                &[],
-                ".",
-                80,
-                24,
-                cmd_tx,
-                gen_rx,
-                shutdown_g,
-            )
+            run_generation("/bin/cat", &[], ".", 80, 24, cmd_tx, gen_rx, shutdown_g)
         });
 
         gen_tx.send(ShellCmd::Write(b"ping\n".to_vec())).unwrap();
@@ -251,7 +245,10 @@ mod tests {
         let found = tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(cmd) = cmd_rx.recv().await {
                 if let LinkCmd::SendBinary { chan, seq, data } = cmd {
-                    assert_eq!(chan, TERM_CHAN_SHELL, "shell output must carry the shell channel");
+                    assert_eq!(
+                        chan, TERM_CHAN_SHELL,
+                        "shell output must carry the shell channel"
+                    );
                     // §A.7: pin the first chunk's seq to 1 — the
                     // counter starts at 1, and increment-before-assign
                     // means the first read off the wire gets seq=1.
@@ -272,11 +269,13 @@ mod tests {
         })
         .await
         .expect("timed out waiting for shell echo");
-        assert!(found, "expected the written bytes to echo back from the pty");
+        assert!(
+            found,
+            "expected the written bytes to echo back from the pty"
+        );
         assert_eq!(first_seq, Some(1), "first shell read must carry seq=1");
 
         shutdown.store(true, Ordering::SeqCst);
         let _ = gen.await;
     }
 }
-

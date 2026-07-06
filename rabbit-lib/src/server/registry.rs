@@ -112,10 +112,7 @@ impl AgentRegistryInner {
 
     /// Forwarder — `state.live.entry(id).or_insert_with(...)`.
     /// Prefer `register` for new code that wants the notifier wakeup.
-    pub fn entry(
-        &self,
-        id: Uuid,
-    ) -> dashmap::mapref::entry::Entry<'_, Uuid, AgentHandle> {
+    pub fn entry(&self, id: Uuid) -> dashmap::mapref::entry::Entry<'_, Uuid, AgentHandle> {
         self.map.entry(id)
     }
 

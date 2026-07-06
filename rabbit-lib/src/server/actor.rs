@@ -45,12 +45,17 @@ pub enum Command {
     /// belong to (`TERM_CHAN_CLAUDE` for the claude pane, `TERM_CHAN_SHELL`
     /// for the `/shell` pane). The actor prepends `chan` on the wire so rabbit
     /// routes them to the right PTY.
-    SendKeys { chan: u8, data: Bytes },
+    SendKeys {
+        chan: u8,
+        data: Bytes,
+    },
     /// §D Milestone 5 (Phase B): ask rabbit for a current `ScreenSnapshot`
     /// of the given channel. Sent by the browser WS right after flushing
     /// the bounded replay buffer; rabbit responds with a `ScreenSnapshot`
     /// envelope that the browser applies verbatim.
-    SnapshotRequest { chan: u8 },
+    SnapshotRequest {
+        chan: u8,
+    },
     // §A.6 leader-based resize ------------------------------------------
     /// Browser tab asks to claim leadership for `connection_id` at
     /// `(cols, rows)`. Claims always succeed (transfers from a prior
@@ -65,7 +70,9 @@ pub enum Command {
     /// Leader voluntarily releases control. No-op if a different
     /// connection holds leadership. On success the actor broadcasts
     /// `LeaderChanged { leader_id: None, ... }`.
-    ReleaseLeader { connection_id: Uuid },
+    ReleaseLeader {
+        connection_id: Uuid,
+    },
     /// Browser tab asks to resize the kernel PTY to `(cols, rows)`. Only
     /// forwarded to rabbit when `connection_id` matches the current leader
     /// — non-leader resizes are dropped at the `ws_browser.rs` boundary
@@ -80,7 +87,9 @@ pub enum Command {
     /// server-side teardown). If the closing connection was the leader,
     /// the actor clears leadership and broadcasts `LeaderChanged { None }`.
     /// No auto-promotion: a new leader must explicitly claim.
-    ConnectionClosed { connection_id: Uuid },
+    ConnectionClosed {
+        connection_id: Uuid,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -540,9 +549,7 @@ async fn dispatch(
             // Defense in depth — non-leader resizes should already be
             // dropped at the ws_browser.rs boundary.
             if !handle.is_leader(connection_id) {
-                log::debug!(
-                    "actor dropped ResizeFromConnection from non-leader {connection_id}"
-                );
+                log::debug!("actor dropped ResizeFromConnection from non-leader {connection_id}");
                 return Ok(());
             }
             // Refresh the cached size and forward to rabbit (no broadcast
@@ -650,7 +657,10 @@ mod tests {
         // Mimic the dispatch arm: claim + update_state + publish_meta.
         handle.claim_leader(id, 120, 40);
         handle.update_state(AgentStateSnapshot {
-            term_size: Some(TermSize { cols: 120, rows: 40 }),
+            term_size: Some(TermSize {
+                cols: 120,
+                rows: 40,
+            }),
             ..AgentStateSnapshot::default()
         });
         handle.publish_meta(EnvelopeBody::LeaderChanged {
@@ -686,7 +696,10 @@ mod tests {
         let id = Uuid::from_bytes([2; 16]);
         handle.claim_leader(id, 100, 30);
         handle.update_state(AgentStateSnapshot {
-            term_size: Some(TermSize { cols: 100, rows: 30 }),
+            term_size: Some(TermSize {
+                cols: 100,
+                rows: 30,
+            }),
             ..AgentStateSnapshot::default()
         });
         let mut meta_rx = handle.subscribe_meta();

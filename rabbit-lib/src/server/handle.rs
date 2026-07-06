@@ -1,7 +1,5 @@
 use crate::server::actor::{Command, TurnOutcomeMsg};
-use crate::wire::{
-    AgentState, EnvelopeBody, StateFrame, TermFrame, TermSize, UsageSnapshot,
-};
+use crate::wire::{AgentState, EnvelopeBody, StateFrame, TermFrame, TermSize, UsageSnapshot};
 use anyhow::Result as AnyResult;
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -141,10 +139,7 @@ impl AgentHandle {
     /// concurrent `install_cmd_tx` can swap in a new sender at any
     /// time, and we want callers to send on the freshest one.
     pub fn cmd_tx(&self) -> mpsc::Sender<Command> {
-        self.cmd_tx
-            .lock()
-            .expect("cmd_tx poisoned")
-            .clone()
+        self.cmd_tx.lock().expect("cmd_tx poisoned").clone()
     }
 
     pub fn split_for_actor(self) -> (AgentHandle, mpsc::Sender<Command>, mpsc::Receiver<Command>) {
@@ -330,8 +325,7 @@ impl AgentHandle {
             return Err(anyhow::anyhow!("agent actor not running"));
         }
         if wait {
-            rx.await
-                .map_err(|_| anyhow::anyhow!("actor dropped"))
+            rx.await.map_err(|_| anyhow::anyhow!("actor dropped"))
         } else {
             let now = chrono::Utc::now();
             Ok(TurnOutcomeMsg {
@@ -361,8 +355,7 @@ impl AgentHandle {
             })
             .await
             .map_err(|_| anyhow::anyhow!("actor not running"))?;
-        rx.await
-            .map_err(|_| anyhow::anyhow!("actor dropped"))
+        rx.await.map_err(|_| anyhow::anyhow!("actor dropped"))
     }
 
     pub async fn compact(&self) -> AnyResult<()> {
@@ -571,7 +564,10 @@ mod tests {
         // blanking it would emit `LeaderChanged { leader_id: None, 0, 0 }`
         // — visibly wrong.
         let handle = h();
-        let initial = TermSize { cols: 120, rows: 40 };
+        let initial = TermSize {
+            cols: 120,
+            rows: 40,
+        };
         handle.update_state(AgentStateSnapshot {
             term_size: Some(initial),
             ..AgentStateSnapshot::default()
@@ -594,7 +590,10 @@ mod tests {
     fn update_state_term_size_refreshed_when_provided() {
         let handle = h();
         handle.update_state(AgentStateSnapshot {
-            term_size: Some(TermSize { cols: 120, rows: 40 }),
+            term_size: Some(TermSize {
+                cols: 120,
+                rows: 40,
+            }),
             ..AgentStateSnapshot::default()
         });
         handle.update_state(AgentStateSnapshot {
@@ -829,10 +828,7 @@ mod tests {
         };
         h.publish_meta(EnvelopeBody::ScreenSnapshot(snap.clone()));
 
-        let got = rx
-            .recv()
-            .await
-            .expect("subscriber receives ScreenSnapshot");
+        let got = rx.recv().await.expect("subscriber receives ScreenSnapshot");
         // Round-trip through serde to the exact wire shape the
         // browser JS would deserialize.
         let body = match &got {

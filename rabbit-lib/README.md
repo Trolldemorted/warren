@@ -1,36 +1,17 @@
 # rabbit-lib
 
-Remote-controllable [Claude](https://claude.ai) supervisor + matching
-server-side runtime. The library that powers the
-[Warren](https://github.com/warren/warren) agent supervisor: spawn
-`claude` in a PTY, parse its terminal output, observe its lifecycle
-via Claude's hook protocol, optionally record asciicast, and bridge
-everything to a single WebSocket. Pair with the matching server
-half to fan term-bytes and meta-envelopes out to many browser
-subscribers per agent.
+Server-side runtime for the rabbit agent-broker protocol. Embedders
+mount `ServerState::router()` into their own axum router to fan
+rabbit-supervisor WebSocket frames out to many browser subscribers
+per agent and persist the event stream via a `SessionStore` trait
+implementation.
 
-> **Status:** both halves of the rabbit protocol now live here — the
-> supervisor (`pty`, `observer`, `link`, `supervisor`, `recorder`,
-> `shell`, `trust`, `vt`, etc.) and the server half (`handle`,
-> `actor`, `registry`, `ws_rabbit`, `ws_browser`, `ws_shell`, `http`).
-> Embedders consume the lib through a `ServerState` constructed with
-> concrete `SessionStore` / `AuthBackend` implementations.
-> `rabbit-lib.md` documents the migration and the wire stability
-> contract.
+The supervisor half (PTY wrapping, lifecycle hooks, transcript
+tailing, the link layer) lives in the `rabbit` crate. This crate
+ships only the parts the server needs: the shared wire types
+(`wire`) and the broker runtime (`server`).
 
 ## Quick start
-
-```rust,no_run
-use rabbit_lib::{config::Config, supervisor};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cfg = Config::from_env()?;
-    supervisor::run(cfg).await
-}
-```
-
-Or, if you only want the protocol types without the PTY plumbing:
 
 ```rust
 use rabbit_lib::wire::{Envelope, EnvelopeBody, PROTOCOL_VERSION};
@@ -39,18 +20,6 @@ fn parse(text: &str) -> serde_json::Result<Envelope> {
     serde_json::from_str(text)
 }
 ```
-
-## Feature flags
-
-| Flag         | Default | What it gates                                                  |
-|--------------|---------|----------------------------------------------------------------|
-| `tls`        | **on**  | rustls TLS connector on `tokio-tungstenite` (for `wss://`)     |
-| `shell`      | off     | the bash PTY sidecar (`rabbit_lib::shell`)                     |
-| `asciicast`  | off     | the asciicast v2 recorder + http server                        |
-
-`tls` is on by default because production deployments normally
-reach the broker over TLS. Strip it with
-`default-features = false` if you terminate TLS upstream.
 
 ## Wire stability contract
 
@@ -75,13 +44,13 @@ exchange. The fourth is the surface a Warren-style embedder mounts.
 ## Embedding the server half
 
 The server half is intentionally a trait surface, not a concrete
-runtime, so the same supervisor code can be embedded in any host:
+runtime, so the same broker code can be embedded in any host:
 
 ```rust,no_run
 use std::sync::Arc;
 use rabbit_lib::server::{
-    AgentEventRecord, AuthBackend, AuthError, LogSink, ServerState, SessionStore,
-    StdLogSink, new_registry,
+    new_registry, AgentEventRecord, AuthBackend, AuthError, LogSink,
+    ServerState, SessionStore, StdLogSink,
 };
 use axum::http::HeaderMap;
 use uuid::Uuid;

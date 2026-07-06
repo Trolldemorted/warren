@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
-use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize};
+use portable_pty::{
+    native_pty_system, Child, ChildKiller, CommandBuilder, ExitStatus, MasterPty, PtySize,
+};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::Arc;

@@ -10,8 +10,8 @@
 //! usage line killed the task. These tests only pass because `run` now awaits
 //! `tx.send`.
 
-use rabbit_lib::observer::hooks::ObserverHandle;
-use rabbit_lib::observer::transcript::TranscriptTail;
+use rabbit::observer::hooks::ObserverHandle;
+use rabbit::observer::transcript::TranscriptTail;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 /// Build a tailer following `path` (as if `SessionStart` reported it), spawn
 /// it, and return the receiver of usage updates.
-fn start_tail(path: &std::path::Path) -> mpsc::Receiver<rabbit_lib::observer::transcript::UsageUpdate> {
+fn start_tail(path: &std::path::Path) -> mpsc::Receiver<rabbit::observer::transcript::UsageUpdate> {
     let handle = ObserverHandle::new();
     handle.ingest(
         "SessionStart",
@@ -69,7 +69,10 @@ async fn emits_usage_snapshot_from_valid_line() {
     assert_eq!(u.source, "transcript");
     assert_eq!(u.parse_errors, 0, "no malformed lines yet");
     let pct = u.context_pct_est.expect("context_pct_est present");
-    assert!((pct - 50.0).abs() < 0.01, "expected ~50% context, got {pct}");
+    assert!(
+        (pct - 50.0).abs() < 0.01,
+        "expected ~50% context, got {pct}"
+    );
 }
 
 #[tokio::test]
@@ -102,7 +105,10 @@ async fn parse_errors_increment_on_malformed_line() {
     );
     // Sonnet-4 uses the 1M window: 1000 / 1_000_000 → 0.1%.
     let pct = update.usage.context_pct_est.expect("context_pct_est");
-    assert!((pct - 0.1).abs() < 0.01, "expected ~0.1% for sonnet-4, got {pct}");
+    assert!(
+        (pct - 0.1).abs() < 0.01,
+        "expected ~0.1% for sonnet-4, got {pct}"
+    );
 }
 
 #[tokio::test]

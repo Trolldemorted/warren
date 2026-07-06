@@ -303,7 +303,10 @@ mod tests {
 
     #[test]
     fn refresh_just_under_half() {
-        assert!(should_refresh(Duration::hours(83) + Duration::seconds(59 * 60 + 59), ttl()));
+        assert!(should_refresh(
+            Duration::hours(83) + Duration::seconds(59 * 60 + 59),
+            ttl()
+        ));
     }
 
     #[test]

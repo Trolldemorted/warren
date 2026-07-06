@@ -1,6 +1,6 @@
 use crate::observer::hooks::ObserverHandle;
-use crate::wire::UsageSnapshot;
 use anyhow::Result;
+use rabbit_lib::wire::UsageSnapshot;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};

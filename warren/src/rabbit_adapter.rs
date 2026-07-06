@@ -13,7 +13,9 @@ use crate::auth::{lookup_agent_by_token, validate_admin_session_valid_only};
 use crate::db::Db;
 use crate::entity::agent_event;
 use rabbit_lib::server::{AgentEventRecord, AuthBackend, AuthError, SessionStore};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -140,20 +142,14 @@ enum AdminOrAgent {
 
 #[async_trait::async_trait]
 impl AuthBackend for WarAuthBackend {
-    async fn authenticate_agent(
-        &self,
-        headers: &axum::http::HeaderMap,
-    ) -> Result<Uuid, AuthError> {
+    async fn authenticate_agent(&self, headers: &axum::http::HeaderMap) -> Result<Uuid, AuthError> {
         match self.classify(headers).await? {
             AdminOrAgent::Agent(id) => Ok(id),
             AdminOrAgent::Admin => Err(AuthError::Invalid),
         }
     }
 
-    async fn authenticate_admin(
-        &self,
-        headers: &axum::http::HeaderMap,
-    ) -> Result<bool, AuthError> {
+    async fn authenticate_admin(&self, headers: &axum::http::HeaderMap) -> Result<bool, AuthError> {
         match self.classify(headers).await? {
             AdminOrAgent::Admin => Ok(true),
             AdminOrAgent::Agent(_) => Ok(false),
@@ -166,8 +162,7 @@ impl AuthBackend for WarAuthBackend {
 pub fn build_server_state(db: Db) -> Arc<rabbit_lib::server::ServerState> {
     let store: Arc<dyn SessionStore> = Arc::new(SeaOrmSessionStore::new(db.clone()));
     let auth: Arc<dyn AuthBackend> = Arc::new(WarAuthBackend::new(db.clone()));
-    let log_sink: Arc<dyn rabbit_lib::server::LogSink> =
-        Arc::new(rabbit_lib::server::StdLogSink);
+    let log_sink: Arc<dyn rabbit_lib::server::LogSink> = Arc::new(rabbit_lib::server::StdLogSink);
     Arc::new(rabbit_lib::server::ServerState {
         registry: rabbit_lib::server::registry::new_registry(),
         store,

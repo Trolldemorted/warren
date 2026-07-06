@@ -90,7 +90,9 @@ async fn claude_prompt(
     Path(id): Path<Uuid>,
     Json(req): Json<PromptReq>,
 ) -> ServerResult<impl IntoResponse> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     let handle = require_handle(&state, id).await?;
     if req.text.trim().is_empty() {
         return Err(ServerError::BadRequest("text required".into()));
@@ -117,7 +119,9 @@ async fn claude_usage(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> ServerResult<Json<UsageRes>> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     let handle = require_handle(&state, id).await?;
     let usage = handle.usage().await?;
     Ok(Json(UsageRes { usage }))
@@ -136,7 +140,9 @@ async fn claude_state(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> ServerResult<Json<StateRes>> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     let connected = state.registry.contains_key(&id);
     let snap: AgentStateSnapshot = if connected {
         require_handle(&state, id).await?.state().await?
@@ -163,7 +169,9 @@ async fn claude_clear(
     Path(id): Path<Uuid>,
     Json(req): Json<ClearReq>,
 ) -> ServerResult<StatusCode> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     let handle = require_handle(&state, id).await?;
     handle.clear(req.hard).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -174,7 +182,9 @@ async fn claude_compact(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> ServerResult<StatusCode> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     let handle = require_handle(&state, id).await?;
     handle.compact().await?;
     Ok(StatusCode::NO_CONTENT)
@@ -185,7 +195,9 @@ async fn claude_interrupt(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> ServerResult<StatusCode> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     let handle = require_handle(&state, id).await?;
     handle.interrupt().await?;
     Ok(StatusCode::NO_CONTENT)
@@ -203,7 +215,9 @@ async fn claude_restart(
     Path(id): Path<Uuid>,
     Json(req): Json<RestartReq>,
 ) -> ServerResult<StatusCode> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     let handle = require_handle(&state, id).await?;
     handle.restart(req.fresh).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -233,7 +247,9 @@ async fn claude_events(
     Path(id): Path<Uuid>,
     Query(q): Query<EventsQuery>,
 ) -> ServerResult<Json<Vec<EventRow>>> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     let limit = q.limit.unwrap_or(500).clamp(1, 5000) as u64;
     let rows = state.store.list_events_since(id, q.since, limit).await?;
     Ok(Json(
@@ -255,7 +271,9 @@ async fn claude_events_stream(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> ServerResult<impl IntoResponse> {
-    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
+    }
     if !state.registry.contains_key(&id) {
         return Err(ServerError::NotFound);
     }

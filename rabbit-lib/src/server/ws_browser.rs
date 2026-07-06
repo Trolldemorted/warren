@@ -1,9 +1,7 @@
 use crate::server::actor::Command;
-use crate::wire::{
-    Envelope, EnvelopeBody, TermFrame, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
-};
 use crate::server::handle::AgentHandle;
 use crate::server::registry::AgentRegistry;
+use crate::wire::{Envelope, EnvelopeBody, TermFrame, PROTOCOL_VERSION, TERM_CHAN_CLAUDE};
 
 use crate::server::{AuthError, ServerError, ServerState};
 use std::sync::Arc;
@@ -163,10 +161,7 @@ async fn handle(
     // server-side VT snapshot is exact, so the jiggle is gone.
     let snapshot_after = handle.clone();
     tokio::spawn(async move {
-        if let Err(e) = snapshot_after
-            .snapshot_request(TERM_CHAN_CLAUDE)
-            .await
-        {
+        if let Err(e) = snapshot_after.snapshot_request(TERM_CHAN_CLAUDE).await {
             log::debug!("snapshot request failed for agent {}: {e:?}", agent_id);
         }
     });
@@ -436,16 +431,10 @@ mod tests {
                 cmd: "usage".into(),
             },
             EnvelopeBody::Clear { hard: false },
-            EnvelopeBody::Resize {
-                cols: 80,
-                rows: 24,
-            },
+            EnvelopeBody::Resize { cols: 80, rows: 24 },
             EnvelopeBody::Repaint,
             EnvelopeBody::Restart { fresh: false },
-            EnvelopeBody::ClaimLeader {
-                cols: 80,
-                rows: 24,
-            },
+            EnvelopeBody::ClaimLeader { cols: 80, rows: 24 },
             EnvelopeBody::ReleaseLeader,
         ] {
             assert!(
@@ -473,10 +462,7 @@ mod tests {
         // flowing rabbit → warren → browser. They are never inbound, but
         // the drop-list must not match them either, so a future shape
         // change can't accidentally silence output for viewers.
-        for body in [
-            EnvelopeBody::Pong,
-            EnvelopeBody::Cleared { hard: false },
-        ] {
+        for body in [EnvelopeBody::Pong, EnvelopeBody::Cleared { hard: false }] {
             assert!(
                 !should_drop_for_viewer(&body),
                 "output frame {body:?} must not be matched by viewer drop-list"

@@ -10,15 +10,15 @@ use crate::observer::transcript::{default_transcript_path, TranscriptTail, Usage
 use crate::pty::{ExitKind, Pty, PtyExitStatus};
 use crate::respawn::{self, CrashWindow};
 use crate::shell::{self, ShellCmd, ShellHandle};
-use crate::wire::{
-    Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame,
-    TermSize, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
-};
 use anyhow::Result;
 use parking_lot::Mutex;
-use std::io::Write;
 use portable_pty::ChildKiller;
+use rabbit_lib::wire::{
+    Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame, TermSize,
+    TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+};
 use std::collections::VecDeque;
+use std::io::Write;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -115,7 +115,11 @@ pub async fn run(config: Config) -> Result<()> {
     // §D Milestone 5: optional debug shell PTY (`/agent/:id/shell`). Off by
     // default; when enabled it runs alongside claude on its own channel.
     let shell: Option<ShellHandle> = if config.enable_shell {
-        log::info!("shell enabled: bin={} args={:?}", config.shell_bin, config.shell_args);
+        log::info!(
+            "shell enabled: bin={} args={:?}",
+            config.shell_bin,
+            config.shell_args
+        );
         Some(shell::spawn(&config, cmd_tx.clone(), shutdown.clone()))
     } else {
         None
@@ -517,7 +521,11 @@ pub enum PtyEvt {
     /// "no bytes fed yet" semantics; the blocking PTY thread starts at
     /// `1` and increments before each emit, single-producer
     /// (`Ordering::Relaxed` is plenty).
-    Read { chan: u8, seq: u64, data: Vec<u8> },
+    Read {
+        chan: u8,
+        seq: u64,
+        data: Vec<u8>,
+    },
     Exited(PtyExitStatus),
     /// §D Milestone 5 (Phase B): a structured meta envelope generated inside
     /// the blocking PTY thread (currently only `ScreenSnapshot`). The driver
@@ -609,11 +617,10 @@ fn spawn_run_one(
     // consume the master, but it does gate future calls (callable
     // once). Wrapping it in `Arc<Mutex<...>>` lets the outer loop
     // share it concurrently.
-    let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
-        pty.master
-            .take_writer()
-            .map_err(|e| anyhow::anyhow!("taking pty writer before spawn_blocking: {e}"))?,
-    ));
+    let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+        Arc::new(Mutex::new(pty.master.take_writer().map_err(|e| {
+            anyhow::anyhow!("taking pty writer before spawn_blocking: {e}")
+        })?));
     // Clone for the blocking thread. The original `writer` is returned
     // through `SpawnResult` so the outer loop can lock it directly. The
     // `Mutex` serializes writes from both call sites.
@@ -1002,7 +1009,7 @@ async fn forward_observer_event(cmd_tx: &mpsc::Sender<LinkCmd>, ev: &ObserverEve
 
 fn build_envelope(ev: &ObserverEvent) -> Option<EnvelopeBody> {
     let raw = match ev.kind {
-        "session" => EnvelopeBody::Session(crate::wire::SessionInfo {
+        "session" => EnvelopeBody::Session(rabbit_lib::wire::SessionInfo {
             session_id: ev.session_id.clone().unwrap_or_default(),
             resumed: false,
         }),
@@ -1011,7 +1018,7 @@ fn build_envelope(ev: &ObserverEvent) -> Option<EnvelopeBody> {
             session_id: ev.session_id.clone(),
             reason: Some("session_end".into()),
         }),
-        "prompt_echo" => EnvelopeBody::PromptEcho(crate::wire::PromptEcho {
+        "prompt_echo" => EnvelopeBody::PromptEcho(rabbit_lib::wire::PromptEcho {
             prompt_id: ev.prompt_id.unwrap_or_else(Uuid::nil),
             text: ev
                 .raw
@@ -1121,10 +1128,7 @@ pub(crate) fn terminate_and_report_exited(pty: &mut Pty, evt_tx: &mpsc::Sender<P
 /// Extracted from the outer select! `LinkEvent::Binary` arm so the
 /// regression test can drive it without standing up the whole
 /// supervisor (which would require a live `claude` child).
-async fn write_claude_terminal_bytes(
-    data: &[u8],
-    active: Option<&ActiveSession>,
-) {
+async fn write_claude_terminal_bytes(data: &[u8], active: Option<&ActiveSession>) {
     use std::io::Write;
     let Some(active) = active else {
         log::debug!(
@@ -1291,7 +1295,7 @@ mod tests {
     use super::*;
     use crate::pty::ExitKind;
     use crate::respawn::CrashWindow;
-    use crate::wire::AgentState;
+    use rabbit_lib::wire::AgentState;
     use std::time::Duration;
 
     #[test]
@@ -1412,8 +1416,8 @@ mod tests {
     async fn terminate_and_report_exited_unblocks_driver_after_grace_kill() {
         use crate::pty::Pty;
         use std::sync::{Arc, Mutex};
-        let pty = Pty::spawn("/bin/sleep", &["2".into()], "/tmp", 80, 24, 4096)
-            .expect("spawn sleep");
+        let pty =
+            Pty::spawn("/bin/sleep", &["2".into()], "/tmp", 80, 24, 4096).expect("spawn sleep");
         let pty = Arc::new(Mutex::new(pty));
         let (evt_tx, mut evt_rx) = mpsc::channel::<PtyEvt>(8);
 
@@ -1510,15 +1514,8 @@ mod tests {
         // `sleep 60` will block on its own timer for a minute; we'll
         // never wait for it. The killer has to reach the child without
         // any help from the read() path.
-        let mut pty = Pty::spawn(
-            "/bin/sleep",
-            &["60".to_string()],
-            "/tmp",
-            80,
-            24,
-            4096,
-        )
-        .expect("spawn sleep");
+        let mut pty = Pty::spawn("/bin/sleep", &["60".to_string()], "/tmp", 80, 24, 4096)
+            .expect("spawn sleep");
 
         // Confirm the killer is a real, working handle. If the trait
         // method signature or semantics ever drift, this catches it
@@ -1645,7 +1642,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn interrupt_reaches_pty_via_shared_writer() {
         use crate::pty::Pty;
-        use crate::wire::{Envelope, EnvelopeBody, PROTOCOL_VERSION};
+        use rabbit_lib::wire::{Envelope, EnvelopeBody, PROTOCOL_VERSION};
 
         let mut pty = Pty::spawn(
             "/bin/cat",
@@ -1725,8 +1722,7 @@ mod tests {
         // Real PTY, /bin/cat as the child — matches the production shape.
         // `take_writer()` gives us the side of the master that the outer
         // supervisor's shared slot would hold.
-        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 4096)
-            .expect("spawn cat");
+        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 4096).expect("spawn cat");
         assert!(pty.alive(), "cat must be alive and waiting for input");
         let mut reader = pty.reader();
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
@@ -1740,8 +1736,8 @@ mod tests {
         // we're testing, but the struct requires one — borrow a real
         // one from a throwaway Pty rather than fabricating a dummy.
         let dummy_killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>> = {
-            let mut pty2 = Pty::spawn("/bin/true", &[], "/tmp", 80, 24, 1024)
-                .expect("spawn /bin/true");
+            let mut pty2 =
+                Pty::spawn("/bin/true", &[], "/tmp", 80, 24, 1024).expect("spawn /bin/true");
             let _ = pty2.terminate();
             let _ = pty2.wait();
             Arc::new(Mutex::new(pty2.killer))
@@ -1789,9 +1785,7 @@ mod tests {
         let mut got = Vec::new();
         let needle: &[u8] = b"hijklm";
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !got.windows(needle.len()).any(|w| w == needle)
-            && Instant::now() < deadline
-        {
+        while !got.windows(needle.len()).any(|w| w == needle) && Instant::now() < deadline {
             match echo_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(chunk) => got.extend_from_slice(&chunk),
                 Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
@@ -1842,10 +1836,7 @@ mod tests {
         // before we can observe the literal byte on the master side.
         let mut pty = Pty::spawn(
             "/bin/sh",
-            &[
-                "-c".to_string(),
-                "stty raw -echo; exec cat".to_string(),
-            ],
+            &["-c".to_string(), "stty raw -echo; exec cat".to_string()],
             "/tmp",
             80,
             24,
@@ -1861,8 +1852,8 @@ mod tests {
                 .expect("take_writer"),
         ));
         let dummy_killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>> = {
-            let mut pty2 = Pty::spawn("/bin/true", &[], "/tmp", 80, 24, 1024)
-                .expect("spawn /bin/true");
+            let mut pty2 =
+                Pty::spawn("/bin/true", &[], "/tmp", 80, 24, 1024).expect("spawn /bin/true");
             let _ = pty2.terminate();
             let _ = pty2.wait();
             Arc::new(Mutex::new(pty2.killer))
@@ -2015,8 +2006,7 @@ mod tests {
         use std::io::{Read, Write};
         use std::sync::mpsc as std_mpsc;
 
-        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 0)
-            .expect("spawn cat");
+        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 0).expect("spawn cat");
         let mut reader = pty.reader();
         let mut writer = pty.writer();
 
@@ -2046,9 +2036,7 @@ mod tests {
         // sit buffered forever waiting for '\n'. Two newlines give the
         // test deterministic coverage of "≥ 2 reads" without depending
         // on chunking.
-        writer
-            .write_all(b"hello\nworld\n")
-            .expect("write to pty");
+        writer.write_all(b"hello\nworld\n").expect("write to pty");
         writer.flush().ok();
 
         // Drain every PtyEvt::Read that lands in the next 1.5s, then
@@ -2083,12 +2071,7 @@ mod tests {
             seqs
         );
         for w in seqs.windows(2) {
-            assert_eq!(
-                w[1],
-                w[0] + 1,
-                "seq must be strictly +1; got {:?}",
-                seqs
-            );
+            assert_eq!(w[1], w[0] + 1, "seq must be strictly +1; got {:?}", seqs);
         }
     }
 
@@ -2104,12 +2087,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn snapshot_after_seq_reflects_last_fed_on_real_pty() {
         use crate::pty::Pty;
-        use crate::wire::ScreenSnapshotBody;
+        use rabbit_lib::wire::ScreenSnapshotBody;
         use std::io::{Read, Write};
         use std::sync::mpsc as std_mpsc;
 
-        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 0)
-            .expect("spawn cat");
+        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 0).expect("spawn cat");
         let mut reader = pty.reader();
         let mut writer = pty.writer();
 

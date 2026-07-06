@@ -13,10 +13,10 @@
 //! `ObserverHandle` state machine with the same hook events `claude` emits, and
 //! checks the real `supervisor::should_reject_prompt` gate at each step.
 
-use rabbit_lib::observer::hooks::ObserverHandle;
-use rabbit_lib::observer::state::State;
-use rabbit_lib::supervisor::{prompt_rejected_for, should_reject_prompt};
-use rabbit_lib::wire::{Envelope, EnvelopeBody};
+use rabbit::observer::hooks::ObserverHandle;
+use rabbit::observer::state::State;
+use rabbit::supervisor::{prompt_rejected_for, should_reject_prompt};
+use rabbit::wire::{Envelope, EnvelopeBody};
 
 fn prompt() -> EnvelopeBody {
     EnvelopeBody::Prompt {
@@ -29,7 +29,9 @@ fn interrupt() -> EnvelopeBody {
     EnvelopeBody::Interrupt
 }
 fn slash() -> EnvelopeBody {
-    EnvelopeBody::Slash { cmd: "usage".into() }
+    EnvelopeBody::Slash {
+        cmd: "usage".into(),
+    }
 }
 fn clear() -> EnvelopeBody {
     EnvelopeBody::Clear { hard: false }
@@ -56,8 +58,14 @@ fn milestone1_prompt_stop_roundtrip_gates_correctly() {
         "a prompt arriving while Running must be rejected"
     );
     // ...but control frames are always allowed through, even mid-turn.
-    assert!(!should_reject_prompt(h.latest_state(), &interrupt()), "ESC interrupt");
-    assert!(!should_reject_prompt(h.latest_state(), &slash()), "slash command");
+    assert!(
+        !should_reject_prompt(h.latest_state(), &interrupt()),
+        "ESC interrupt"
+    );
+    assert!(
+        !should_reject_prompt(h.latest_state(), &slash()),
+        "slash command"
+    );
     assert!(!should_reject_prompt(h.latest_state(), &clear()), "/clear");
 
     // Turn ends (Stop → Idle): prompts are accepted again.
@@ -89,12 +97,7 @@ fn control_frames_never_rejected_in_any_state() {
 
 #[test]
 fn prompts_only_rejected_in_running_state() {
-    for state in [
-        State::Starting,
-        State::Idle,
-        State::Ended,
-        State::Dead,
-    ] {
+    for state in [State::Starting, State::Idle, State::Ended, State::Dead] {
         assert!(
             !should_reject_prompt(state, &prompt()),
             "prompt must be accepted in non-Running state {state:?}"

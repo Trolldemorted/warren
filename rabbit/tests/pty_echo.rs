@@ -7,7 +7,7 @@
 mod common;
 
 use common::{read_until, spawn_fake_tui, spawn_reader};
-use rabbit_lib::pty::Pty;
+use rabbit::pty::Pty;
 use std::io::Write;
 use std::time::Duration;
 
@@ -64,19 +64,37 @@ fn multiple_writes_all_arrive_in_order() {
 fn replay_buffer_snapshots_pushed_bytes_under_cap() {
     // No child needed for the replay buffer contract; spawn a short-lived one
     // just to obtain a Pty. The replay VecDeque is independent of the child.
-    let pty = Pty::spawn("/bin/sh", &["-c".into(), "sleep 0.2".into()], ".", 80, 24, 4096)
-        .expect("spawn sh");
+    let pty = Pty::spawn(
+        "/bin/sh",
+        &["-c".into(), "sleep 0.2".into()],
+        ".",
+        80,
+        24,
+        4096,
+    )
+    .expect("spawn sh");
     pty.push_replay(b"hello ");
     pty.push_replay(b"world");
     let snap = pty.snapshot_replay();
-    assert_eq!(&snap[..], b"hello world", "snapshot must return pushed bytes");
+    assert_eq!(
+        &snap[..],
+        b"hello world",
+        "snapshot must return pushed bytes"
+    );
 }
 
 #[test]
 fn replay_buffer_is_bounded_by_cap() {
     let cap = 8usize;
-    let pty = Pty::spawn("/bin/sh", &["-c".into(), "sleep 0.2".into()], ".", 80, 24, cap)
-        .expect("spawn sh");
+    let pty = Pty::spawn(
+        "/bin/sh",
+        &["-c".into(), "sleep 0.2".into()],
+        ".",
+        80,
+        24,
+        cap,
+    )
+    .expect("spawn sh");
     // Push well past the cap; the ring must never exceed it.
     for _ in 0..10 {
         pty.push_replay(b"XXXX");

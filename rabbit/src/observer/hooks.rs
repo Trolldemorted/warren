@@ -1,7 +1,7 @@
 use crate::observer::state::State;
-use crate::wire::UsageSnapshot;
 use anyhow::Result;
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+use rabbit_lib::wire::UsageSnapshot;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;

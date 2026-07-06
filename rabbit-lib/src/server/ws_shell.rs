@@ -9,8 +9,8 @@
 //! The same wire byte (TER CHAN_SHELL = 0x02) is used to route frames to
 //! the right PTY on the rabbit side; this handler filters on that byte.
 
-use crate::wire::TermFrame;
 use crate::server::registry::AgentRegistry;
+use crate::wire::TermFrame;
 
 use crate::server::{AuthError, ServerError, ServerState};
 use std::sync::Arc;

@@ -23,9 +23,9 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use uuid::Uuid;
 
-use rabbit_lib::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
-use rabbit_lib::meta_ring::MetaRing;
-use rabbit_lib::wire::{
+use rabbit::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
+use rabbit::meta_ring::MetaRing;
+use rabbit::wire::{
     Envelope, EnvelopeBody, LogLine, StateFrame, TermSize, UsageSnapshot, PROTOCOL_VERSION,
 };
 
@@ -94,7 +94,13 @@ fn log_line() -> EnvelopeBody {
 
 /// Build a `Link` wired to `127.0.0.1:{port}` and spawn `run()`.
 /// Returns the cmd sender, event receiver, and shared meta ring.
-fn spawn_link(port: u16) -> (mpsc::Sender<LinkCmd>, mpsc::Receiver<LinkEvent>, Arc<MetaRing>) {
+fn spawn_link(
+    port: u16,
+) -> (
+    mpsc::Sender<LinkCmd>,
+    mpsc::Receiver<LinkEvent>,
+    Arc<MetaRing>,
+) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<LinkCmd>(128);
     let (event_tx, event_rx) = mpsc::channel::<LinkEvent>(128);
     let ring = Arc::new(MetaRing::new(262_144));
@@ -131,7 +137,10 @@ async fn replays_unacked_meta_with_original_seq_after_drop() {
     // --- first connection: send three meta events, record their seqs ---
     let mut c1 = accept(&listener).await;
     let hello = next_env(&mut c1).await;
-    assert!(matches!(hello.body, EnvelopeBody::Hello(_)), "first frame is Hello");
+    assert!(
+        matches!(hello.body, EnvelopeBody::Hello(_)),
+        "first frame is Hello"
+    );
 
     cmd_tx.send(LinkCmd::SendMeta(state("idle"))).await.unwrap();
     cmd_tx.send(LinkCmd::SendMeta(usage())).await.unwrap();
@@ -224,8 +233,14 @@ async fn ack_trims_ring_so_acked_events_are_not_replayed() {
 
     // The very next frame is a fresh live event — proving exactly one frame was
     // replayed (had the acked prefix survived, seq {a,b} would arrive first).
-    cmd_tx.send(LinkCmd::SendMeta(state("running"))).await.unwrap();
+    cmd_tx
+        .send(LinkCmd::SendMeta(state("running")))
+        .await
+        .unwrap();
     let live = next_env(&mut c2).await;
-    assert!(live.seq > replayed.seq, "live event follows the single replay");
+    assert!(
+        live.seq > replayed.seq,
+        "live event follows the single replay"
+    );
     assert!(matches!(live.body, EnvelopeBody::State(_)));
 }

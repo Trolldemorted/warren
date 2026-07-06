@@ -3,63 +3,31 @@ name = "rabbit-lib"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Remote-controllable Claude supervisor + matching server-side runtime (WARREN)"
+description = "Server-side runtime for the rabbit agent-broker protocol (consumed by warren)"
 license = "MIT OR Apache-2.0"
 publish = true
 repository = "https://github.com/Trolldemorted/warren"
 homepage = "https://github.com/Trolldemorted/warren"
 readme = "README.md"
-keywords = ["claude", "pty", "agent", "headless", "websocket"]
+keywords = ["claude", "websocket", "agent-broker", "headless"]
 categories = ["api-bindings", "asynchronous", "development-tools"]
 
 [package.metadata.docs.rs]
 all-features = true
 
-# `rabbit-hook` is the stdin→HTTP hook shim that Claude's settings.json
-# points at. Lives in rabbit-lib so the .claude/settings.json install
-# path (which embeds the literal binary name `rabbit-hook`) stays
-# stable across the supervisor↔library split.
-[[bin]]
-name = "rabbit-hook"
-path = "src/bin/rabbit-hook.rs"
-
-# `tls` enables the rustls TLS connector on `tokio-tungstenite`, which is
-# what makes `https://` and `wss://` URLs work in `WARREN_URL`. Without it,
-# `tokio_tungstenite::connect_async` returns "TLS support not compiled in"
-# on every attempt and the link task would loop forever on a permanent
-# misconfiguration. Default-on because production rabbit pods normally
-# reach warren over TLS; strip it when a TLS-terminating reverse proxy
-# fronts both services and only `http://` is in use.
-[features]
-default = ["tls"]
-tls = ["tokio-tungstenite/rustls-tls-webpki-roots"]
-shell = []             # the bash PTY sidecar (`rabbit_lib::shell`)
-asciicast = []         # the asciicast v2 recorder + http_server
-
 [dependencies]
 axum.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
-rustls.workspace = true
-portable-pty.workspace = true
+async-trait = "0.1"
+bytes.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
 futures-util.workspace = true
-parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
-chrono.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
-simple_logger.workspace = true
-bytes.workspace = true
-dashmap.workspace = true
 tokio-stream.workspace = true
-async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-avt = "0.18"
 async-stream = "0.3"
-
-[dev-dependencies]
-tempfile = "3"
-tower = { workspace = true, features = ["util"] }
