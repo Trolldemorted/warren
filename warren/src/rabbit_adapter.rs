@@ -104,8 +104,8 @@ impl WarAuthBackend {
     /// bearer-token auth (admin or agent). Used by the trait methods to
     /// share the precedence logic.
     async fn classify(&self, headers: &axum::http::HeaderMap) -> Result<AdminOrAgent, AuthError> {
-        use axum::http::header;
-        if let Some(cookie) = crate::auth::read_session_cookie(headers) {
+        let (cookie, bearer) = crate::auth::lookup_credentials(headers);
+        if let Some(cookie) = cookie {
             if validate_admin_session_valid_only(&self.db, &cookie)
                 .await
                 .map_err(|e| AuthError::Internal(e.to_string()))?
@@ -113,18 +113,14 @@ impl WarAuthBackend {
                 return Ok(AdminOrAgent::Admin);
             }
         }
-        if let Some(token) = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-        {
-            if validate_admin_session_valid_only(&self.db, token)
+        if let Some(token) = bearer {
+            if validate_admin_session_valid_only(&self.db, &token)
                 .await
                 .map_err(|e| AuthError::Internal(e.to_string()))?
             {
                 return Ok(AdminOrAgent::Admin);
             }
-            if let Some(agent) = lookup_agent_by_token(&self.db, token)
+            if let Some(agent) = lookup_agent_by_token(&self.db, &token)
                 .await
                 .map_err(|e| AuthError::Internal(e.to_string()))?
             {

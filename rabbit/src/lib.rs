@@ -24,32 +24,12 @@ pub mod vt;
 
 pub use rabbit_lib::wire;
 
-use std::path::Path;
-
-#[derive(PartialEq, Eq)]
-enum Mode {
-    Supervisor,
-    HookShim,
-}
-
-fn detect_mode(argv0: &str, argv1: Option<&str>) -> Mode {
-    let base = Path::new(argv0)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if base == "rabbit-hook" || argv1 == Some("hook-shim") {
-        Mode::HookShim
-    } else {
-        Mode::Supervisor
-    }
-}
-
 /// Synchronous entry point for the `rabbit` supervisor binary.
 ///
-/// Installs a backtrace-capturing panic hook, initializes logging, detects the
-/// run mode from `argv`, builds the Tokio runtime, and drives the supervisor to
-/// completion. On error it logs, prints to stderr, and exits the process with a
-/// non-zero code (so `main` stays a one-liner).
+/// Installs a backtrace-capturing panic hook, initializes logging, builds the
+/// Tokio runtime, and drives the supervisor to completion. On error it logs,
+/// prints to stderr, and exits the process with a non-zero code (so `main`
+/// stays a one-liner).
 pub fn run() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
@@ -60,9 +40,6 @@ pub fn run() -> anyhow::Result<()> {
     if let Err(e) = simple_logger::init_with_env() {
         eprintln!("error: failed to initialize logger: {e:?}");
     }
-
-    let argv0 = std::env::args().next().unwrap_or_default();
-    let mode = detect_mode(&argv0, std::env::args().nth(1).as_deref());
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -76,21 +53,8 @@ pub fn run() -> anyhow::Result<()> {
     };
 
     let result = runtime.block_on(async move {
-        match mode {
-            Mode::Supervisor => {
-                let cfg = config::Config::from_env()?;
-                supervisor::run(cfg).await
-            }
-            Mode::HookShim => {
-                // HookShim is its own binary at src/bin/rabbit-hook.rs.
-                // If you ever invoke it through the rabbit binary, that's a
-                // bug — bail with a clear error.
-                Err(anyhow::anyhow!(
-                    "rabbit-hook must be invoked as the `rabbit-hook` binary, not via {}",
-                    argv0
-                ))
-            }
-        }
+        let cfg = config::Config::from_env()?;
+        supervisor::run(cfg).await
     });
 
     if let Err(e) = result {

@@ -33,8 +33,8 @@ API. We commit to:
    `ScreenSnapshotBody::after_seq` retains `#[serde(default)]` for
    v1-readability.
 3. **Binary frame layout stays `<chan:1> <seq:8 BE u64> <bytes…>`** —
-   the seq-numbered snapshot protocol described in
-   `seq-numbered-snapshot-protocol.md`.
+   the seq-numbered snapshot protocol (each frame carries the producer's
+   monotonic `seq`; subscribers replay from `since_seq` until they ack).
 4. **HTTP routes mounted by `ServerState::router()` keep the same
    paths and shapes.**
 

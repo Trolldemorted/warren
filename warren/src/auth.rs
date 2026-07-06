@@ -82,18 +82,9 @@ where
         let state = crate::AppState::from_ref(state);
         let ttl_hours = state.config.session_ttl_hours;
 
-        if let Some(cookie) = parts
-            .headers
-            .get_all(header::COOKIE)
-            .iter()
-            .filter_map(|h| h.to_str().ok())
-            .flat_map(|s| s.split(';'))
-            .map(|s| s.trim())
-            .find_map(|kv| {
-                kv.strip_prefix(&format!("{SESSION_COOKIE}="))
-                    .map(|v| v.to_string())
-            })
-        {
+        let (cookie, bearer) = lookup_credentials(&parts.headers);
+
+        if let Some(cookie) = cookie {
             // Cookie path: validate + slide forward when <50% of
             // `ttl_hours` remains. The cookie-refresh middleware in
             // `main.rs` runs the same check independently and is
@@ -107,22 +98,17 @@ where
             }
         }
 
-        if let Some(token) = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-        {
+        if let Some(token) = bearer {
             // Bearer-token path: no cookie to refresh, so we use a
             // separate validity-only helper. Even if the DB session is
             // close to expiring, an API client should keep working
             // until the token actually dies — the threshold+refresh
             // dance is a browser UX optimization, not a security
             // boundary.
-            if validate_admin_session_valid_only(&state.db, token).await? {
+            if validate_admin_session_valid_only(&state.db, &token).await? {
                 return Ok(AuthContext::Admin(AdminUser));
             }
-            if let Some(a) = lookup_agent_by_token(&state.db, token).await? {
+            if let Some(a) = lookup_agent_by_token(&state.db, &token).await? {
                 return Ok(AuthContext::Agent(AgentAuth(a)));
             }
         }
@@ -227,43 +213,20 @@ pub async fn lookup_agent_by_token(db: &Db, token: &str) -> Result<Option<agent:
         .await?)
 }
 
+/// Precedence-ordered credential lookup shared by both the in-process
+/// `AuthContext` extractor and the `rabbit-lib` `AuthBackend` adapter.
+/// Returns `(cookie, bearer)` — both may be present, callers pick the
+/// first one that validates.
+pub fn lookup_credentials(headers: &HeaderMap) -> (Option<String>, Option<String>) {
+    (read_session_cookie(headers), bearer_token(headers))
+}
+
 pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(|s| s.to_string())
-}
-
-#[allow(dead_code)]
-pub async fn extract_agent_token(
-    db: &Db,
-    headers: &HeaderMap,
-) -> Result<Option<AgentAuth>, AppError> {
-    if let Some(token) = bearer_token(headers) {
-        if validate_admin_session_valid_only(db, &token).await? {
-            return Err(AppError::Unauthorized);
-        }
-        if let Some(agent) = lookup_agent_by_token(db, &token).await? {
-            return Ok(Some(AgentAuth(agent)));
-        }
-    }
-    Ok(None)
-}
-
-#[allow(dead_code)]
-pub async fn extract_admin_session(db: &Db, headers: &HeaderMap) -> Result<bool, AppError> {
-    if let Some(token) = bearer_token(headers) {
-        if validate_admin_session_valid_only(db, &token).await? {
-            return Ok(true);
-        }
-    }
-    if let Some(cookie) = read_session_cookie(headers) {
-        if validate_admin_session_valid_only(db, &cookie).await? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]
