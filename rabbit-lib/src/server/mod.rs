@@ -27,6 +27,8 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
+use self::registry::AgentRegistry;
+
 // ----- Records returned by the storage trait -----
 
 /// A single event row returned by [`SessionStore::list_events_since`].
@@ -121,7 +123,7 @@ pub enum AuthError {
 /// status code so the embedder doesn't have to write a per-handler
 /// conversion.
 #[derive(Debug, thiserror::Error)]
-pub enum ServerError {
+pub(crate) enum ServerError {
     #[error(transparent)]
     Auth(#[from] AuthError),
     #[error("not found")]
@@ -185,7 +187,7 @@ impl axum::response::IntoResponse for ServerError {
 }
 
 /// Convenience alias for the lib's HTTP handler return type.
-pub type ServerResult<T> = std::result::Result<T, ServerError>;
+pub(crate) type ServerResult<T> = std::result::Result<T, ServerError>;
 
 /// Surface for the actor's `log` calls. Default impl is `log::log!`.
 /// Embedders can swap in a structured logger.
@@ -233,15 +235,17 @@ impl ServerState {
 // Server modules — the implementation that owns the per-agent live
 // handles and the WebSocket / HTTP surfaces that front the supervisor
 // half of the lib.
-pub mod actor;
-pub mod handle;
-pub mod http;
+//
+// `registry` stays pub because embedders construct and reference
+// `AgentRegistry` (warren's `/agent/:id/claude/history` route takes
+// `&AgentRegistry`). The other five are crate-internal: their public
+// surfaces are reached only through `ServerState::router`, which is
+// what embedders actually wire up.
 pub mod registry;
-pub mod ws_browser;
-pub mod ws_rabbit;
-pub mod ws_shell;
 
-// Placeholder re-exports so the rest of the public API surface
-// compiles. Phase 2 wires these to the real implementations.
-pub use handle::{AgentHandle, AgentStateSnapshot};
-pub use registry::{new_registry, AgentRegistry};
+pub(crate) mod actor;
+pub(crate) mod handle;
+pub(crate) mod http;
+pub(crate) mod ws_browser;
+pub(crate) mod ws_rabbit;
+pub(crate) mod ws_shell;

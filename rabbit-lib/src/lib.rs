@@ -17,33 +17,31 @@
 //! [`run`] and the hook-shim loop respectively, kept as separate bins
 //! so the on-disk artifacts don't change.
 
-pub mod config;
-pub mod health;
-pub mod hooks_install;
-pub mod http_server;
+// Modules that are part of the library's external API. `server` is the
+// only consumer-facing surface (warren embeds it); the others are pub so
+// the crate's `tests/*.rs` integration suites can reach them — those
+// tests are external to the library crate and so can't see `pub(crate)`
+// items.
 pub mod input;
 pub mod link;
 pub mod meta_ring;
 pub mod observer;
 pub mod pty;
-pub mod recorder;
-pub mod respawn;
-pub mod shell;
+pub mod server;
 pub mod supervisor;
 pub mod trust;
 pub mod vt;
 pub mod wire;
 
-// `server` is gated on the default feature set because it pulls in
-// `axum` router builders that downstream lib-only consumers may want to
-// skip. It's enabled by default (no feature flag needed).
-pub mod server;
-
-// Re-export the trait seams external embedders must implement.
-pub use server::{
-    AgentEventRecord, AgentHandle, AgentRegistry, AuthBackend, AuthError, LogSink, SessionStore,
-    StdLogSink,
-};
+// Crate-internal. None of these are reached by external consumers
+// (warren, integration tests, or the `rabbit` binary beyond `run()`).
+pub(crate) mod config;
+pub(crate) mod health;
+pub(crate) mod hooks_install;
+pub(crate) mod http_server;
+pub(crate) mod recorder;
+pub(crate) mod respawn;
+pub(crate) mod shell;
 
 use anyhow::Result;
 use std::path::Path;

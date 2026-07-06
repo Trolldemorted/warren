@@ -169,7 +169,7 @@ pub fn build_server_state(db: Db) -> Arc<rabbit_lib::server::ServerState> {
     let log_sink: Arc<dyn rabbit_lib::server::LogSink> =
         Arc::new(rabbit_lib::server::StdLogSink);
     Arc::new(rabbit_lib::server::ServerState {
-        registry: rabbit_lib::server::new_registry(),
+        registry: rabbit_lib::server::registry::new_registry(),
         store,
         auth,
         log_sink,
