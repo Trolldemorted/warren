@@ -47,24 +47,6 @@ pub struct Config {
     /// Binary to run for the shell PTY. Defaults to `/bin/bash -i`.
     pub shell_bin: String,
     pub shell_args: Vec<String>,
-    /// §D Milestone 5: record every claude session to asciicast v2 `.cast`
-    /// files in `asciicast_dir`. Drives the `/agent/:id/claude/history`
-    /// page on the warren side. Disabled by default — the recording is
-    /// off the critical path and only useful when an operator wants to
-    /// inspect past sessions.
-    pub enable_asciicast: bool,
-    /// Where to write `.cast` files. Defaults to `<workdir>/.claude/casts`.
-    /// Created on first start if missing.
-    pub asciicast_dir: PathBuf,
-    /// Per-session size cap in bytes. When a single `<id>.cast` would
-    /// exceed this, it rotates to `<id>.cast.0`, `.cast.1`, … and the
-    /// oldest segment is evicted. Defaults to 10 MiB (TODO §D retention
-    /// policy).
-    pub asciicast_bytes_cap: u64,
-    /// TCP port for the recorder HTTP server (serves `.cast` files to
-    /// warren). Distinct from `health_port` so k8s probes and operator
-    /// fetches don't share a port.
-    pub recorder_http_port: u16,
 }
 
 impl Config {
@@ -133,21 +115,6 @@ impl Config {
             .split_whitespace()
             .map(String::from)
             .collect();
-        let enable_asciicast = env::var("ENABLE_ASCIICAST")
-            .ok()
-            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
-            .unwrap_or(false);
-        let asciicast_dir = env::var("ASCIICAST_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(&workdir).join(".claude").join("casts"));
-        let asciicast_bytes_cap = env::var("ASCIICAST_BYTES_CAP")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10 * 1024 * 1024);
-        let recorder_http_port = env::var("RECORDER_HTTP_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(7790);
         Ok(Self {
             warren_url,
             agent_token,
@@ -169,10 +136,6 @@ impl Config {
             enable_shell,
             shell_bin,
             shell_args,
-            enable_asciicast,
-            asciicast_dir,
-            asciicast_bytes_cap,
-            recorder_http_port,
         })
     }
 }

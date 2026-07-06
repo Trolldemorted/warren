@@ -2,13 +2,10 @@ use crate::auth::SESSION_COOKIE;
 use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
 use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew};
-use crate::routes::recording::{
-    cast_url, fetch_session_list, recorder_url_for, short_session_id, SessionRecordings,
-};
 use crate::templates::{
-    AgentClaudeHistoryListTemplate, AgentClaudeHistoryPlayTemplate, AgentClaudeTemplate,
-    AgentFormTemplate, AgentsTemplate, AgentShellTemplate, ChannelFormTemplate, ChannelsTemplate,
-    CommsInjectTemplate, CommsRow, CommsTemplate, Flash, LoginTemplate, MigrationsTemplate,
+    AgentClaudeTemplate, AgentFormTemplate, AgentsTemplate, AgentShellTemplate,
+    ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate, CommsRow, CommsTemplate, Flash,
+    LoginTemplate, MigrationsTemplate,
 };
 use crate::{auth, AppState};
 use askama::Template;
@@ -76,15 +73,6 @@ pub fn router() -> Router<AppState> {
         .route("/agent/:id/claude", get(agent_claude_page))
         // §D Milestone 5: secondary bash PTY page.
         .route("/agent/:id/shell", get(agent_shell_page))
-        // §D Milestone 5: asciicast recording history.
-        .route(
-            "/agent/:id/claude/history",
-            get(agent_claude_history_list_page),
-        )
-        .route(
-            "/agent/:id/claude/history/:session",
-            get(agent_claude_history_play_page),
-        )
 }
 
 async fn root() -> Redirect {
@@ -930,21 +918,11 @@ async fn agent_claude_page(
     match crate::db_ops::get_agent(&state.db, id).await {
         Ok(Some(agent)) => {
             let connected = state.live.registry.contains_key(&id);
-            // §D Milestone 5: show the "→ history" link only when rabbit
-            // actually advertised a recorder URL on its most recent Hello.
-            // Without this, dead agents get a guaranteed-404 link.
-            let recorder_enabled = state
-                .live
-                .registry
-                .get(&id)
-                .and_then(|h| h.recorder_url())
-                .is_some();
             render(AgentClaudeTemplate {
                 nav: Some("agents"),
                 flash: None,
                 agent,
                 connected,
-                recorder_enabled,
             })
         }
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -973,115 +951,4 @@ async fn agent_shell_page(
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => err_page(e),
     }
-}
-
-/// §D Milestone 5: `/agent/:id/claude/history` — list view of every
-/// recorded session for this agent, most recent first. Pulled live from
-/// rabbit's `/sessions` endpoint over the recorder URL the agent's Hello
-/// advertised. Empty list = no errors; `recorder_error` = recorder not
-/// configured or HTTP failed (template renders a friendly error block).
-async fn agent_claude_history_list_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    axum::extract::Path(id): axum::extract::Path<Uuid>,
-) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
-    }
-    let agent = match crate::db_ops::get_agent(&state.db, id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => return err_page(e),
-    };
-    let recorder_url = match recorder_url_for(&state.live.registry, id) {
-        Ok(u) => u,
-        Err(e) => {
-            return render(AgentClaudeHistoryListTemplate {
-                title: Some("history"),
-                nav: Some("agents"),
-                flash: None,
-                agent,
-                sessions: Vec::new(),
-                recorder_error: Some(e.to_string()),
-            });
-        }
-    };
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let mut sessions: Vec<SessionRecordings> = match fetch_session_list(
-        &http,
-        &recorder_url,
-        &agent.authtoken,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            log::warn!(
-                "history list: recorder fetch failed for agent {}: {e:?}",
-                agent.id
-            );
-            return render(AgentClaudeHistoryListTemplate {
-                title: Some("history"),
-                nav: Some("agents"),
-                flash: None,
-                agent,
-                sessions: Vec::new(),
-                recorder_error: Some(format!("recorder fetch failed: {e}")),
-            });
-        }
-    };
-    // Cheap per-session total recompute (rabbit doesn't compute it; we
-    // sum on deserialize so the template just renders the field).
-    for s in sessions.iter_mut() {
-        s.recompute_total();
-    }
-    render(AgentClaudeHistoryListTemplate {
-        title: Some("history"),
-        nav: Some("agents"),
-        flash: None,
-        agent,
-        sessions,
-        recorder_error: None,
-    })
-}
-
-/// §D Milestone 5: `/agent/:id/claude/history/:session` — single-session
-/// play view. Renders an `<asciinema-player>` pointing at the recorder's
-/// `/casts/{session}.cast`. The session id is taken from the URL and
-/// embedded verbatim — validation already happened via the
-/// `agent_claude_history_list_page` listing.
-async fn agent_claude_history_play_page(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    axum::extract::Path((id, session)): axum::extract::Path<(Uuid, String)>,
-) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
-    }
-    let agent = match crate::db_ops::get_agent(&state.db, id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => return err_page(e),
-    };
-    let recorder_url = match recorder_url_for(&state.live.registry, id) {
-        Ok(u) => u,
-        Err(_) => {
-            // No recorder → can't play. Send the user back to the list
-            // page where the empty-state explains why.
-            return Redirect::to(&format!("/agent/{}/claude/history", agent.id)).into_response();
-        }
-    };
-    let _ = short_session_id(&session); // touch so the helper survives dead-code lint if unused
-    let url = cast_url(&recorder_url, &session);
-    render(AgentClaudeHistoryPlayTemplate {
-        title: Some("history"),
-        nav: Some("agents"),
-        flash: None,
-        agent,
-        session_id: session,
-        cast_url: url,
-    })
 }

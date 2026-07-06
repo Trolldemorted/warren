@@ -45,10 +45,6 @@ pub struct AgentHandle {
     /// disconnected (no-receiver) mpsc, and every action button click
     /// on that tab would 500 until the tab reconnected.
     cmd_tx: Arc<Mutex<mpsc::Sender<Command>>>,
-    /// §D Milestone 5: recorder base URL advertised by rabbit in its Hello
-    /// envelope. `None` when recording is disabled or rabbit hasn't
-    /// (re)connected with a fresh Hello yet.
-    recorder_url: Arc<Mutex<Option<String>>>,
     /// §A.6 leader-based resize: identity of the browser tab whose size
     /// drives the kernel PTY. None = no leader (every browser is a follower;
     /// no one's resize reaches rabbit). Stored in a separate mutex so the
@@ -71,12 +67,6 @@ pub struct AgentStateSnapshot {
     pub session_id: Option<String>,
     pub claude_version: Option<String>,
     pub last_usage: UsageSnapshot,
-    /// §D Milestone 5: latest recorder URL we know about for this agent.
-    /// None = recorder disabled, recording not advertised by rabbit, or no
-    /// Hello received yet. The history page checks this before linking to
-    /// `recorder_url` — showing the page when the URL is unknown would
-    /// 404 every click.
-    pub recorder_url: Option<String>,
     /// §A.6 leader-based resize: most recent PTY size advertised by rabbit
     /// (config-time at startup, then refreshed via subsequent leader-driven
     /// `Resize` envelopes through the rabbit link). None until the first
@@ -98,7 +88,6 @@ impl Default for AgentStateSnapshot {
                 source: "transcript".to_string(),
                 ..Default::default()
             },
-            recorder_url: None,
             term_size: None,
         }
     }
@@ -116,7 +105,6 @@ impl AgentHandle {
             term_ring: Arc::new(Mutex::new(VecDeque::with_capacity(TERM_RING_MAX_CHUNKS))),
             meta_tx,
             cmd_tx: Arc::new(Mutex::new(cmd_tx)),
-            recorder_url: Arc::new(Mutex::new(None)),
             leader: Arc::new(Mutex::new(None)),
         }
     }
@@ -131,7 +119,6 @@ impl AgentHandle {
             term_ring: Arc::new(Mutex::new(VecDeque::with_capacity(TERM_RING_MAX_CHUNKS))),
             meta_tx,
             cmd_tx: Arc::new(Mutex::new(cmd_tx)),
-            recorder_url: Arc::new(Mutex::new(None)),
             leader: Arc::new(Mutex::new(None)),
         }
     }
@@ -192,7 +179,6 @@ impl AgentHandle {
         let usage = new_state.last_usage.clone();
         let has_usage =
             new_state.last_usage.input_tokens > 0 || new_state.last_usage.output_tokens > 0;
-        let recorder_url = new_state.recorder_url.clone();
         let term_size = new_state.term_size;
         {
             let mut g = self.state.lock().expect("state mutex poisoned");
@@ -202,17 +188,9 @@ impl AgentHandle {
             if has_usage {
                 g.last_usage = usage;
             }
-            // Update recorder_url whenever the snapshot carries one. Keeps
-            // the latest advertised URL after a Hello refresh, and stays
-            // sticky when subsequent snapshots omit the field (a state
-            // update from rabbit shouldn't blank the URL).
-            if recorder_url.is_some() {
-                g.recorder_url = recorder_url;
-            }
             // §A.6 leader-based resize: refresh term_size whenever the
-            // snapshot carries one. Sticky when omitted, same convention as
-            // recorder_url — a state change without a fresh term_size
-            // shouldn't blank the cached size.
+            // snapshot carries one. Sticky when omitted — a state change
+            // without a fresh term_size shouldn't blank the cached size.
             if term_size.is_some() {
                 g.term_size = term_size;
             }
@@ -222,29 +200,6 @@ impl AgentHandle {
             session_id,
             reason: None,
         }));
-    }
-
-    /// §D Milestone 5: stash the recorder URL advertised by rabbit in its
-    /// Hello envelope. Called by the actor once per (re)connect. Independent
-    /// of `update_state` so callers can update the URL without disturbing
-    /// the snapshot fields. Returns `true` iff the URL actually changed
-    /// (caller can use this to decide whether to push a meta broadcast).
-    pub fn set_recorder_url(&self, url: Option<String>) -> bool {
-        let mut g = self.recorder_url.lock().expect("recorder_url poisoned");
-        if *g != url {
-            *g = url;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// §D Milestone 5: read the most recently advertised recorder URL, if
-    /// any. `None` when recording is disabled or rabbit hasn't (re)Hello'd
-    /// since startup. Callers (the history page) must gate on this rather
-    /// than fabricating a default — otherwise dead-link 404s.
-    pub fn recorder_url(&self) -> Option<String> {
-        self.recorder_url.lock().expect("recorder_url poisoned").clone()
     }
 
     // §A.6 leader-based resize -------------------------------------------

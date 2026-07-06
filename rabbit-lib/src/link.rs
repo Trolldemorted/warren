@@ -60,11 +60,6 @@ pub struct Link {
     /// Bounded queue of recently-sent meta events awaiting Ack. Survives
     /// across WS attempts within a single Link lifetime.
     meta_ring: Arc<MetaRing>,
-    /// §D Milestone 5: absolute base URL of this rabbit's recorder HTTP
-    /// server, advertised in the Hello envelope so warren can fetch `.cast`
-    /// files for `/agent/:id/claude/history`. `None` when recording is
-    /// disabled.
-    recorder_url: Option<String>,
     /// Supervisor-shared shutdown flag. When `true`, `run()` exits its
     /// reconnect loop instead of bouncing forever — without this, a clean
     /// supervisor shutdown still leaves a forever-retriying link task that
@@ -93,7 +88,6 @@ impl Link {
         event_tx: mpsc::Sender<LinkEvent>,
         replay_snap: ReplaySnapFn,
         meta_ring: Arc<MetaRing>,
-        recorder_url: Option<String>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -107,7 +101,6 @@ impl Link {
             event_tx,
             replay_snap,
             meta_ring,
-            recorder_url,
             shutdown,
         }
     }
@@ -191,7 +184,6 @@ impl Link {
                 session_id: None,
                 state: AgentState::Starting,
                 term_size: self.term_size,
-                recorder_url: self.recorder_url.clone(),
             }),
         };
         let hello_json = serde_json::to_string(&hello)?;
@@ -344,7 +336,6 @@ mod tests {
             event_tx,
             replay_snap,
             ring,
-            None,
             shutdown,
         );
         tokio::spawn(async move { link.run().await })

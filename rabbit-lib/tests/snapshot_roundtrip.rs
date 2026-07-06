@@ -87,8 +87,6 @@ fn spawn_link(port: u16) -> (mpsc::Sender<LinkCmd>, mpsc::Receiver<LinkEvent>) {
         event_tx,
         replay_snap,
         ring.clone(),
-        // §D Milestone 5: tests don't care about the recorder URL.
-        None,
         // Tests that exercise shutdown set this themselves; default-flag
         // keeps the link's reconnect loop alive across the test's lifetime.
         Arc::new(AtomicBool::new(false)),

@@ -160,12 +160,6 @@ body.viewer-mode #viewer-mode-banner { display: block; }
             class="btn btn-outline-warning action mt-2"
             hidden>Release control</button>
     <div id="leader-badge" class="badge bg-secondary mt-1">no leader</div>
-    {% if recorder_enabled %}
-    {# §D Milestone 5: link to the recorded-session history. Only shown
-       when rabbit advertised a recorder URL on its most recent Hello —
-       avoids a guaranteed-404 link when recording is off. #}
-    <a class="btn btn-outline-info action mt-2" href="/agent/{{ agent.id }}/claude/history">→ history</a>
-    {% endif %}
   </aside>
 </div>
 <script src="/static/vendor/xterm/xterm.js"></script>

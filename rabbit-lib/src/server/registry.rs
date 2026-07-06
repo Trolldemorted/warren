@@ -8,8 +8,7 @@ use uuid::Uuid;
 /// Shared live-agent map. One entry per `rabbit` process whose WS
 /// handshake has reached the registry-insert step in
 /// `ws_rabbit::handle_session`. Reused by the browser/shell WS handlers,
-/// action-button HTTP routes, and the actor's `set_recorder_url` /
-/// `publish_meta` broadcasts.
+/// action-button HTTP routes, and the actor's `publish_meta` broadcasts.
 ///
 /// Holds a `tokio::sync::Notify` alongside the map so that callers
 /// opening a browser WS *before* a rabbit has connected can wait for

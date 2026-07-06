@@ -4,10 +4,10 @@
 //! Two halves glued together by a single `wire` module:
 //!
 //! * The **supervisor half** (`pty`, `vt`, `input`, `trust`, `respawn`,
-//!   `shell`, `recorder`, `observer`, `meta_ring`, `link`, `supervisor`)
+//!   `shell`, `observer`, `meta_ring`, `link`, `supervisor`)
 //!   spawns a real `claude` PTY, parses its terminal output, observes its
-//!   lifecycle via Claude's hook protocol, optionally records asciicast,
-//!   and bridges everything to a single WebSocket link.
+//!   lifecycle via Claude's hook protocol, and bridges everything to a
+//!   single WebSocket link.
 //! * The **server half** (`server`) accepts the supervisor's WS, fans
 //!   term-bytes and meta-envelopes out to multiple browser subscribers
 //!   per agent, and persists the event stream via the `SessionStore` trait
@@ -38,8 +38,6 @@ pub mod wire;
 pub(crate) mod config;
 pub(crate) mod health;
 pub(crate) mod hooks_install;
-pub(crate) mod http_server;
-pub(crate) mod recorder;
 pub(crate) mod respawn;
 pub(crate) mod shell;
 

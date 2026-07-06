@@ -156,7 +156,6 @@ async fn run_inner(
             source: "transcript".to_string(),
             ..Default::default()
         },
-        recorder_url: hello.recorder_url.clone(),
         // §A.6 leader-based resize: capture the boot-time PTY size from
         // the Hello envelope. Refreshed later when a leader-driven Resize
         // flows through; the broadcast `LeaderChanged { leader_id: None }`
@@ -164,10 +163,6 @@ async fn run_inner(
         // a real grid (never 0×0).
         term_size: Some(hello.term_size),
     });
-    // §D Milestone 5: stash the recorder URL on the handle so the
-    // history-page handlers can resolve it without re-querying rabbit.
-    // (Cheap Arc clone; the handle dedupes inside `set_recorder_url`.)
-    handle.set_recorder_url(hello.recorder_url.clone());
 
     let mut pending: std::collections::VecDeque<(Uuid, oneshot::Sender<TurnOutcomeMsg>)> =
         std::collections::VecDeque::new();
@@ -233,7 +228,6 @@ async fn run_inner(
                                 session_id: s.session_id.clone(),
                                 claude_version: None,
                                 last_usage: last_usage.clone(),
-                                recorder_url: None,
                                 // State updates don't carry a fresh term_size;
                                 // leave it None so `update_state` keeps the
                                 // cached value sticky.

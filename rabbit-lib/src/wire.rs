@@ -14,8 +14,7 @@ pub const TERM_CHAN_SHELL: u8 = 0x02;
 /// assigned it, and the raw PTY bytes for that chunk. The replay
 /// buffer stores `TermFrame`s so the seq rides through reconnects; warren
 /// relays each frame verbatim (byte-for-byte: same `chan`, same `seq`,
-/// same `data`) to its browser subscribers and to the asciicast
-/// recorder.
+/// same `data`) to its browser subscribers.
 #[derive(Debug, Clone)]
 pub struct TermFrame {
     pub chan: u8,
@@ -158,12 +157,6 @@ pub struct HelloUp {
     /// strings.
     pub state: AgentState,
     pub term_size: TermSize,
-    /// §D Milestone 5: absolute base URL of rabbit's recorder HTTP server
-    /// (e.g. `http://10.0.0.42:7790`), populated when `enable_asciicast=1`
-    /// and warren hits `/agent/:id/claude/history`. Empty/None when the
-    /// recorder is off — handlers must check rather than assume.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recorder_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

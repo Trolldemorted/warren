@@ -525,9 +525,8 @@ materially affects the visible state. This is the test that catches
 ## 8. Risks & open questions
 
 **8.1 The seq preamble is overhead.** 8 bytes per binary frame is
-negligible at human typing rates (~tens of frames per second worst case)
-but the asciicast recorder writes similar rates. Cost is ~10% larger
-frames; not a wire-shape concern, just bandwidth.
+negligible at human typing rates (~tens of frames per second worst case).
+Cost is ~10% larger frames; not a wire-shape concern, just bandwidth.
 
 **8.2 Wraparound handling in JS.** The `seqAfter(a, b)` bigint math
 above works under monotonic assumptions + small windows. A pathological
@@ -545,11 +544,9 @@ already passes through unchanged. Adds `PtyCmd::Resize` doesn't bump
 the seq counter (resize is meta, not bytes), so the snapshot's
 `after_seq` doesn't change on resize. That matches intuition.
 
-**8.5 Recorder side.** The asciicast recorder in `rabbit/src/recorder.rs`
-already takes `PtyEvt::Read` data; once `PtyEvt::Read` becomes a struct,
-the recorder's `feed()` call pulls `data` and ignores `seq` (or
-optionally embeds seq in the asciicast output for replay tools — a
-follow-up, not v1).
+**8.5 Recorder side.** Recording is on hold; the seq protocol is
+agnostic — a future recorder can opt to embed seq in its output without
+breaking the wire.
 
 **8.6 Why this is §A.7 and not §A.6.** The mouse-tracking fix was
 specific to the user's reported symptom (Firefox desktop, easy repro,

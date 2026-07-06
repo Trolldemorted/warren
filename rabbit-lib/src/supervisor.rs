@@ -8,7 +8,6 @@ use crate::observer::hooks::{ObserverEvent, ObserverHandle};
 use crate::observer::state::State;
 use crate::observer::transcript::{default_transcript_path, TranscriptTail, UsageUpdate};
 use crate::pty::{ExitKind, Pty, PtyExitStatus};
-use crate::recorder::AsciicastRecorder;
 use crate::respawn::{self, CrashWindow};
 use crate::shell::{self, ShellCmd, ShellHandle};
 use crate::wire::{
@@ -56,20 +55,6 @@ pub async fn run(config: Config) -> Result<()> {
         });
     }
 
-    // §D Milestone 5: tiny HTTP server for fetching `.cast` recordings.
-    // Binds 0.0.0.0 so warren can reach it across pods/hosts; the bearer
-    // token gates all non-healthz endpoints. Off when the recorder is off.
-    if config.enable_asciicast {
-        let port = config.recorder_http_port;
-        let dir = config.asciicast_dir.clone();
-        let token = config.agent_token.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::http_server::serve(port, dir, token).await {
-                log::error!("recorder http stopped: {e:?}");
-            }
-        });
-    }
-
     let hook_bin = hooks_install::resolve_hook_bin(config.hook_bin.clone());
     if let Err(e) = hooks_install::install(std::path::Path::new(&config.workdir), &hook_bin) {
         log::warn!("could not install hook settings.json: {e:?}");
@@ -98,27 +83,6 @@ pub async fn run(config: Config) -> Result<()> {
 
     let meta_ring = Arc::new(MetaRing::new(config.meta_ring_bytes));
 
-    // §D Milestone 5: advertise the recorder HTTP base URL to warren via
-    // the Hello envelope so `/agent/:id/claude/history` can fetch `.cast`
-    // files without a static per-agent config. `RABBIT_RECORDER_URL`
-    // overrides the auto-derived `http://0.0.0.0:{port}` (useful when the
-    // recorder binds 0.0.0.0 but is reachable via a service IP / DNS name).
-    let recorder_url = if config.enable_asciicast {
-        std::env::var("RABBIT_RECORDER_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                format!("http://0.0.0.0:{}", config.recorder_http_port)
-            })
-    } else {
-        String::new()
-    };
-    let recorder_url_opt = if recorder_url.is_empty() {
-        None
-    } else {
-        Some(recorder_url)
-    };
-
     let link = Link::new(
         config.warren_url.clone(),
         config.agent_token.clone(),
@@ -132,7 +96,6 @@ pub async fn run(config: Config) -> Result<()> {
         event_tx,
         replay_snap,
         meta_ring,
-        recorder_url_opt,
         shutdown.clone(),
     );
     {
@@ -201,29 +164,6 @@ pub async fn run(config: Config) -> Result<()> {
                 args,
                 fresh
             );
-            // §D Milestone 5: asciicast recorder sidecar (opt-in via
-            // `enable_asciicast`). Lives one claude generation — `start_session`
-            // is fired by the `SessionStart` hook event, `feed` by every
-            // PTY read chunk, `close` on `PtyEvt::Exited`. None when disabled
-            // so production pods pay nothing for it.
-            let recorder = if config.enable_asciicast {
-                if let Err(e) = std::fs::create_dir_all(&config.asciicast_dir) {
-                    log::warn!(
-                        "asciicast_dir create failed ({}): {e:?}; recorder disabled",
-                        config.asciicast_dir.display()
-                    );
-                    None
-                } else {
-                    Some(AsciicastRecorder::new(
-                        config.asciicast_dir.clone(),
-                        config.asciicast_bytes_cap,
-                        config.term_cols,
-                        config.term_rows,
-                    ))
-                }
-            } else {
-                None
-            };
             match spawn_run_one(
                 &config,
                 health.clone(),
@@ -234,7 +174,6 @@ pub async fn run(config: Config) -> Result<()> {
                 replay_buf.clone(),
                 cmd_tx.clone(),
                 shutdown.clone(),
-                recorder,
             ) {
                 Ok(sess) => {
                     let OutcomeChannels {
@@ -641,7 +580,6 @@ fn spawn_run_one(
     replay_buf: Arc<Mutex<VecDeque<TermFrame>>>,
     cmd_tx: mpsc::Sender<LinkCmd>,
     shutdown: Arc<AtomicBool>,
-    recorder: Option<AsciicastRecorder>,
 ) -> Result<SpawnResult> {
     let (pty_tx, mut pty_rx) = mpsc::channel::<PtyCmd>(128);
     let (pty_evt_tx, pty_evt_rx) = mpsc::channel::<PtyEvt>(128);
@@ -902,10 +840,6 @@ fn spawn_run_one(
     let replay_cap_inner = replay_cap;
     let shutdown_for_driver = shutdown.clone();
     let pty_tx_for_cleanup = pty_tx.clone();
-    // §D Milestone 5: recorder sidecar moved into the driver task. Lives
-    // exactly one claude generation: started by SessionStart hook event,
-    // fed by every PTY read, closed on Exited. None when disabled.
-    let mut recorder = recorder;
 
     {
         let cmd_tx_init = cmd_tx_driver.clone();
@@ -947,13 +881,6 @@ fn spawn_run_one(
                                 });
                                 trim_replay(&mut buf, replay_cap_inner);
                             }
-                            // §D Milestone 5: mirror the same byte stream the
-                            // replay buffer just recorded into the asciicast
-                            // sidecar. One source of truth — the recorder sees
-                            // exactly what warren's browser sees.
-                            if let Some(r) = recorder.as_mut() {
-                                r.feed(&data).await;
-                            }
                             let _ = cmd_tx_driver
                                 .send(LinkCmd::SendBinary {
                                     chan,
@@ -967,13 +894,6 @@ fn spawn_run_one(
                         }
                         Some(PtyEvt::Exited(status)) => {
                             log::info!("claude exited: kind={:?}", ExitKind::from(&status));
-                            // Flush + close the recorder before reporting the
-                            // outcome — guarantees the .cast is on disk by the
-                            // time the supervisor's outer loop considers this
-                            // generation done.
-                            if let Some(r) = recorder.as_mut() {
-                                r.close().await;
-                            }
                             let outcome = if shutdown_for_driver.load(Ordering::SeqCst) {
                                 RunOutcome::Shutdown
                             } else if matches!(ExitKind::from(&status), ExitKind::Clean) {
@@ -989,17 +909,6 @@ fn spawn_run_one(
                 }
                 evt = obs_rx.recv() => {
                     if let Ok(ev) = evt {
-                        // §D Milestone 5: open a fresh .cast when SessionStart
-                        // fires. The observer emits `kind == "session"` with a
-                        // non-None `session_id` from the SessionStart hook
-                        // payload (see `observer::hooks::parse`).
-                        if ev.kind == "session" {
-                            if let (Some(r), Some(sid)) = (recorder.as_mut(), ev.session_id.as_deref()) {
-                                if let Err(e) = r.start_session(sid).await {
-                                    log::warn!("asciicast start_session({sid}) failed: {e:?}");
-                                }
-                            }
-                        }
                         forward_observer_event(&cmd_tx_driver, &ev).await;
                     }
                 }
