@@ -157,6 +157,80 @@ optional second PTY (bash) on its own channel:
 
 ---
 
+## DONE — §A.7 seq-numbered snapshot protocol (v1 → v2 wire)
+
+Documented in `/workdir/seq-numbered-snapshot-protocol.md`. The §A.6
+mouse-tracking fix eliminated the upstream empty-snapshot cause but
+left a residual case where the heuristic in `applyMeta`'s
+`screen_snapshot` arm (`text.some(row => row.trim().length > 0)`) was
+still required to avoid the term-ring replay flicker. This protocol
+removes that heuristic with a `ScreenSnapshot::after_seq` watermark
+plus a per-channel `seq` on every terminal binary frame, eliminating
+"is this snapshot authoritative?" guessing entirely.
+
+- [x] **`after_seq: u64` on `ScreenSnapshotBody`** in both
+      `rabbit/src/wire.rs` and `warren/src/agents_live/wire.rs`. `#[serde(default)]`
+      keeps v1 envelopes (no `after_seq`) deserializable — the
+      forward-compat shim. Browsers read it as the watermark for the
+      trim step. 2 round-trip tests in
+      `rabbit/src/wire.rs::tests` pin both shapes.
+- [x] **`PROTOCOL_VERSION` bumped 1 → 2** in both crates. Old
+      `v=1` clients are handshake-refused by `actor::read_hello`'s
+      `if env.v != PROTOCOL_VERSION` guard.
+- [x] **Per-channel seq counter** (`u64`, BE on wire, starts at `1`,
+      reserved `0` for "no bytes fed yet"). Lives in the blocking PTY
+      thread for both claude (`rabbit/src/supervisor.rs::spawn_run_one`)
+      and shell (`rabbit/src/shell.rs::run_generation`), incrementing
+      *before* assignment so the first byte off the wire carries
+      `seq=1`. Each PTY owns its own counter; the two are independent.
+- [x] **`PtyEvt::Read` becomes a struct**: `{ chan, seq, data }`
+      (was `Read(Vec<u8>)`). Same change for `LinkCmd::SendBinary`.
+      Driver task maps `PtyEvt::Read → LinkCmd::SendBinary` byte-for-byte
+      so `seq` rides through. The §0 invariant "warren's outgoing
+      seq on chan X equals rabbit's emitted seq on chan X" is enforced
+      by `TermFrame::clone()` carrying all three fields together.
+- [x] **Wire widening: `<chan:1> <seq:8 BE> <data>`** on every
+      server→browser terminal binary frame. Rabbit's `link.rs::attempt`
+      builds the prelude with `seq.to_be_bytes()`; warren's
+      `agents_live::actor` binary-handler parses the prelude (10-byte
+      minimum) and republishes a `TermFrame`; `ws_browser.rs` and
+      `ws_shell.rs` re-emit the same shape on the browser socket. Two
+      dead-air cost: ~10% larger frames at human typing rates.
+- [x] **Browser two-step apply** (`agent_claude.html`):
+      `pendingFrames` ring + `PENDING_FRAMES_MAX = 4096` cap +
+      `screen_snapshot` case becomes (1) trim to `seq > after_seq`,
+      (2) reset + apply grid, (3) flush the surviving delta frames in
+      seq order, then disable the gate. The empty-snapshot heuristic
+      stays as a final fallback (`env.text.some(row.trim().length>0)`)
+      so genuinely-empty VT is also respected.
+- [x] **Per-frame replay buffer**: `rabbit/src/supervisor.rs::replay_buf`
+      changes from `VecDeque<Vec<u8>>` to `VecDeque<TermFrame>`. On
+      link reconnect, every frame is re-emitted as its own
+      `<chan><seq:8BE><data>` message with the seq the blocking
+      thread assigned at read time. Same shape on the browser (a
+      late joiner sees the exact bytes a no-reconnect client would
+      have seen).
+- [x] **Tests** per §6 of the design doc, all green:
+      * 6 new rabbit lib tests in `supervisor.rs::tests` (seq counter,
+        after_seq formula, real-PTY monotonicity)
+      * 2 new integration tests in `rabbit/tests/snapshot_roundtrip.rs`
+        (after_seq wire round-trip + widened-binary-frame shape with
+        multi-byte seqs for both chan ids)
+      * 3 new warren lib tests in `handle.rs::tests`
+        (term-frame ring cap + subscriber passthrough + screen-snapshot
+        wire tag/after_seq lock)
+      * Total: 168/168 tests pass across the workspace.
+- [x] **Backward compatibility plan**: bump gates both directions
+      (`v=2` on the wire for both crates; old clients' first hello
+      gets refused at `read_hello`). Lockstep rollout (same image,
+      same release) means no mixed-version traffic in production. The
+      `serde(default)` on `after_seq` keeps things correct during a
+      hypothetical mixed-version deploy window.
+
+Backout path (if it breaks unexpectedly): drop `PROTOCOL_VERSION` to 1,
+revert the prelude to `<chan:1>`, drop `after_seq`. No new contracts
+to unwind — see §9 of the design doc for the full mechanical procedure.
+
 ## Done in a prior session (cleanup + prompt policy)
 
 - [x] **Reject-when-Running prompt policy** (§D highest-leverage decision).

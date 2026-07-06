@@ -406,7 +406,24 @@ function applyMeta(env) {
       // every subsequent binary frame writes through to xterm directly.
       pendingFrames = null;
       term.reset();
-      term.write(env.text.join('\r\n') + '\r\n');
+      // §A.7 / scrollback fix: `avt::Buffer::text()` returns the
+      // *entire* line history (scrollback + visible rows + a trailing
+      // empty line), not just the visible portion. Verified empirically
+      // against `avt 0.18`: a 20×3 terminal fed 10 lines reports
+      // `text().len() == 11`. Writing that to a 40-row xterm would
+      // scroll the visible content up by `text.length - rows` rows, so
+      // the user's input ends up far below where the snapshot intended
+      // (and lines that exist in both scrollback and the visible area
+      // render twice). `env.rows` is the visible-row count; slice to
+      // the last `rows` entries to get the viewport-only text. The
+      // trailing `'\r\n'` is also dropped — without it, the cursor
+      // sits at the end of the last written line, and CSI H below
+      // repositions absolutely. With it, the cursor would move one
+      // line past the bottom (even with no scrollback), forcing
+      // another scroll-up and landing the cursor on a blank row.
+      const visibleRows = Math.max(1, Number(env.rows) || term.rows);
+      const visibleText = env.text.slice(-visibleRows);
+      term.write(visibleText.join('\r\n'));
       const r = (env.cursor_row || 0) + 1;
       const c = (env.cursor_col || 0) + 1;
       term.write(`\x1b[${r};${c}H`);

@@ -188,4 +188,46 @@ mod tests {
         assert_eq!(snap.cols, 120);
         assert_eq!(snap.rows, 40);
     }
+
+    /// §A.7 / scrollback invariant — regression guard.
+    ///
+    /// `avt::Buffer::text()` returns the *entire* line history (scrollback +
+    /// visible rows + a trailing empty line), **not** just the visible
+    /// portion. This surprised us once: a 20×3 terminal fed 10 lines reports
+    /// `text().len() == 11`. The browser side of the snapshot apply depends
+    /// on this — `agent_claude.html` slices `env.text.slice(-env.rows)` to
+    /// recover the viewport-only text before writing to xterm.js. If avt ever
+    /// changes `text()` to return only the visible portion, that slice would
+    /// silently truncate the visible rows too, and this test would fail.
+    ///
+    /// Cursor row stays 0-indexed within the *visible* area regardless of
+    /// scrollback depth, so a snapshot consumer can pair `text[-rows..]`
+    /// directly with `cursor_row` without remapping.
+    #[test]
+    fn text_includes_scrollback_not_just_visible_rows() {
+        let mut t = TermTracker::new(20, 3, 100);
+        for i in 0..10 {
+            t.feed(format!("line {i}\r\n").as_bytes());
+        }
+        let snap = t.snapshot();
+        // 10 printed lines + 1 trailing empty line, regardless of the
+        // 3-row viewport. The visible viewport is the last `rows` entries.
+        assert_eq!(
+            snap.text.len(),
+            11,
+            "avt text() should include scrollback; got {} entries",
+            snap.text.len()
+        );
+        // Visible-only slice matches what the browser should paint.
+        let visible = &snap.text[snap.text.len() - snap.rows as usize..];
+        assert_eq!(visible[0].trim_end(), "line 8");
+        assert_eq!(visible[1].trim_end(), "line 9");
+        assert_eq!(visible[2].trim_end(), "");
+        // Cursor on the last visible row, even though the buffer
+        // contains 8 scrollback lines above it.
+        // Cursor on the last visible row, even though the buffer
+        // contains 8 scrollback lines above it.
+        assert_eq!(snap.cursor_row, 2);
+        assert_eq!(snap.cursor_col, 0);
+    }
 }
