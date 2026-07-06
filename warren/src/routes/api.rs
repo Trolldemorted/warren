@@ -29,7 +29,11 @@ pub fn router() -> Router<AppState> {
                 .put(api_update_agent)
                 .delete(api_delete_agent),
         )
-        .merge(crate::agents_live::http::router())
+        // The `/api/agents/:id/claude/...` JSON routes are merged in
+        // `main.rs` via `state.live.router()`. They live in
+        // `rabbit-lib::server::http` and use the lib's auth gate
+        // directly, so they don't belong on the `AppState`-typed API
+        // router anymore.
         .route(
             "/api/requests",
             get(api_list_requests).post(api_create_request),

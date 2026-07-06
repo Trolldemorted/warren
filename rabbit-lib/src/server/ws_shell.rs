@@ -9,11 +9,12 @@
 //! The same wire byte (TER CHAN_SHELL = 0x02) is used to route frames to
 //! the right PTY on the rabbit side; this handler filters on that byte.
 
-use crate::agents_live::wire::TermFrame;
-use crate::agents_live::AgentRegistry;
-use crate::auth;
-use crate::error::AppError;
-use crate::AppState;
+use crate::wire::TermFrame;
+use crate::server::registry::AgentRegistry;
+
+use crate::server::{AuthError, ServerError, ServerState};
+use std::sync::Arc;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -22,6 +23,14 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use uuid::Uuid;
+
+/// `axum` router for the shell-side WebSocket. Mounts
+/// `/agent/:id/shell/ws`. Carries `Arc<ServerState>` as its state
+/// type — the embedder is expected to call `.with_state(...)` on the
+/// parent router.
+pub fn router() -> axum::Router<Arc<ServerState>> {
+    axum::Router::new().route("/agent/:id/shell/ws", axum::routing::get(ws_shell))
+}
 
 /// Same `?viewer=true` query contract as `ws_browser`. The shell endpoint
 /// is intrinsically a debug surface, but a viewer toggle is still useful
@@ -33,23 +42,17 @@ pub struct WsShellQuery {
 }
 
 pub async fn ws_shell(
-    State(state): State<AppState>,
+    State(state): State<Arc<ServerState>>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
     Query(q): Query<WsShellQuery>,
     ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, AppError> {
-    if !auth::validate_admin_session(
-        &state.db,
-        &auth::read_session_cookie(&headers).unwrap_or_default(),
-    )
-    .await
-    .unwrap_or(false)
-    {
-        return Err(AppError::Unauthorized);
+) -> Result<impl IntoResponse, ServerError> {
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
     }
     let viewer_mode = q.viewer.unwrap_or(false);
-    let registry: AgentRegistry = state.live.clone();
+    let registry: AgentRegistry = state.registry.clone();
     Ok(ws.on_upgrade(move |socket| async move {
         if let Err(e) = handle(socket, registry, id, viewer_mode).await {
             log::debug!("shell ws closed for agent {}: {e:?}", id);
@@ -88,7 +91,7 @@ async fn handle(
     // `<chan:1> <seq:8 BE> <data>`, preserving the seq the shell reader
     // thread assigned on the rabbit side.
     for TermFrame { chan, seq, data } in handle.replay_term() {
-        if chan != crate::agents_live::wire::TERM_CHAN_SHELL {
+        if chan != crate::wire::TERM_CHAN_SHELL {
             continue;
         }
         if data.is_empty() {
@@ -118,7 +121,7 @@ async fn handle(
                 // so no snapshot is ever emitted; the seq still rides
                 // through for protocol symmetry.)
                 let TermFrame { chan, seq, data } = frame;
-                if chan != crate::agents_live::wire::TERM_CHAN_SHELL {
+                if chan != crate::wire::TERM_CHAN_SHELL {
                     continue;
                 }
                 if data.is_empty() {
@@ -145,7 +148,7 @@ async fn handle(
                         // connections, mirroring ws_browser's policy.
                         if viewer_mode { continue; }
                         let chan = b.remove(0);
-                        if chan != crate::agents_live::wire::TERM_CHAN_SHELL {
+                        if chan != crate::wire::TERM_CHAN_SHELL {
                             // Wrong channel — ignore; the client should
                             // only send bytes tagged TERM_CHAN_SHELL on
                             // this WS.
@@ -153,7 +156,7 @@ async fn handle(
                         }
                         if let Err(e) =
                             handle.send_terminal_bytes(
-                                crate::agents_live::wire::TERM_CHAN_SHELL,
+                                crate::wire::TERM_CHAN_SHELL,
                                 Bytes::from(b),
                             ).await
                         {

@@ -8,7 +8,7 @@
 //! Run explicitly:
 //!   cargo test -p rabbit --test claude_smoke -- --ignored --nocapture claude_pt_roundtrip
 
-use rabbit::input::paste;
+use rabbit_lib::input::paste;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::Read;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -48,11 +48,11 @@ impl ChildPty {
     }
 }
 
-/// Trust-dialog detection uses the production markers in `rabbit::trust` so
+/// Trust-dialog detection uses the production markers in `rabbit_lib::trust` so
 /// the smoke test and the supervisor's auto-accept path can never drift apart.
 /// The smoke test detects any marker in the PTY output and accepts the dialog
 /// by sending Enter, then re-sends the prompt.
-use rabbit::trust::has_trust_marker;
+use rabbit_lib::trust::has_trust_marker;
 
 /// Spawn `claude` with the nested-Code env markers stripped. claude reads
 /// `CLAUDECODE` and `CLAUDE_CODE_*` to detect "I'm being driven by another
@@ -327,7 +327,7 @@ fn strip_ansi(bytes: &[u8]) -> String {
 // hit the Anthropic API in CI.
 
 // Shared smoke harness: spawns claude, drains the boot banner (and accepts
-// any trust dialog via `rabbit::trust::has_trust_marker`), then exposes a
+// any trust dialog via `rabbit_lib::trust::has_trust_marker`), then exposes a
 // writer + receiver pair for the test to drive.
 struct SmokeHarness {
     pty: ChildPty,
@@ -397,11 +397,11 @@ impl SmokeHarness {
     }
 
     fn slash(&mut self, cmd: &str) {
-        rabbit::input::slash(&mut self.writer, cmd).expect("slash");
+        rabbit_lib::input::slash(&mut self.writer, cmd).expect("slash");
     }
 
     fn interrupt(&mut self) {
-        rabbit::input::interrupt(&mut self.writer).expect("interrupt");
+        rabbit_lib::input::interrupt(&mut self.writer).expect("interrupt");
     }
 
     /// Drain the receiver for `dur`. Returns the ANSI-stripped text so

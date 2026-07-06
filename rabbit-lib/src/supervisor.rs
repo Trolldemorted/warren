@@ -1341,7 +1341,7 @@ pub async fn send_state(
     // Keep the observer's tracked lifecycle state in step with the supervisor's
     // own transitions so `latest_state()` is authoritative for the whole
     // lifecycle (spawn/exit/crash), not just the hook-derived Running/Idle.
-    if let Some(st) = State::from_label(&frame.state) {
+    if let Some(st) = State::from_label(frame.state.as_str()) {
         observer.set_state(st);
     }
     let _ = cmd_tx

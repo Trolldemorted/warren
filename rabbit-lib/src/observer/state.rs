@@ -34,6 +34,20 @@ impl State {
             _ => None,
         }
     }
+
+    /// Convert from the wire-typed [`crate::wire::AgentState`]. Always
+    /// succeeds — the wire enum has the same five variants as this one.
+    /// Lets `supervisor::send_state` route a typed frame through to
+    /// the observer without a string round-trip.
+    pub fn from_agent_state(s: crate::wire::AgentState) -> State {
+        match s {
+            crate::wire::AgentState::Starting => State::Starting,
+            crate::wire::AgentState::Idle => State::Idle,
+            crate::wire::AgentState::Running => State::Running,
+            crate::wire::AgentState::Ended => State::Ended,
+            crate::wire::AgentState::Dead => State::Dead,
+        }
+    }
 }
 
 #[cfg(test)]

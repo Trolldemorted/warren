@@ -1,4 +1,3 @@
-mod agents_live;
 mod auth;
 mod config;
 mod db;
@@ -7,6 +6,7 @@ mod entity;
 mod error;
 mod ids;
 mod models;
+mod rabbit_adapter;
 mod routes;
 mod templates;
 
@@ -21,13 +21,27 @@ use config::Config;
 use db::Db;
 use std::io::Write;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
     pub config: Config,
-    pub live: agents_live::AgentRegistry,
+    /// `rabbit-lib`'s server state: owns the live agent registry plus
+    /// the trait adapters that satisfy `SessionStore` and `AuthBackend`
+    /// against Warren's SeaORM data layer.
+    pub live: Arc<rabbit_lib::server::ServerState>,
+}
+
+/// `FromRef` impl so handlers written against `Router<Arc<ServerState>>`
+/// in `rabbit-lib` can be merged into Warren's `Router<AppState>`. The
+/// lib's handlers extract `State<Arc<ServerState>>`; `FromRef` is the
+/// canonical axum way to let a sub-state be pulled out of a larger one.
+impl axum::extract::FromRef<AppState> for Arc<rabbit_lib::server::ServerState> {
+    fn from_ref(s: &AppState) -> Self {
+        s.live.clone()
+    }
 }
 
 #[derive(Parser)]
@@ -102,9 +116,9 @@ async fn run_server() -> anyhow::Result<()> {
         .await
         .context("connecting to database")?;
     let state = AppState {
-        db,
+        db: db.clone(),
         config: cfg.clone(),
-        live: agents_live::new_registry(),
+        live: rabbit_adapter::build_server_state(db),
     };
     let app = build_router(state);
 
@@ -283,16 +297,15 @@ fn build_router(state: AppState) -> Router {
         .merge(routes::openapi::router())
         .merge(routes::docs::router(state.clone()))
         .route("/healthz", get(|| async { "ok" }))
-        .route("/ws/rabbit", get(agents_live::ws_rabbit::ws_rabbit))
-        .route(
-            "/agent/:id/claude/ws",
-            get(agents_live::ws_browser::ws_browser),
-        )
-        // §D Milestone 5: secondary `/shell` WS for the bash PTY.
-        .route(
-            "/agent/:id/shell/ws",
-            get(agents_live::ws_shell::ws_shell),
-        )
+        // The four rabbit-lib WebSocket endpoints (`/ws/rabbit`,
+        // `/agent/:id/claude/ws`, `/agent/:id/shell/ws`) and the JSON
+        // HTTP API (`/api/agents/:id/claude/...`) are all mounted by
+        // `ServerState::router` in one merge. We finalize the lib's
+        // router first with its `Arc<ServerState>` so the merged
+        // outer router still type-erases to `Router<()>`, and the
+        // lib's handlers then pull `Arc<ServerState>` back out of
+        // the outer `AppState` via the `FromRef` impl above.
+        .merge(state.live.router().with_state(state.live.clone()))
         .nest("/static", routes::static_files::router(state.clone()))
         .layer(security_headers)
         .with_state(state)

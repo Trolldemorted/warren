@@ -754,6 +754,7 @@ pub async fn channel_authorizes(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn insert_agent_event(
     db: &Db,
     id: Uuid,
@@ -773,6 +774,7 @@ pub async fn insert_agent_event(
     Ok(am.insert(db).await?)
 }
 
+#[allow(dead_code)]
 pub async fn list_events_since(
     db: &Db,
     agent_id: Uuid,

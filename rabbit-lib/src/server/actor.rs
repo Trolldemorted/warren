@@ -1,16 +1,16 @@
-use crate::agents_live::handle::AgentStateSnapshot;
-use crate::agents_live::wire::{
+use crate::server::handle::AgentHandle;
+use crate::server::handle::AgentStateSnapshot;
+use crate::server::SessionStore;
+use crate::wire::{
     Envelope, EnvelopeBody, HelloDown, TermFrame, TermSize, UsageSnapshot, PROTOCOL_VERSION,
 };
-use crate::agents_live::AgentHandle;
-use crate::db::Db;
-use crate::db_ops;
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -93,19 +93,19 @@ pub struct TurnOutcomeMsg {
 }
 
 pub async fn run(
-    db: Db,
+    store: Arc<dyn SessionStore>,
     handle: AgentHandle,
     agent_id: Uuid,
     socket: WebSocket,
     cmd_rx: mpsc::Receiver<Command>,
 ) -> Result<()> {
-    let join = tokio::spawn(run_inner(db, handle, agent_id, socket, cmd_rx));
+    let join = tokio::spawn(run_inner(store, handle, agent_id, socket, cmd_rx));
     join.await.map_err(|e| anyhow::anyhow!("actor join: {e}"))?;
     Ok(())
 }
 
 async fn run_inner(
-    db: Db,
+    store: Arc<dyn SessionStore>,
     handle: AgentHandle,
     agent_id: Uuid,
     socket: WebSocket,
@@ -125,7 +125,7 @@ async fn run_inner(
     // Hello takes the first free seq; subsequent messages advance from there.
     // Without this, every reconnect would try to insert seq=1 again and
     // violate the (agent_id, seq) unique index.
-    let mut seq: i64 = match db_ops::next_event_seq(&db, agent_id).await {
+    let mut seq: i64 = match store.next_event_seq(agent_id).await {
         Ok(s) => s,
         Err(e) => {
             log::warn!("next_event_seq failed for {agent_id}: {e:?}");
@@ -138,7 +138,7 @@ async fn run_inner(
     // have no row AND no broadcast than a row-less broadcast that misleads
     // SSE listeners.
     persist_event(
-        &db,
+        &*store,
         agent_id,
         &serde_json::to_value(&hello).unwrap_or(serde_json::Value::Null),
         "hello",
@@ -279,7 +279,7 @@ async fn run_inner(
                                 seq - 1
                             );
                         } else {
-                            persist_event(&db, agent_id, &payload_json, &kind, seq)
+                            persist_event(&*store, agent_id, &payload_json, &kind, seq)
                                 .await
                                 .ok();
                             seq += 1;
@@ -614,14 +614,15 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
 }
 
 async fn persist_event(
-    db: &Db,
+    store: &dyn SessionStore,
     agent_id: Uuid,
     payload: &serde_json::Value,
     kind: &str,
     seq: i64,
 ) -> Result<()> {
-    let id = Uuid::new_v4();
-    db_ops::insert_agent_event(db, id, agent_id, seq, kind, payload.clone()).await?;
+    store
+        .insert_event(agent_id, seq, kind, payload.clone())
+        .await?;
     Ok(())
 }
 
@@ -644,7 +645,7 @@ mod tests {
     //! (the `Resize` drop-rule tests).
 
     use super::*;
-    use crate::agents_live::handle::AgentHandle;
+    use crate::server::handle::AgentHandle;
 
     #[tokio::test]
     async fn claim_leader_broadcasts_leader_changed_to_subscribers() {

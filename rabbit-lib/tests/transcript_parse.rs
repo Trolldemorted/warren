@@ -10,8 +10,8 @@
 //! usage line killed the task. These tests only pass because `run` now awaits
 //! `tx.send`.
 
-use rabbit::observer::hooks::ObserverHandle;
-use rabbit::observer::transcript::TranscriptTail;
+use rabbit_lib::observer::hooks::ObserverHandle;
+use rabbit_lib::observer::transcript::TranscriptTail;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 /// Build a tailer following `path` (as if `SessionStart` reported it), spawn
 /// it, and return the receiver of usage updates.
-fn start_tail(path: &std::path::Path) -> mpsc::Receiver<rabbit::observer::transcript::UsageUpdate> {
+fn start_tail(path: &std::path::Path) -> mpsc::Receiver<rabbit_lib::observer::transcript::UsageUpdate> {
     let handle = ObserverHandle::new();
     handle.ingest(
         "SessionStart",

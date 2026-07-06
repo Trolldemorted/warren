@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["warren", "warren-cli", "rabbit"]
+members = ["warren", "warren-cli", "rabbit", "rabbit-lib"]
 
 [workspace.package]
 edition = "2021"

@@ -1,6 +1,6 @@
-//! Thin binary wrapper. All logic lives in the `rabbit` library crate so it is
-//! reachable from `tests/` and downstream embedders; see `src/lib.rs`.
+//! Thin binary wrapper. All logic lives in the `rabbit-lib` library crate;
+//! see `rabbit-lib/src/lib.rs::run`.
 
 fn main() -> anyhow::Result<()> {
-    rabbit::run()
+    rabbit_lib::run()
 }

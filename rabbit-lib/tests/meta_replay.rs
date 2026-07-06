@@ -23,9 +23,9 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use uuid::Uuid;
 
-use rabbit::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
-use rabbit::meta_ring::MetaRing;
-use rabbit::wire::{
+use rabbit_lib::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
+use rabbit_lib::meta_ring::MetaRing;
+use rabbit_lib::wire::{
     Envelope, EnvelopeBody, LogLine, StateFrame, TermSize, UsageSnapshot, PROTOCOL_VERSION,
 };
 

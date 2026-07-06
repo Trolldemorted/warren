@@ -118,7 +118,7 @@ pub fn short_session_id(s: &str) -> String {
 /// rabbit hasn't advertised one yet. Used by handlers so the template can
 /// still render an "recording not enabled" state instead of a 500.
 pub fn recorder_url_for(
-    registry: &crate::agents_live::AgentRegistry,
+    registry: &rabbit_lib::server::AgentRegistry,
     agent_id: Uuid,
 ) -> Result<String, RecorderError> {
     registry

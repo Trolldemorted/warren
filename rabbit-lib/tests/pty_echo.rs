@@ -7,7 +7,7 @@
 mod common;
 
 use common::{read_until, spawn_fake_tui, spawn_reader};
-use rabbit::pty::Pty;
+use rabbit_lib::pty::Pty;
 use std::io::Write;
 use std::time::Duration;
 

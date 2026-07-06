@@ -7,12 +7,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY warren/Cargo.toml warren/
 COPY warren-cli/Cargo.toml warren-cli/
 COPY rabbit/Cargo.toml rabbit/
-RUN mkdir -p warren/src warren-cli/src rabbit/src \
+COPY rabbit-lib/Cargo.toml rabbit-lib/
+RUN mkdir -p warren/src warren-cli/src rabbit/src rabbit-lib/src \
  && echo 'fn main(){println!("fake main")}' > warren/src/main.rs \
  && echo 'fn main(){println!("fake main")}' > warren-cli/src/main.rs \
  && echo 'fn main(){println!("fake main")}' > rabbit/src/main.rs \
- && cargo build --release --bin warren --bin warren-cli --bin rabbit \
- && rm -rf warren/src warren-cli/src rabbit/src
+ && echo 'fn main(){println!("fake main")}' > rabbit-lib/src/main.rs \
+ && cargo build --release --bin warren --bin warren-cli --bin rabbit --bin rabbit-hook \
+ && rm -rf warren/src warren-cli/src rabbit/src rabbit-lib/src
 COPY warren/src warren/src
 COPY warren/migrations_atlas warren/migrations_atlas
 COPY warren/templates warren/templates
@@ -20,6 +22,7 @@ COPY warren/openapi.yml warren/openapi.yml
 COPY warren/static warren/static
 COPY warren-cli/src warren-cli/src
 COPY rabbit/src rabbit/src
+COPY rabbit-lib/src rabbit-lib/src
 RUN touch warren/src/main.rs warren-cli/src/main.rs && cargo build --release --bin warren --bin warren-cli --bin rabbit --bin rabbit-hook
 
 FROM debian:bookworm-slim AS swagger

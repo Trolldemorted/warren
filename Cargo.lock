@@ -1942,10 +1942,21 @@ name = "rabbit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rabbit-lib",
+]
+
+[[package]]
+name = "rabbit-lib"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
  "avt",
  "axum",
  "bytes",
  "chrono",
+ "dashmap",
  "futures-util",
  "log",
  "parking_lot",
@@ -1958,6 +1969,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tokio-tungstenite",
  "tower",
  "uuid",
@@ -3409,6 +3421,7 @@ dependencies = [
  "askama",
  "askama_axum",
  "async-stream",
+ "async-trait",
  "axum",
  "base64",
  "bytes",
@@ -3417,6 +3430,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "log",
+ "rabbit-lib",
  "rand 0.8.6",
  "reqwest",
  "sea-orm",

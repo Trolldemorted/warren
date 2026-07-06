@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const TERM_CHAN_CLAUDE: u8 = 0x01;
 /// §D Milestone 5: secondary terminal channel for `/agent/:id/shell`.
 /// A `bash` PTY on the same rabbit, distinct from the main Claude
 /// channel so it can be subscribed to (and written to) independently.
-/// Mirrors `warren::agents_live::wire::TERM_CHAN_SHELL`.
 pub const TERM_CHAN_SHELL: u8 = 0x02;
 
 /// §A.7 / seq-numbered snapshot protocol — one server→browser binary
@@ -15,7 +15,7 @@ pub const TERM_CHAN_SHELL: u8 = 0x02;
 /// buffer stores `TermFrame`s so the seq rides through reconnects; warren
 /// relays each frame verbatim (byte-for-byte: same `chan`, same `seq`,
 /// same `data`) to its browser subscribers and to the asciicast
-/// recorder. Mirrored in `warren::agents_live::wire::TermFrame`.
+/// recorder.
 #[derive(Debug, Clone)]
 pub struct TermFrame {
     pub chan: u8,
@@ -99,6 +99,32 @@ pub enum EnvelopeBody {
     SnapshotRequest {
         chan: u8,
     },
+    /// §A.6 leader-based resize: server sends each browser a unique
+    /// `connection_id` on WS open so the browser can identify itself in
+    /// subsequent `ClaimLeader` / `ReleaseLeader` / `Resize` envelopes.
+    /// Per-connection (sent directly on the WS, not broadcast).
+    ConnectionAssigned {
+        connection_id: Uuid,
+    },
+    /// §A.6 leader-based resize: browser requests leadership for its
+    /// connection_id. Server replies via `LeaderChanged`. The browser
+    /// reports its current xterm grid so the server can adopt that size
+    /// for the kernel PTY (or skip if it matches the current size).
+    ClaimLeader {
+        cols: u16,
+        rows: u16,
+    },
+    /// §A.6 leader-based resize: leader releases control voluntarily.
+    /// Other browsers receive `LeaderChanged { leader_id: None }`.
+    ReleaseLeader,
+    /// §A.6 leader-based resize: broadcast to every connected browser on
+    /// every leader transition (initial claim, transfer, release, leader
+    /// disconnect). `leader_id = None` means "no leader right now."
+    LeaderChanged {
+        leader_id: Option<Uuid>,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,8 +140,7 @@ pub struct ScreenSnapshotBody {
     /// last byte whose cells are *fully represented* in `text`. `0` means
     /// "no bytes fed yet on this channel"; a positive value tells the
     /// browser which buffered live frames are already covered by the
-    /// snapshot and can be discarded before the apply. Mirrored in
-    /// `warren::agents_live::wire::ScreenSnapshotBody`. `#[serde(default)]`
+    /// snapshot and can be discarded before the apply. `#[serde(default)]`
     /// keeps v1 envelopes (which had no `after_seq`) deserializable.
     #[serde(default)]
     pub after_seq: u64,
@@ -127,7 +152,11 @@ pub struct HelloUp {
     pub protocol_v: u32,
     pub claude_version: String,
     pub session_id: Option<String>,
-    pub state: String,
+    /// Typed state per §6 of the migration plan — supervisor emits
+    /// `AgentState` (snake_case on the wire: `starting`, `idle`,
+    /// `running`, `ended`, `dead`) directly rather than free-form
+    /// strings.
+    pub state: AgentState,
     pub term_size: TermSize,
     /// §D Milestone 5: absolute base URL of rabbit's recorder HTTP server
     /// (e.g. `http://10.0.0.42:7790`), populated when `enable_asciicast=1`
@@ -139,12 +168,67 @@ pub struct HelloUp {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateFrame {
-    pub state: String,
+    pub state: AgentState,
     pub session_id: Option<String>,
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// §6 of the migration plan — the canonical typed state enum.
+/// Serializes as snake_case strings (`starting` / `idle` / `running`
+/// / `ended` / `dead`); the JSON wire shape is identical to the old
+/// free-form `String` field.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    Starting,
+    Idle,
+    Running,
+    Ended,
+    Dead,
+}
+
+impl AgentState {
+    /// Snake-case label, e.g. `AgentState::Idle` → `"idle"`. Used by
+    /// log lines and SSE payloads that predate the typed enum.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentState::Starting => "starting",
+            AgentState::Idle => "idle",
+            AgentState::Running => "running",
+            AgentState::Ended => "ended",
+            AgentState::Dead => "dead",
+        }
+    }
+}
+
+impl std::str::FromStr for AgentState {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "starting" => Ok(AgentState::Starting),
+            "idle" => Ok(AgentState::Idle),
+            "running" => Ok(AgentState::Running),
+            "ended" => Ok(AgentState::Ended),
+            "dead" => Ok(AgentState::Dead),
+            other => Err(format!("unknown agent state: {other}")),
+        }
+    }
+}
+
+impl From<&str> for AgentState {
+    fn from(s: &str) -> Self {
+        s.parse().unwrap_or(AgentState::Starting)
+    }
+}
+
+/// §6 — the supervisor's hello is the same shape as the broker's
+/// hello. They used to live in two crates as `HelloUp` and
+/// `HelloDown`; unifying the state field lets us collapse them into
+/// one type. The legacy alias is preserved so existing call sites
+/// keep working.
+pub type HelloDown = HelloUp;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TermSize {
     pub cols: u16,
     pub rows: u16,

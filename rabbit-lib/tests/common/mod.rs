@@ -1,13 +1,13 @@
 //! Shared helpers for the rabbit integration tests.
 //!
-//! These drive a real PTY (via `rabbit::pty::Pty`) with a fake TUI child
+//! These drive a real PTY (via `rabbit_lib::pty::Pty`) with a fake TUI child
 //! (`/bin/cat`, which echoes stdin to stdout) so the byte-pump and input
 //! discipline can be observed the way a real terminal consumer would see
 //! them — without spawning the actual `claude` binary or hitting the API.
 
 #![allow(dead_code)]
 
-use rabbit::pty::Pty;
+use rabbit_lib::pty::Pty;
 use std::io::Read;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;

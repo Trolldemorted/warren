@@ -9,7 +9,7 @@
 mod common;
 
 use common::{contains, read_until, spawn_fake_tui, spawn_reader};
-use rabbit::input;
+use rabbit_lib::input;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 

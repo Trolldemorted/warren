@@ -146,6 +146,7 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+#[allow(dead_code)]
 pub async fn extract_agent_token(
     db: &Db,
     headers: &HeaderMap,

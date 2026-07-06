@@ -326,7 +326,7 @@ term.onData(data => {
   ws.send(buf);
 });
 
-// Envelope body shapes per warren/src/agents_live/wire.rs::EnvelopeBody.
+// Envelope body shapes per rabbit_lib::wire::EnvelopeBody.
 function applyMeta(env) {
   const t = env && env.t;
   switch (t) {

@@ -1,7 +1,7 @@
 use crate::meta_ring::MetaRing;
 use crate::wire::{
     Envelope, EnvelopeBody, HelloUp, TermFrame, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
-    TERM_CHAN_SHELL,
+    TERM_CHAN_SHELL, AgentState,
 };
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -189,7 +189,7 @@ impl Link {
                 protocol_v: PROTOCOL_VERSION,
                 claude_version: self.claude_version.clone(),
                 session_id: None,
-                state: "starting".to_string(),
+                state: AgentState::Starting,
                 term_size: self.term_size,
                 recorder_url: self.recorder_url.clone(),
             }),

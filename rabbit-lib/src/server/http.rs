@@ -1,11 +1,11 @@
-use crate::agents_live::handle::AgentStateSnapshot;
-use crate::agents_live::wire::{AgentState, UsageSnapshot};
-use crate::auth::AuthContext;
-use crate::error::{AppError, AppResult};
-use crate::AppState;
+use crate::server::handle::AgentStateSnapshot;
+use crate::wire::{AgentState, UsageSnapshot};
+
+use crate::server::{AuthError, ServerError, ServerResult, ServerState};
+
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -15,10 +15,11 @@ use axum::{
 use futures_util::stream::Stream;
 use serde::Deserialize;
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-pub fn router() -> Router<AppState> {
+pub fn router() -> Router<Arc<ServerState>> {
     Router::new()
         .route(
             "/api/agents/:id/claude/prompt",
@@ -59,13 +60,13 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn require_handle(
-    state: &AppState,
+    state: &Arc<ServerState>,
     agent_id: Uuid,
-) -> AppResult<crate::agents_live::AgentHandle> {
+) -> ServerResult<crate::server::handle::AgentHandle> {
     let handle = state
-        .live
+        .registry
         .get(&agent_id)
-        .ok_or_else(|| AppError::NotFound)?;
+        .ok_or_else(|| ServerError::NotFound)?;
     Ok(handle.clone())
 }
 
@@ -84,18 +85,18 @@ struct PromptRes {
 }
 
 async fn claude_prompt(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<PromptReq>,
-) -> AppResult<impl IntoResponse> {
-    ctx.require_admin()?;
+) -> ServerResult<impl IntoResponse> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
     let handle = require_handle(&state, id).await?;
     if req.text.trim().is_empty() {
-        return Err(AppError::BadRequest("text required".into()));
+        return Err(ServerError::BadRequest("text required".into()));
     }
     if matches!(handle.snapshot().state, AgentState::Running) {
-        return Err(AppError::Conflict("agent busy".into()));
+        return Err(ServerError::Conflict("agent busy".into()));
     }
     let outcome = handle.prompt(&req.text, req.wait).await?;
     Ok(Json(PromptRes {
@@ -112,11 +113,11 @@ struct UsageRes {
 }
 
 async fn claude_usage(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<UsageRes>> {
-    ctx.require_admin()?;
+) -> ServerResult<Json<UsageRes>> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
     let handle = require_handle(&state, id).await?;
     let usage = handle.usage().await?;
     Ok(Json(UsageRes { usage }))
@@ -131,12 +132,12 @@ struct StateRes {
 }
 
 async fn claude_state(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<StateRes>> {
-    ctx.require_admin()?;
-    let connected = state.live.contains_key(&id);
+) -> ServerResult<Json<StateRes>> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    let connected = state.registry.contains_key(&id);
     let snap: AgentStateSnapshot = if connected {
         require_handle(&state, id).await?.state().await?
     } else {
@@ -157,34 +158,34 @@ struct ClearReq {
 }
 
 async fn claude_clear(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<ClearReq>,
-) -> AppResult<StatusCode> {
-    ctx.require_admin()?;
+) -> ServerResult<StatusCode> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
     let handle = require_handle(&state, id).await?;
     handle.clear(req.hard).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn claude_compact(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> AppResult<StatusCode> {
-    ctx.require_admin()?;
+) -> ServerResult<StatusCode> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
     let handle = require_handle(&state, id).await?;
     handle.compact().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn claude_interrupt(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> AppResult<StatusCode> {
-    ctx.require_admin()?;
+) -> ServerResult<StatusCode> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
     let handle = require_handle(&state, id).await?;
     handle.interrupt().await?;
     Ok(StatusCode::NO_CONTENT)
@@ -197,12 +198,12 @@ struct RestartReq {
 }
 
 async fn claude_restart(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(req): Json<RestartReq>,
-) -> AppResult<StatusCode> {
-    ctx.require_admin()?;
+) -> ServerResult<StatusCode> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
     let handle = require_handle(&state, id).await?;
     handle.restart(req.fresh).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -227,14 +228,14 @@ struct EventRow {
 }
 
 async fn claude_events(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
     Query(q): Query<EventsQuery>,
-) -> AppResult<Json<Vec<EventRow>>> {
-    ctx.require_admin()?;
+) -> ServerResult<Json<Vec<EventRow>>> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
     let limit = q.limit.unwrap_or(500).clamp(1, 5000) as u64;
-    let rows = crate::db_ops::list_events_since(&state.db, id, q.since, limit).await?;
+    let rows = state.store.list_events_since(id, q.since, limit).await?;
     Ok(Json(
         rows.into_iter()
             .map(|m| EventRow {
@@ -250,25 +251,25 @@ async fn claude_events(
 }
 
 async fn claude_events_stream(
-    State(state): State<AppState>,
-    ctx: AuthContext,
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> AppResult<impl IntoResponse> {
-    ctx.require_admin()?;
-    if !state.live.contains_key(&id) {
-        return Err(AppError::NotFound);
+) -> ServerResult<impl IntoResponse> {
+    if !state.auth.authenticate_admin(&headers).await? { return Err(ServerError::Auth(AuthError::Invalid)); }
+    if !state.registry.contains_key(&id) {
+        return Err(ServerError::NotFound);
     }
     let meta_rx = state
-        .live
+        .registry
         .get(&id)
-        .ok_or(AppError::NotFound)?
+        .ok_or(ServerError::NotFound)?
         .subscribe_meta();
     let stream = async_stream_stream(meta_rx);
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 fn async_stream_stream(
-    mut meta_rx: tokio::sync::broadcast::Receiver<crate::agents_live::wire::EnvelopeBody>,
+    mut meta_rx: tokio::sync::broadcast::Receiver<crate::wire::EnvelopeBody>,
 ) -> std::pin::Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> {
     Box::pin(async_stream::stream! {
         loop {

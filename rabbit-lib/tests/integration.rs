@@ -13,10 +13,10 @@
 //! `ObserverHandle` state machine with the same hook events `claude` emits, and
 //! checks the real `supervisor::should_reject_prompt` gate at each step.
 
-use rabbit::observer::hooks::ObserverHandle;
-use rabbit::observer::state::State;
-use rabbit::supervisor::{prompt_rejected_for, should_reject_prompt};
-use rabbit::wire::{Envelope, EnvelopeBody};
+use rabbit_lib::observer::hooks::ObserverHandle;
+use rabbit_lib::observer::state::State;
+use rabbit_lib::supervisor::{prompt_rejected_for, should_reject_prompt};
+use rabbit_lib::wire::{Envelope, EnvelopeBody};
 
 fn prompt() -> EnvelopeBody {
     EnvelopeBody::Prompt {

@@ -93,7 +93,7 @@ term.onData(data => {
   // §D read-only viewer mode: skip sending typed bytes.
   if (viewerMode) return;
   const buf = new Uint8Array(1 + data.length);
-  // TERM_CHAN_SHELL = 0x02 — must match warren::agents_live::wire.
+  // TERM_CHAN_SHELL = 0x02 — must match rabbit_lib::wire.
   buf[0] = 0x02;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
   ws.send(buf);

@@ -929,12 +929,13 @@ async fn agent_claude_page(
     }
     match crate::db_ops::get_agent(&state.db, id).await {
         Ok(Some(agent)) => {
-            let connected = state.live.contains_key(&id);
+            let connected = state.live.registry.contains_key(&id);
             // §D Milestone 5: show the "→ history" link only when rabbit
             // actually advertised a recorder URL on its most recent Hello.
             // Without this, dead agents get a guaranteed-404 link.
             let recorder_enabled = state
                 .live
+                .registry
                 .get(&id)
                 .and_then(|h| h.recorder_url())
                 .is_some();
@@ -961,7 +962,7 @@ async fn agent_shell_page(
     }
     match crate::db_ops::get_agent(&state.db, id).await {
         Ok(Some(agent)) => {
-            let connected = state.live.contains_key(&id);
+            let connected = state.live.registry.contains_key(&id);
             render(AgentShellTemplate {
                 nav: Some("agents"),
                 flash: None,
@@ -992,7 +993,7 @@ async fn agent_claude_history_list_page(
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => return err_page(e),
     };
-    let recorder_url = match recorder_url_for(&state.live, id) {
+    let recorder_url = match recorder_url_for(&state.live.registry, id) {
         Ok(u) => u,
         Err(e) => {
             return render(AgentClaudeHistoryListTemplate {
@@ -1065,7 +1066,7 @@ async fn agent_claude_history_play_page(
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => return err_page(e),
     };
-    let recorder_url = match recorder_url_for(&state.live, id) {
+    let recorder_url = match recorder_url_for(&state.live.registry, id) {
         Ok(u) => u,
         Err(_) => {
             // No recorder → can't play. Send the user back to the list

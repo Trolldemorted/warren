@@ -1,8 +1,8 @@
-use crate::agents_live::actor::{Command, TurnOutcomeMsg};
-use crate::agents_live::wire::{
+use crate::server::actor::{Command, TurnOutcomeMsg};
+use crate::wire::{
     AgentState, EnvelopeBody, StateFrame, TermFrame, TermSize, UsageSnapshot,
 };
-use crate::error::{AppError, AppResult};
+use anyhow::Result as AnyResult;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -361,7 +361,7 @@ impl AgentHandle {
         ring.iter().cloned().collect()
     }
 
-    pub async fn prompt(&self, text: &str, wait: bool) -> AppResult<TurnOutcomeMsg> {
+    pub async fn prompt(&self, text: &str, wait: bool) -> AnyResult<TurnOutcomeMsg> {
         let id = Uuid::new_v4();
         let (tx, rx) = oneshot::channel();
         let cmd = Command::Prompt {
@@ -372,13 +372,11 @@ impl AgentHandle {
             reply: if wait { Some(tx) } else { None },
         };
         if self.cmd_tx().send(cmd).await.is_err() {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "agent actor not running"
-            )));
+            return Err(anyhow::anyhow!("agent actor not running"));
         }
         if wait {
             rx.await
-                .map_err(|_| AppError::Internal(anyhow::anyhow!("actor dropped")))
+                .map_err(|_| anyhow::anyhow!("actor dropped"))
         } else {
             let now = chrono::Utc::now();
             Ok(TurnOutcomeMsg {
@@ -391,15 +389,15 @@ impl AgentHandle {
         }
     }
 
-    pub async fn usage(&self) -> AppResult<UsageSnapshot> {
+    pub async fn usage(&self) -> AnyResult<UsageSnapshot> {
         Ok(self.snapshot().last_usage)
     }
 
-    pub async fn state(&self) -> AppResult<AgentStateSnapshot> {
+    pub async fn state(&self) -> AnyResult<AgentStateSnapshot> {
         Ok(self.snapshot())
     }
 
-    pub async fn clear(&self, hard: bool) -> AppResult<()> {
+    pub async fn clear(&self, hard: bool) -> AnyResult<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx()
             .send(Command::Clear {
@@ -407,51 +405,51 @@ impl AgentHandle {
                 reply: Some(tx),
             })
             .await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
+            .map_err(|_| anyhow::anyhow!("actor not running"))?;
         rx.await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor dropped")))
+            .map_err(|_| anyhow::anyhow!("actor dropped"))
     }
 
-    pub async fn compact(&self) -> AppResult<()> {
+    pub async fn compact(&self) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Compact)
             .await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))
+            .map_err(|_| anyhow::anyhow!("actor not running"))
     }
 
-    pub async fn interrupt(&self) -> AppResult<()> {
+    pub async fn interrupt(&self) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Interrupt)
             .await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))
+            .map_err(|_| anyhow::anyhow!("actor not running"))
     }
 
-    pub async fn restart(&self, fresh: bool) -> AppResult<()> {
+    pub async fn restart(&self, fresh: bool) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Restart { fresh })
             .await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))
+            .map_err(|_| anyhow::anyhow!("actor not running"))
     }
 
     /// Send raw terminal bytes toward rabbit on the given channel
     /// (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`). The channel decides which
     /// PTY on the rabbit side receives the keystrokes.
-    pub async fn send_terminal_bytes(&self, chan: u8, bytes: Bytes) -> AppResult<()> {
+    pub async fn send_terminal_bytes(&self, chan: u8, bytes: Bytes) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::SendKeys { chan, data: bytes })
             .await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
+            .map_err(|_| anyhow::anyhow!("actor not running"))?;
         Ok(())
     }
 
     /// Ask rabbit to force a full TUI redraw by emitting two SIGWINCHs.
     /// Called by the browser WS join path after the bounded replay buffer
     /// has been pushed into a fresh xterm.js pane.
-    pub async fn repaint(&self) -> AppResult<()> {
+    pub async fn repaint(&self) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Repaint)
             .await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
+            .map_err(|_| anyhow::anyhow!("actor not running"))?;
         Ok(())
     }
 
@@ -460,11 +458,11 @@ impl AgentHandle {
     /// flushing the bounded replay buffer; the resulting snapshot lets the
     /// browser paint an authoritative terminal state, replacing the v1
     /// SIGWINCH-jiggle heuristic.
-    pub async fn snapshot_request(&self, chan: u8) -> AppResult<()> {
+    pub async fn snapshot_request(&self, chan: u8) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::SnapshotRequest { chan })
             .await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
+            .map_err(|_| anyhow::anyhow!("actor not running"))?;
         Ok(())
     }
 
@@ -473,11 +471,11 @@ impl AgentHandle {
     /// SIGWINCH), instead of typing a private xterm escape sequence into
     /// claude's PTY. The actor's `Command::Resize { cols, rows }` variant
     /// already exists from the late-join jiggle flow.
-    pub async fn resize(&self, cols: u16, rows: u16) -> AppResult<()> {
+    pub async fn resize(&self, cols: u16, rows: u16) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Resize { cols, rows })
             .await
-            .map_err(|_| AppError::Internal(anyhow::anyhow!("actor not running")))?;
+            .map_err(|_| anyhow::anyhow!("actor not running"))?;
         Ok(())
     }
 }
@@ -495,7 +493,7 @@ mod tests {
     // constructors live in `wire.rs`; bring the constants and types the
     // §6.3 tests need into scope explicitly rather than chasing every
     // rename back through `super`.
-    use crate::agents_live::wire::{ScreenSnapshotBody, TERM_CHAN_CLAUDE};
+    use crate::wire::{ScreenSnapshotBody, TERM_CHAN_CLAUDE};
 
     fn h() -> AgentHandle {
         AgentHandle::new(Uuid::nil())
@@ -627,7 +625,7 @@ mod tests {
 
         // Refresh without term_size — should keep the prior value.
         handle.update_state(AgentStateSnapshot {
-            state: crate::agents_live::wire::AgentState::Idle,
+            state: crate::wire::AgentState::Idle,
             ..AgentStateSnapshot::default()
         });
         assert_eq!(

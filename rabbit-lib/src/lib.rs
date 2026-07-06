@@ -1,11 +1,21 @@
-//! `rabbit` — the per-agent supervisor that wraps a real `claude` PTY and
-//! bridges it to warren over a WebSocket link.
+//! `rabbit-lib` — the per-agent Claude supervisor plus the matching
+//! server-side runtime that warren embeds.
 //!
-//! This library exists so the supervisor's internals (`pty`, `input`,
-//! `observer::*`, `wire`, `respawn`, …) are reachable from integration tests
-//! under `tests/` and from downstream crates that want to embed rabbit's
-//! PTY/observer pieces. The `rabbit` binary (`src/main.rs`) is a thin wrapper
-//! around [`run`]; the `rabbit-hook` binary is independent.
+//! Two halves glued together by a single `wire` module:
+//!
+//! * The **supervisor half** (`pty`, `vt`, `input`, `trust`, `respawn`,
+//!   `shell`, `recorder`, `observer`, `meta_ring`, `link`, `supervisor`)
+//!   spawns a real `claude` PTY, parses its terminal output, observes its
+//!   lifecycle via Claude's hook protocol, optionally records asciicast,
+//!   and bridges everything to a single WebSocket link.
+//! * The **server half** (`server`) accepts the supervisor's WS, fans
+//!   term-bytes and meta-envelopes out to multiple browser subscribers
+//!   per agent, and persists the event stream via the `SessionStore` trait
+//!   (warren plugs in a `SeaOrmSessionStore`).
+//!
+//! The `rabbit` and `rabbit-hook` binaries are thin wrappers around
+//! [`run`] and the hook-shim loop respectively, kept as separate bins
+//! so the on-disk artifacts don't change.
 
 pub mod config;
 pub mod health;
@@ -23,6 +33,17 @@ pub mod supervisor;
 pub mod trust;
 pub mod vt;
 pub mod wire;
+
+// `server` is gated on the default feature set because it pulls in
+// `axum` router builders that downstream lib-only consumers may want to
+// skip. It's enabled by default (no feature flag needed).
+pub mod server;
+
+// Re-export the trait seams external embedders must implement.
+pub use server::{
+    AgentEventRecord, AgentHandle, AgentRegistry, AuthBackend, AuthError, LogSink, SessionStore,
+    StdLogSink,
+};
 
 use anyhow::Result;
 use std::path::Path;
@@ -65,7 +86,7 @@ pub fn run() -> Result<()> {
                 supervisor::run(cfg).await
             }
             Mode::HookShim => {
-                // HookShim is now its own binary at src/bin/rabbit-hook.rs.
+                // HookShim is its own binary at src/bin/rabbit-hook.rs.
                 // If you ever invoke it through the rabbit binary, that's a
                 // bug — bail with a clear error.
                 Err(anyhow::anyhow!(

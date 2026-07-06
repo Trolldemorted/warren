@@ -1,12 +1,13 @@
-use crate::agents_live::actor::Command;
-use crate::agents_live::wire::{
+use crate::server::actor::Command;
+use crate::wire::{
     Envelope, EnvelopeBody, TermFrame, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
 };
-use crate::agents_live::AgentHandle;
-use crate::agents_live::AgentRegistry;
-use crate::auth;
-use crate::error::AppError;
-use crate::AppState;
+use crate::server::handle::AgentHandle;
+use crate::server::registry::AgentRegistry;
+
+use crate::server::{AuthError, ServerError, ServerState};
+use std::sync::Arc;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -39,24 +40,26 @@ pub struct WsBrowserQuery {
     pub viewer: Option<bool>,
 }
 
+/// `axum` router for the browser-side WebSocket. Mounts
+/// `/agent/:id/claude/ws`. Carries `Arc<ServerState>` as its state
+/// type — the embedder is expected to call `.with_state(...)` on the
+/// parent router.
+pub fn router() -> axum::Router<Arc<ServerState>> {
+    axum::Router::new().route("/agent/:id/claude/ws", axum::routing::get(ws_browser))
+}
+
 pub async fn ws_browser(
-    State(state): State<AppState>,
+    State(state): State<Arc<ServerState>>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
     Query(q): Query<WsBrowserQuery>,
     ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, AppError> {
-    if !auth::validate_admin_session(
-        &state.db,
-        &auth::read_session_cookie(&headers).unwrap_or_default(),
-    )
-    .await
-    .unwrap_or(false)
-    {
-        return Err(AppError::Unauthorized);
+) -> Result<impl IntoResponse, ServerError> {
+    if !state.auth.authenticate_admin(&headers).await? {
+        return Err(ServerError::Auth(AuthError::Invalid));
     }
     let viewer_mode = q.viewer.unwrap_or(false);
-    let registry: AgentRegistry = state.live.clone();
+    let registry: AgentRegistry = state.registry.clone();
     Ok(ws.on_upgrade(move |socket| async move {
         if let Err(e) = handle(socket, registry, id, viewer_mode).await {
             log::debug!("browser ws closed for agent {}: {e:?}", id);
@@ -412,7 +415,7 @@ async fn forward_browser_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents_live::wire::Envelope;
+    use crate::wire::Envelope;
 
     #[test]
     fn viewer_drops_prompt_frame() {
@@ -497,7 +500,7 @@ mod tests {
     // ws_sink / ws_stream half of the WS doesn't matter here — only the
     // routing decision does.
 
-    use crate::agents_live::handle::AgentHandle;
+    use crate::server::handle::AgentHandle;
 
     /// Build an `AgentHandle` whose cmd_tx we can introspect: every
     /// command the actor-side helper would have received shows up on

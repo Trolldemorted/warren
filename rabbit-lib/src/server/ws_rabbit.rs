@@ -1,48 +1,46 @@
-use crate::agents_live::actor;
-use crate::agents_live::wire::{
+use crate::server::actor;
+use crate::server::registry::AgentRegistry;
+use crate::server::ServerResult;
+use super::ServerState;
+use crate::server::SessionStore;
+use crate::wire::{
     AgentState, Envelope, EnvelopeBody, HelloDown, TermSize, PROTOCOL_VERSION,
 };
-use crate::agents_live::AgentRegistry;
-use crate::auth::extract_agent_token;
-use crate::error::AppError;
-use crate::AppState;
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
+use std::sync::Arc;
+
+/// `axum` router for the rabbit-side WebSocket. Mounts `/ws/rabbit`.
+/// Carries `Arc<ServerState>` as its state type — the embedder is
+/// expected to call `.with_state(...)` on the parent router.
+pub fn router() -> axum::Router<Arc<ServerState>> {
+    axum::Router::new().route("/ws/rabbit", axum::routing::get(ws_rabbit))
+}
 
 pub async fn ws_rabbit(
-    State(state): State<AppState>,
+    State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, AppError> {
-    let agent = match extract_agent_token(&state.db, &headers).await? {
-        Some(a) => a,
-        None => return Err(AppError::Unauthorized),
-    };
+) -> ServerResult<impl IntoResponse> {
+    let agent_id = state.auth.authenticate_agent(&headers).await?;
 
     Ok(ws.on_upgrade(move |socket| async move {
-        let db = state.db.clone();
-        let registry = state.live.clone();
-        if let Err(e) = handle_session(db, registry, socket, agent.0.id).await {
-            log::debug!("rabbit ws closed for agent {}: {e:?}", agent.0.id);
+        let store = state.store.clone();
+        let registry = state.registry.clone();
+        if let Err(e) = handle_session(store, registry, socket, agent_id).await {
+            log::debug!("rabbit ws closed for agent {}: {e:?}", agent_id);
         }
     }))
 }
 
 async fn handle_session(
-    db: crate::db::Db,
+    store: Arc<dyn SessionStore>,
     registry: AgentRegistry,
     socket: WebSocket,
     agent_id: uuid::Uuid,
 ) -> anyhow::Result<()> {
-    // Use `register` (vs. `entry(...).or_insert_with(...)`) so any
-    // browser WS already past its "no rabbit yet" wait_for_arrival
-    // guard wakes up the moment we're committed to running the actor.
-    // Inserting happens lazily — a browser WS open before the rabbit
-    // arrived would have created the entry already with stale (orphan)
-    // cmd_tx / no actor; `register` reuses that entry and just signals
-    // the notifier.
     let initial = registry.register(agent_id);
     log::info!("rabbit ws connected: agent={}", agent_id);
 
@@ -52,7 +50,7 @@ async fn handle_session(
         entry.value_mut().install_cmd_tx(cmd_tx.clone());
     }
 
-    actor::run(db, handle_for_actor, agent_id, socket, cmd_rx).await
+    actor::run(store, handle_for_actor, agent_id, socket, cmd_rx).await
 }
 
 #[allow(dead_code)]
