@@ -404,6 +404,8 @@ async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
             CommsRow {
                 req,
                 source,
+                source_agent_id: req.sender_agent_id,
+                target_agent_id: req.claimed_by,
                 claimed_by_name,
                 acknowledged_by_name,
             }
@@ -937,7 +939,6 @@ async fn agent_claude_page(
                 .and_then(|h| h.recorder_url())
                 .is_some();
             render(AgentClaudeTemplate {
-                title: Some("claude"),
                 nav: Some("agents"),
                 flash: None,
                 agent,
@@ -962,7 +963,6 @@ async fn agent_shell_page(
         Ok(Some(agent)) => {
             let connected = state.live.contains_key(&id);
             render(AgentShellTemplate {
-                title: Some("shell"),
                 nav: Some("agents"),
                 flash: None,
                 agent,

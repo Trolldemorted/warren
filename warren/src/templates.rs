@@ -1,5 +1,6 @@
 use askama::Template;
 use serde::Serialize;
+use uuid::Uuid;
 
 #[derive(Template)]
 #[template(path = "login.html")]
@@ -40,7 +41,17 @@ pub struct CommsTemplate<'a> {
 
 pub struct CommsRow<'a> {
     pub req: &'a crate::entity::request::Model,
+    /// Display string for the source cell (e.g. `"claude/4-7"` or `"admin"`).
     pub source: String,
+    /// Agent id backing the source cell, when the request was sent by an
+    /// agent. `None` for admin-sent requests. Used to build a link to
+    /// the agent's claude page.
+    pub source_agent_id: Option<Uuid>,
+    /// Agent id backing the target cell, when the request has been
+    /// claimed by a specific agent. `None` for unclaimed requests
+    /// (target is then just class+type, no specific agent). Used to
+    /// build a link to the claiming agent's page.
+    pub target_agent_id: Option<Uuid>,
     pub claimed_by_name: Option<String>,
     pub acknowledged_by_name: Option<String>,
 }
@@ -76,7 +87,6 @@ pub struct ChannelsTemplate {
 #[derive(Template)]
 #[template(path = "agent_claude.html")]
 pub struct AgentClaudeTemplate {
-    pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
     pub agent: crate::entity::agent::Model,
@@ -122,7 +132,6 @@ pub struct AgentClaudeHistoryPlayTemplate {
 /// `AgentClaudeTemplate` — same xterm.js pane, different WS endpoint
 /// and a smaller UI (no action buttons, just the live terminal).
 pub struct AgentShellTemplate {
-    pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
     pub agent: crate::entity::agent::Model,

@@ -42,8 +42,30 @@
         {% let r = row.req %}
         <tr>
           <td><small>{{ r.created_at_display() }}</small></td>
-          <td {% if r.status == 4 %}class="cell-pending"{% endif %}><small>{{ row.source }}</small></td>
-          <td {% if r.status == 1 || r.status == 2 %}class="cell-pending"{% endif %}>{{ r.target_class }}{% if let Some(t) = r.target_type %}/{{ t }}{% endif %}</td>
+          {# Source column: link to the sender agent's claude page when one
+             exists, plain text otherwise (admin-sent requests).
+             Highlight when the source is the responsible party for the
+             current step — i.e. status 4 means the source agent owes an
+             acknowledgement. #}
+          <td class="{% if r.status == 4 %}cell-pending responsible-source{% endif %}">
+            {% if let Some(aid) = row.source_agent_id %}
+              <a href="/agent/{{ aid }}/claude"><small>{{ row.source }}</small></a>
+            {% else %}
+              <small>{{ row.source }}</small>
+            {% endif %}
+          </td>
+          {# Target column: link to the claiming agent's claude page when
+             someone has picked up the request; otherwise just the
+             class/type text. Highlight when the target is the responsible
+             party — i.e. status 1 (awaiting claim) or status 2 (working
+             on the response). #}
+          <td class="{% if r.status == 1 || r.status == 2 %}cell-pending responsible-target{% endif %}">
+            {% if let Some(aid) = row.target_agent_id %}
+              <a href="/agent/{{ aid }}/claude">{{ r.target_class }}{% if let Some(t) = r.target_type %}/{{ t }}{% endif %}</a>
+            {% else %}
+              {{ r.target_class }}{% if let Some(t) = r.target_type %}/{{ t }}{% endif %}
+            {% endif %}
+          </td>
           <td>
             <a class="payload-link" href="#payload-{{ r.id }}" title="Click to view full payload">
               <pre class="payload mb-0">{{ r.payload_preview() }}</pre>
