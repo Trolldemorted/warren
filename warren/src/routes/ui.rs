@@ -154,7 +154,7 @@ fn clear_cookie_value() -> HeaderValue {
 
 async fn is_admin(headers: &HeaderMap, state: &AppState) -> bool {
     if let Some(token) = auth::read_session_cookie(headers) {
-        return auth::validate_admin_session(&state.db, &token)
+        return auth::validate_admin_session_valid_only(&state.db, &token)
             .await
             .unwrap_or(false);
     }

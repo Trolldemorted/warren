@@ -9,7 +9,7 @@
 //! calls, but it does NOT introduce new persistence behaviour. If you
 //! need a new query, add it to `db_ops` and call it from here.
 
-use crate::auth::{lookup_agent_by_token, validate_admin_session};
+use crate::auth::{lookup_agent_by_token, validate_admin_session_valid_only};
 use crate::db::Db;
 use crate::entity::agent_event;
 use rabbit_lib::server::{AgentEventRecord, AuthBackend, AuthError, SessionStore};
@@ -104,7 +104,7 @@ impl WarAuthBackend {
     async fn classify(&self, headers: &axum::http::HeaderMap) -> Result<AdminOrAgent, AuthError> {
         use axum::http::header;
         if let Some(cookie) = crate::auth::read_session_cookie(headers) {
-            if validate_admin_session(&self.db, &cookie)
+            if validate_admin_session_valid_only(&self.db, &cookie)
                 .await
                 .map_err(|e| AuthError::Internal(e.to_string()))?
             {
@@ -116,7 +116,7 @@ impl WarAuthBackend {
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
         {
-            if validate_admin_session(&self.db, token)
+            if validate_admin_session_valid_only(&self.db, token)
                 .await
                 .map_err(|e| AuthError::Internal(e.to_string()))?
             {

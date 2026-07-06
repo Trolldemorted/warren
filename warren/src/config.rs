@@ -33,7 +33,7 @@ impl Config {
             session_ttl_hours: env::var("SESSION_TTL_HOURS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(24),
+                .unwrap_or(168),
             static_dir,
             docs_dir,
         })
@@ -54,7 +54,7 @@ impl Config {
             bind_addr: env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             database_url,
             admin_psk: String::new(),
-            session_ttl_hours: 24,
+            session_ttl_hours: 168,
             static_dir,
             docs_dir,
         })

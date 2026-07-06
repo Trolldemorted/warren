@@ -307,6 +307,73 @@ fn build_router(state: AppState) -> Router {
         // the outer `AppState` via the `FromRef` impl above.
         .merge(state.live.router().with_state(state.live.clone()))
         .nest("/static", routes::static_files::router(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            refresh_cookie_middleware,
+        ))
         .layer(security_headers)
         .with_state(state)
 }
+
+/// Sliding-window admin session refresh. The middleware does its own
+/// validity+threshold check (one indexed SELECT) and, when the cookie
+/// is valid and `<50% * ttl_hours` remain, bumps `expires_at` and
+/// attaches a fresh `Set-Cookie` to the response so the browser-side
+/// `Max-Age` rolls forward in lockstep with the DB row.
+///
+/// The auth handler's `AuthContext` extractor runs its own check too
+/// (the extractor is what gates the route), so the SQL hit happens
+/// twice per cookie-bearing request. Both queries hit
+/// `admin_sessions_expires_idx`; cost is one round-trip + one row
+/// read. A future optimization is to share the validation result via
+/// request extensions and have the extractor short-circuit — see
+/// `validate_admin_session_valid_only` for the lower-effort variant.
+async fn refresh_cookie_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // Capture the token value before `next.run(req)` consumes the
+    // request — we need it to rebuild the cookie with the same value
+    // but a fresh `Max-Age`.
+    let cookie_token = req
+        .headers()
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .flat_map(|s| s.split(';'))
+        .map(|s| s.trim())
+        .find_map(|kv| {
+            kv.strip_prefix(&format!("{COOKIE_NAME}="))
+                .map(|v| v.to_string())
+        });
+
+    let mut resp = next.run(req).await;
+
+    if let Some(token) = cookie_token {
+        // Mirror `validate_admin_session`'s threshold rule (1
+        // remaining < 0.5 * ttl_hours). On a refresh path, also bump
+        // the DB row — keeps server-side and client-side TTLs in
+        // lockstep. The handler's extractor will re-validate and may
+        // do its own bump; both writes set `expires_at = now + TTL`,
+        // so the double-update is idempotent.
+        match auth::validate_admin_session(&state.db, &token, state.config.session_ttl_hours).await
+        {
+            Ok(auth::SessionOutcome::Valid { refresh: true }) => {
+                let value = format!(
+                    "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+                    state.config.session_ttl_hours * 3600
+                );
+                if let Ok(hv) = HeaderValue::from_str(&value) {
+                    resp.headers_mut()
+                        .insert(HeaderName::from_static("set-cookie"), hv);
+                }
+            }
+            Ok(_) => {} // valid but not below threshold — no refresh needed
+            Err(_) => {} // expired or DB hiccup; let the handler decide
+        }
+    }
+    resp
+}
+
+const COOKIE_NAME: &str = auth::SESSION_COOKIE;
