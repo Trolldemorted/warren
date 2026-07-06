@@ -343,11 +343,27 @@ function applyMeta(env) {
       // reposition the cursor via ANSI CSI H (1-indexed). Eventually
       // replaces the SIGWINCH jiggle on browser join.
       if (!Array.isArray(env.text)) break;
-      term.reset();
-      term.write(env.text.join('\r\n') + '\r\n');
-      const r = (env.cursor_row || 0) + 1;
-      const c = (env.cursor_col || 0) + 1;
-      term.write(`\x1b[${r};${c}H`);
+      // §D + Firefox-quirk follow-up: the §A.6 mouseTracking fix eliminated
+      // the *upstream* cause of empty snapshots (phantom SGR reports flooding
+      // claude's TUI mid-render). One residual path is still observable:
+      // when the WS opens right when claude is between renders (alt-screen
+      // freshly cleared, or cursor row sitting alone on an otherwise blank
+      // grid), `vt.text()` returns Vec<String> of empty rows. Applying that
+      // would `term.reset()` away every byte the term_ring replay just
+      // painted, leaving the user staring at a black pane on page load —
+      // even with mouse-tracking fully disabled. Detect that case and skip
+      // the apply entirely; the term-ring binary frames are a better
+      // approximation of the user's view than a deliberately-empty snapshot.
+      const hasContent = env.text.some(
+        row => typeof row === 'string' && row.trim().length > 0,
+      );
+      if (hasContent) {
+        term.reset();
+        term.write(env.text.join('\r\n') + '\r\n');
+        const r = (env.cursor_row || 0) + 1;
+        const c = (env.cursor_col || 0) + 1;
+        term.write(`\x1b[${r};${c}H`);
+      }
       break;
     // §A.6 leader-based resize — see `connection_assigned` /
     // `leader_changed` cases below. Server-sent on WS open and on every
