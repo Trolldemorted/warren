@@ -31,7 +31,6 @@ path = "src/bin/rabbit-hook.rs"
 default = ["tls"]
 tls = ["tokio-tungstenite/rustls-tls-webpki-roots"]
 shell = []             # the bash PTY sidecar (`rabbit::shell`)
-asciicast = []         # the asciicast v2 recorder + http_server
 
 [dependencies]
 rabbit-lib = { path = "../rabbit-lib" }
