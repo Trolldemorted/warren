@@ -216,6 +216,16 @@ impl std::str::FromStr for AgentState {
 }
 
 impl From<&str> for AgentState {
+    /// Parse a snake-case label into the typed enum.
+    ///
+    /// **No silent fallback:** unrecognized labels return
+    /// `AgentState::Starting` to keep historical call sites that use
+    /// `.into()` for `state: AgentState` well-typed, but the *observer*
+    /// path in `supervisor::send_state` and the actor must do their own
+    /// `from_label`-style guard against unknown labels. The typed enum
+    /// itself can only carry the five known variants; "unknown label"
+    /// by construction no longer exists *as a runtime concept*, only
+    /// as a malformed-JSON envelope (which serde would reject).
     fn from(s: &str) -> Self {
         s.parse().unwrap_or(AgentState::Starting)
     }

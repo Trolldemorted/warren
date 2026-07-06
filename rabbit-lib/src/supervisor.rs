@@ -12,8 +12,8 @@ use crate::recorder::AsciicastRecorder;
 use crate::respawn::{self, CrashWindow};
 use crate::shell::{self, ShellCmd, ShellHandle};
 use crate::wire::{
-    Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame, TermSize,
-    TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+    Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame,
+    TermSize, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
 };
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -1382,6 +1382,7 @@ mod tests {
     use super::*;
     use crate::pty::ExitKind;
     use crate::respawn::CrashWindow;
+    use crate::wire::AgentState;
     use std::time::Duration;
 
     #[test]
@@ -1546,7 +1547,7 @@ mod tests {
             &observer,
             &tx,
             StateFrame {
-                state: "idle".into(),
+                state: AgentState::Idle,
                 session_id: None,
                 reason: None,
             },
@@ -1559,7 +1560,7 @@ mod tests {
             &observer,
             &tx,
             StateFrame {
-                state: "dead".into(),
+                state: AgentState::Dead,
                 session_id: None,
                 reason: Some("crashed".into()),
             },
@@ -1568,19 +1569,11 @@ mod tests {
         .unwrap();
         assert_eq!(observer.latest_state(), State::Dead);
 
-        // An unrecognized label must leave the tracked state untouched.
-        send_state(
-            &observer,
-            &tx,
-            StateFrame {
-                state: "gibberish".into(),
-                session_id: None,
-                reason: None,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(observer.latest_state(), State::Dead);
+        // Note: the typed `AgentState` enum has no "unknown label" variant;
+        // malformed wire envelopes are rejected by serde at deserialize
+        // time. The historical "unrecognized label must leave observer
+        // untouched" assertion was a guard against the old String-typed
+        // `state` field; that path no longer exists at runtime.
     }
 
     // -----------------------------------------------------------------
