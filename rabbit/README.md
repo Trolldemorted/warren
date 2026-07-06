@@ -35,8 +35,11 @@ All configuration is via environment variables (see [`config.rs`](src/config.rs)
 | `CRASH_WINDOW_SECS` / `CRASH_THRESHOLD` | `300` / `3` | Crash-loop guard. |
 | `RABBIT_HOOK_BIN` | — | Override the path baked into installed hooks. |
 | `AUTO_TRUST` | `1` (on) | Auto-accept claude's first-run trust dialog (see below). Set `0`/`false`/`no` to disable. |
+| `ENABLE_SHELL` | `0` (off) | Spawn a second bash PTY and expose it as `/agent/:id/shell`. |
+| `SHELL_BIN` | `/bin/bash` | Binary for the shell PTY. |
+| `SHELL_ARGS` | `-i` | Space-split base argv for the shell PTY. |
 
-## Kubernetes deployment (§A.7)
+## Kubernetes deployment
 
 ### Persistent volumes — mount **both** `/workdir` and `~/.claude`
 
