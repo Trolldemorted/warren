@@ -261,6 +261,12 @@ term.onData(data => {
 // Envelope body shapes per warren/src/agents_live/wire.rs::EnvelopeBody.
 function applyMeta(env) {
   const t = env && env.t;
+  // §diagnose display-clearing: log every meta envelope. The bug shows
+  // up after typing, so we want to see if any reset/snapshot envelope
+  // arrives at that moment.
+  if (location.search.includes('debug_typing=1')) {
+    console.log('applyMeta t=' + t, JSON.stringify(env));
+  }
   switch (t) {
     case 'state':
       setBadge(env.state);
@@ -365,7 +371,21 @@ function connectWs() {
       if (view.length === 0) return;
       // Only the Claude channel (0x01) is defined; drop other ids.
       if (view[0] !== 0x01) return;
-      term.write(bytesToUtf8(view.subarray(1)));
+      const payload = view.subarray(1);
+      // §diagnose display-clearing: opt-in via `?debug_typing=1`. Logs
+      // the bytes coming back from rabbit before they reach xterm.js,
+      // so we can see if claude is emitting something that wipes the
+      // screen (e.g. clear-screen ESC[2J, alternate-screen 1049,
+      // cursor-home + scroll-up region tricks) on each keystroke.
+      if (location.search.includes('debug_typing=1')) {
+        console.log(
+          'ws.onmessage (binary)',
+          payload.length, 'bytes:',
+          Array.from(payload).map(b => b.toString(16).padStart(2,'0')).join(' '),
+          '-> utf8:', JSON.stringify(bytesToUtf8(payload)),
+        );
+      }
+      term.write(bytesToUtf8(payload));
       return;
     }
     try {
