@@ -109,11 +109,16 @@ function connectWs() {
 
   ws.onmessage = (ev) => {
     if (!(ev.data instanceof ArrayBuffer)) return;
+    // §A.7: server→browser shell binary frames share the wider prelude
+    // with the claude channel — `<chan:1> <seq:8 BE> <data>`. The shell
+    // pane never participates in the snapshot protocol (no VT on the
+    // rabbit side today), but the seq is still on the wire for protocol
+    // symmetry, so the browser strips it before forwarding `data` to
+    // xterm. Drop malformed frames (shorter than the 9-byte prelude).
+    if (ev.data.byteLength < 10) return;
     const view = new Uint8Array(ev.data);
-    if (view.length === 0) return;
-    // Drop frames for any channel other than shell (0x02).
     if (view[0] !== 0x02) return;
-    term.write(bytesToUtf8(view.subarray(1)));
+    term.write(bytesToUtf8(view.subarray(9)));
   };
 
   ws.onclose = () => {

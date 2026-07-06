@@ -1,12 +1,27 @@
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const TERM_CHAN_CLAUDE: u8 = 0x01;
 /// §D Milestone 5: secondary terminal channel for `/agent/:id/shell`.
 /// A `bash` PTY on the same rabbit, distinct from the main Claude
 /// channel so it can be subscribed to (and written to) independently.
 /// Mirrors `warren::agents_live::wire::TERM_CHAN_SHELL`.
 pub const TERM_CHAN_SHELL: u8 = 0x02;
+
+/// §A.7 / seq-numbered snapshot protocol — one server→browser binary
+/// term-stream chunk, carrying the channel byte, the per-channel seq
+/// that the producer (the blocking PTY reader thread or shell reader)
+/// assigned it, and the raw PTY bytes for that chunk. The replay
+/// buffer stores `TermFrame`s so the seq rides through reconnects; warren
+/// relays each frame verbatim (byte-for-byte: same `chan`, same `seq`,
+/// same `data`) to its browser subscribers and to the asciicast
+/// recorder. Mirrored in `warren::agents_live::wire::TermFrame`.
+#[derive(Debug, Clone)]
+pub struct TermFrame {
+    pub chan: u8,
+    pub seq: u64,
+    pub data: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -95,6 +110,15 @@ pub struct ScreenSnapshotBody {
     pub cursor_row: u16,
     pub cursor_visible: bool,
     pub text: Vec<String>,
+    /// §A.7 / seq-numbered snapshot protocol — per-`chan` counter of the
+    /// last byte whose cells are *fully represented* in `text`. `0` means
+    /// "no bytes fed yet on this channel"; a positive value tells the
+    /// browser which buffered live frames are already covered by the
+    /// snapshot and can be discarded before the apply. Mirrored in
+    /// `warren::agents_live::wire::ScreenSnapshotBody`. `#[serde(default)]`
+    /// keeps v1 envelopes (which had no `after_seq`) deserializable.
+    #[serde(default)]
+    pub after_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,4 +193,51 @@ pub struct SessionInfo {
 pub struct LogLine {
     pub level: String,
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    //! §A.7 — serde roundtrip for `ScreenSnapshotBody::after_seq`. The
+    //! field is added with `#[serde(default)]` so v1 envelopes (which
+    //! had no `after_seq` key) still deserialize cleanly under a v2
+    //! struct during the rollout window. These tests pin that property
+    //! so a future "tighten the derive" refactor can't silently break
+    //! cross-version reads.
+
+    use super::*;
+
+    #[test]
+    fn screen_snapshot_body_v2_serializes_after_seq_field() {
+        let body = ScreenSnapshotBody {
+            chan: 0x01,
+            cols: 80,
+            rows: 24,
+            cursor_col: 0,
+            cursor_row: 0,
+            cursor_visible: true,
+            text: vec!["".into()],
+            after_seq: 42,
+        };
+        let v = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(v["after_seq"], 42);
+    }
+
+    #[test]
+    fn screen_snapshot_body_v1_json_without_after_seq_deserializes_to_zero() {
+        // A v1 producer never emitted `after_seq`; the v2 struct must
+        // tolerate its absence (otherwise a mixed-version rollout would
+        // fail to parse the older side's envelopes).
+        let v1_json = serde_json::json!({
+            "chan": 0x01,
+            "cols": 80,
+            "rows": 24,
+            "cursor_col": 0,
+            "cursor_row": 0,
+            "cursor_visible": true,
+            "text": [""],
+        });
+        let body: ScreenSnapshotBody = serde_json::from_value(v1_json)
+            .expect("v1 envelope must deserialize under a v2 struct");
+        assert_eq!(body.after_seq, 0);
+    }
 }

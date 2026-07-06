@@ -233,6 +233,35 @@ term.open(document.getElementById('term'));
 fit.fit();
 term.focus();
 
+// §A.7 / seq-numbered snapshot protocol — buffer that holds live binary
+// frames between WS open and the first `screen_snapshot` apply, so the
+// snapshot's `after_seq` watermark can trim frames the snapshot already
+// covers. Set to `null` after the first snapshot applies (no further
+// snapshots are expected on this socket — the server only requests one,
+// at WS-open time, from ws_browser.rs). While non-null, every binary
+// frame is appended to the buffer AND written to xterm — only the
+// snapshot apply drains the buffer.
+const PENDING_FRAMES_MAX = 4096;
+let pendingFrames = []; // null after first snapshot apply
+
+function writeBinaryFrame(seq, data) {
+  if (pendingFrames === null) {
+    term.write(bytesToUtf8(data));
+    return;
+  }
+  pendingFrames.push({ seq, data });
+  if (pendingFrames.length > PENDING_FRAMES_MAX) {
+    // Defensive cap: bounds memory between WS open and the first
+    // snapshot apply even under pathological conditions (e.g. snapshot
+    // envelope somehow dropped). Normal RTT is ~50ms so this never
+    // trips; if it does the oldest frames are sacrificed, which is
+    // fine because xterm already drew them and the snapshot will
+    // overwrite them anyway.
+    pendingFrames.shift();
+  }
+  term.write(bytesToUtf8(data));
+}
+
 // §A.6 / Firefox-quirk fix: claude's TUI handles `\x7f` correctly when
 // xterm.js's `_keyDown → _evaluateKeyboardEvent` codepath emits `o.key =
 // s.C0.DEL` (the normal case). But Firefox mobile (Desktop Mode), and
@@ -338,32 +367,55 @@ function applyMeta(env) {
       promptRejectedBanner.classList.add('visible');
       break;
     case 'screen_snapshot':
-      // §D Milestone 5 (Phase B): authoritative late-join screen dump
-      // from rabbit's server-side VT. Reset xterm.js and write the rows
-      // joined with CRLF (so each row returns to column 0), then
-      // reposition the cursor via ANSI CSI H (1-indexed). Eventually
-      // replaces the SIGWINCH jiggle on browser join.
+      // §A.7 / seq-numbered snapshot protocol — two-step apply:
+      //   1. trim any buffered live binary frames whose seq ≤
+      //      `env.after_seq` (rabbit already folded those bytes into
+      //      the snapshot grid, so re-applying them would paint
+      //      stale rows on top of the freshly reset xterm);
+      //   2. apply the snapshot, then re-write the still-relevant
+      //      live frames in seq order so the user sees the snapshot's
+      //      authoritative state with no flicker or "discarded
+      //      characters" UX.
+      //
+      // The doc-style §D Milestone 5 (Phase B) notes still apply
+      // (mouse-tracking fix upstack, empty-snapshot guard): if every
+      // row is whitespace we skip the apply entirely — the buffered
+      // frames are already a closer approximation of the user's
+      // current view.
       if (!Array.isArray(env.text)) break;
-      // §D + Firefox-quirk follow-up: the §A.6 mouseTracking fix eliminated
-      // the *upstream* cause of empty snapshots (phantom SGR reports flooding
-      // claude's TUI mid-render). One residual path is still observable:
-      // when the WS opens right when claude is between renders (alt-screen
-      // freshly cleared, or cursor row sitting alone on an otherwise blank
-      // grid), `vt.text()` returns Vec<String> of empty rows. Applying that
-      // would `term.reset()` away every byte the term_ring replay just
-      // painted, leaving the user staring at a black pane on page load —
-      // even with mouse-tracking fully disabled. Detect that case and skip
-      // the apply entirely; the term-ring binary frames are a better
-      // approximation of the user's view than a deliberately-empty snapshot.
       const hasContent = env.text.some(
         row => typeof row === 'string' && row.trim().length > 0,
       );
-      if (hasContent) {
-        term.reset();
-        term.write(env.text.join('\r\n') + '\r\n');
-        const r = (env.cursor_row || 0) + 1;
-        const c = (env.cursor_col || 0) + 1;
-        term.write(`\x1b[${r};${c}H`);
+      if (!hasContent) break;
+      const afterSeq = Number(env.after_seq || 0);
+      // §A.7: only frames with `seq > afterSeq` survive the trim.
+      // `findIndex` returns the first frame strictly past the
+      // watermark — anything at or before is guaranteed to be folded
+      // into the snapshot's grid.
+      let keep;
+      if (pendingFrames === null) {
+        keep = [];
+      } else {
+        const idx = pendingFrames.findIndex(f => f.seq > afterSeq);
+        keep = idx >= 0 ? pendingFrames.slice(idx) : [];
+      }
+      // §A.7: drop the gate entirely now that the first snapshot has
+      // been applied. There is no further snapshot expected on this
+      // socket (only the late-join flow asks for one, and it lives
+      // server-side — fired right after the replay-buffer flush), so
+      // every subsequent binary frame writes through to xterm directly.
+      pendingFrames = null;
+      term.reset();
+      term.write(env.text.join('\r\n') + '\r\n');
+      const r = (env.cursor_row || 0) + 1;
+      const c = (env.cursor_col || 0) + 1;
+      term.write(`\x1b[${r};${c}H`);
+      // Flush the surviving live frames IN ORDER. We rely on each
+      // `pendingFrame.data` already being a Uint8Array subview of the
+      // original binary message — its buffer is alive for the lifetime
+      // of the message, which `term.write` consumed synchronously.
+      for (const f of keep) {
+        term.write(bytesToUtf8(f.data));
       }
       break;
     // §A.6 leader-based resize — see `connection_assigned` /
@@ -416,11 +468,26 @@ function connectWs() {
       setConnected(true);
     }
     if (ev.data instanceof ArrayBuffer) {
+      // §A.7: server→browser terminal binary frames now have a wider
+      // prelude — `<chan:1> <seq:8 BE> <data>` — so the browser can
+      // trim buffered frames whose seq a snapshot already covers. Drop
+      // malformed frames (anything shorter than the 9-byte prelude)
+      // rather than slicing into the data and presenting partial
+      // sequences to xterm.
+      if (ev.data.byteLength < 10) return;
       const view = new Uint8Array(ev.data);
-      if (view.length === 0) return;
-      // Only the Claude channel (0x01) is defined; drop other ids.
+      // Only the Claude channel (0x01) is delivered on this socket;
+      // ws_shell.rs owns the shell channel. Drop anything else.
       if (view[0] !== 0x01) return;
-      term.write(bytesToUtf8(view.subarray(1)));
+      // Manual BE parse so the seq fits comfortably in a JS Number.
+      // Per-channel counters start at 1 and grow by however many reads
+      // the PTY produced — at ~1k/sec for hours on end, well within
+      // Number.MAX_SAFE_INTEGER (2^53 - 1).
+      let seq = 0;
+      for (let i = 1; i < 9; i++) {
+        seq = seq * 256 + view[i];
+      }
+      writeBinaryFrame(seq, view.subarray(9));
       return;
     }
     try {

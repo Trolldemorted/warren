@@ -151,15 +151,23 @@ fn run_generation(
     log::info!("shell pty spawned: bin={bin} args={args:?}");
 
     // Reader thread: blocking-read PTY output → tagged binary frames to warren.
+    // §A.7: each shell generation owns its own per-channel seq counter,
+    // independent of claude's. Single-producer (this thread), so
+    // `Ordering::Relaxed`-equivalent reasoning is fine — just a plain
+    // u64. Starts at 1, bumped before assignment.
     let reader_join = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
+        let mut next_seq: u64 = 1;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    let seq = next_seq;
+                    next_seq = next_seq.wrapping_add(1);
                     if cmd_tx
                         .blocking_send(LinkCmd::SendBinary {
                             chan: TERM_CHAN_SHELL,
+                            seq,
                             data: buf[..n].to_vec(),
                         })
                         .is_err()
@@ -239,10 +247,21 @@ mod tests {
 
         // Collect output until we see the echoed marker or time out.
         let mut seen = Vec::new();
+        let mut first_seq: Option<u64> = None;
         let found = tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(cmd) = cmd_rx.recv().await {
-                if let LinkCmd::SendBinary { chan, data } = cmd {
+                if let LinkCmd::SendBinary { chan, seq, data } = cmd {
                     assert_eq!(chan, TERM_CHAN_SHELL, "shell output must carry the shell channel");
+                    // §A.7: pin the first chunk's seq to 1 — the
+                    // counter starts at 1, and increment-before-assign
+                    // means the first read off the wire gets seq=1.
+                    if first_seq.is_none() {
+                        first_seq = Some(seq);
+                        assert_eq!(
+                            seq, 1,
+                            "first shell-channel byte must carry seq=1 (counter starts at 1)"
+                        );
+                    }
                     seen.extend_from_slice(&data);
                     if seen.windows(4).any(|w| w == b"ping") {
                         return true;
@@ -254,6 +273,7 @@ mod tests {
         .await
         .expect("timed out waiting for shell echo");
         assert!(found, "expected the written bytes to echo back from the pty");
+        assert_eq!(first_seq, Some(1), "first shell read must carry seq=1");
 
         shutdown.store(true, Ordering::SeqCst);
         let _ = gen.await;

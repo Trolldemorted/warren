@@ -9,6 +9,7 @@
 //! The same wire byte (TER CHAN_SHELL = 0x02) is used to route frames to
 //! the right PTY on the rabbit side; this handler filters on that byte.
 
+use crate::agents_live::wire::TermFrame;
 use crate::agents_live::AgentRegistry;
 use crate::auth;
 use crate::error::AppError;
@@ -83,12 +84,21 @@ async fn handle(
 
     // Replay any buffered shell frames so a late joiner sees the recent
     // shell history (mirrors `ws_browser`'s replay buffer pattern, just
-    // filtered to TERM_CHAN_SHELL).
-    for chunk in handle.replay_term() {
-        if chunk.first() != Some(&crate::agents_live::wire::TERM_CHAN_SHELL) {
+    // filtered to TERM_CHAN_SHELL). §A.7: each frame is re-emitted as
+    // `<chan:1> <seq:8 BE> <data>`, preserving the seq the shell reader
+    // thread assigned on the rabbit side.
+    for TermFrame { chan, seq, data } in handle.replay_term() {
+        if chan != crate::agents_live::wire::TERM_CHAN_SHELL {
             continue;
         }
-        if sink.send(Message::Binary(chunk.to_vec())).await.is_err() {
+        if data.is_empty() {
+            continue;
+        }
+        let mut frame = Vec::with_capacity(9 + data.len());
+        frame.push(chan);
+        frame.extend_from_slice(&seq.to_be_bytes());
+        frame.extend_from_slice(&data);
+        if sink.send(Message::Binary(frame)).await.is_err() {
             break;
         }
     }
@@ -97,16 +107,28 @@ async fn handle(
         tokio::select! {
             biased;
             chunk = term_rx.recv() => {
-                let bytes = match chunk {
-                    Ok(b) => b,
+                let frame = match chunk {
+                    Ok(f) => f,
                     Err(_) => break,
                 };
-                // Forward only the shell channel; the claude channel has
-                // its own WS endpoint.
-                if bytes.first() != Some(&crate::agents_live::wire::TERM_CHAN_SHELL) {
+                // §A.7: dumb-pipe pass-through for the shell channel.
+                // Re-emit `<chan:1> <seq:8 BE> <data>` so the browser pane
+                // can match live shell bytes against any future
+                // snapshot's `after_seq`. (Today there's no shell-side VT
+                // so no snapshot is ever emitted; the seq still rides
+                // through for protocol symmetry.)
+                let TermFrame { chan, seq, data } = frame;
+                if chan != crate::agents_live::wire::TERM_CHAN_SHELL {
                     continue;
                 }
-                if sink.send(Message::Binary(bytes.to_vec())).await.is_err() {
+                if data.is_empty() {
+                    continue;
+                }
+                let mut out = Vec::with_capacity(9 + data.len());
+                out.push(chan);
+                out.extend_from_slice(&seq.to_be_bytes());
+                out.extend_from_slice(&data);
+                if sink.send(Message::Binary(out)).await.is_err() {
                     break;
                 }
             }

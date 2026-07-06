@@ -1,6 +1,6 @@
 use crate::agents_live::actor::Command;
 use crate::agents_live::wire::{
-    Envelope, EnvelopeBody, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
+    Envelope, EnvelopeBody, TermFrame, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
 };
 use crate::agents_live::AgentHandle;
 use crate::agents_live::AgentRegistry;
@@ -132,13 +132,23 @@ async fn handle(
         }
     }
 
-    for chunk in handle.replay_term() {
-        // Frame already includes the channel byte (actor passes it through);
-        // filter to the Claude channel so this WS doesn't get shell bytes.
-        if chunk.first() != Some(&TERM_CHAN_CLAUDE) {
+    for TermFrame { chan, seq, data } in handle.replay_term() {
+        // §A.7: replay re-emits each frame verbatim with the seq that
+        // rabbit assigned it. The browser uses that seq to trim buffered
+        // live frames on a late-arriving `ScreenSnapshot::after_seq`. The
+        // /shell endpoint shares the same broadcast channel — its own
+        // ws_shell handler subscribes only to TERM_CHAN_SHELL.
+        if chan != TERM_CHAN_CLAUDE {
             continue;
         }
-        if sink.send(Message::Binary(chunk.to_vec())).await.is_err() {
+        if data.is_empty() {
+            continue;
+        }
+        let mut frame = Vec::with_capacity(9 + data.len());
+        frame.push(chan);
+        frame.extend_from_slice(&seq.to_be_bytes());
+        frame.extend_from_slice(&data);
+        if sink.send(Message::Binary(frame)).await.is_err() {
             break;
         }
     }
@@ -172,17 +182,29 @@ async fn handle(
         tokio::select! {
             biased;
             chunk = term_rx.recv() => {
-                let bytes = match chunk {
-                    Ok(b) => b,
+                let frame = match chunk {
+                    Ok(f) => f,
                     Err(_) => break,
                 };
-                // §D multi-channel: the actor passes the channel byte
-                // through. Forward only Claude-channel frames; shell
-                // frames have their own WS endpoint.
-                if bytes.first() != Some(&TERM_CHAN_CLAUDE) {
+                // §A.7: warren is a dumb pipe for the term stream — the
+                // actor hands us a `TermFrame { chan, seq, data }`, we
+                // re-emit the same shape on the browser socket so the
+                // browser can match live frames against the snapshot's
+                // `after_seq` and drop the ones already covered by the
+                // snapshot grid.
+                let TermFrame { chan, seq, data } = frame;
+                if chan != TERM_CHAN_CLAUDE {
+                    // Shell frames have their own WS endpoint.
                     continue;
                 }
-                if sink.send(Message::Binary(bytes.to_vec())).await.is_err() {
+                if data.is_empty() {
+                    continue;
+                }
+                let mut out = Vec::with_capacity(9 + data.len());
+                out.push(chan);
+                out.extend_from_slice(&seq.to_be_bytes());
+                out.extend_from_slice(&data);
+                if sink.send(Message::Binary(out)).await.is_err() {
                     break;
                 }
             }

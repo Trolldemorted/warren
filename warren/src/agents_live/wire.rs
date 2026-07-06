@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// §D: primary terminal channel for the `/claude` endpoint. The byte
 /// that prefixes every binary frame flowing through `ws_browser.rs`
 /// and through rabbit's `LinkCmd::SendBinary { chan, data }`. `0x02`
@@ -11,6 +11,23 @@ pub const TERM_CHAN_CLAUDE: u8 = 0x01;
 /// A `bash` PTY on the same rabbit, distinct binary-stream id so it can be
 /// subscribed to (and written to) independently of the main Claude channel.
 pub const TERM_CHAN_SHELL: u8 = 0x02;
+
+/// §A.7 / seq-numbered snapshot protocol — one server→browser terminal
+/// binary frame, replayed through the bounded term ring or pushed live.
+/// `chan` is the byte that prefixes every server→browser term frame on
+/// the wire (`TERM_CHAN_CLAUDE` / `TERM_CHAN_SHELL`); `seq` is the
+/// per-channel monotonic counter the rabbit blocking PTY thread assigned
+/// to those bytes; `data` is the raw PTY payload. warren is a dumb pipe
+/// for these — it never invents a seq, never rewrites one, and replays
+/// the triple verbatim to every browser subscriber and on link reconnects
+/// (the bounded ring stores the same struct shape). Mirrored in
+/// `rabbit::wire::TermFrame`.
+#[derive(Debug, Clone)]
+pub struct TermFrame {
+    pub chan: u8,
+    pub seq: u64,
+    pub data: Vec<u8>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -121,6 +138,15 @@ pub struct ScreenSnapshotBody {
     pub cursor_row: u16,
     pub cursor_visible: bool,
     pub text: Vec<String>,
+    /// §A.7 / seq-numbered snapshot protocol — per-`chan` counter of the
+    /// last byte whose cells are *fully represented* in `text`. Mirrors
+    /// `rabbit::wire::ScreenSnapshotBody::after_seq`. The browser uses
+    /// this to drop buffered live frames whose `seq ≤ after_seq` before
+    /// applying the snapshot, eliminating the empty-snapshot flicker
+    /// that the §A.6 heuristic patched around. `#[serde(default)]` keeps
+    /// v1 envelopes (no `after_seq`) deserializable during the rollout.
+    #[serde(default)]
+    pub after_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

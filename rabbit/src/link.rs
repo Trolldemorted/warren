@@ -1,6 +1,7 @@
 use crate::meta_ring::MetaRing;
 use crate::wire::{
-    Envelope, EnvelopeBody, HelloUp, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+    Envelope, EnvelopeBody, HelloUp, TermFrame, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
+    TERM_CHAN_SHELL,
 };
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -22,9 +23,15 @@ pub enum LinkEvent {
 }
 
 pub enum LinkCmd {
-    /// Raw PTY bytes from a terminal → warren → viewers, tagged with the
-    /// channel byte the frame should carry on the wire (claude vs. shell).
-    SendBinary { chan: u8, data: Vec<u8> },
+    /// §A.7 / seq-numbered snapshot protocol — raw PTY bytes from a
+    /// terminal → warren → viewers, tagged with the channel byte and a
+    /// per-channel monotonic `seq` (the same value the blocking PTY
+    /// thread assigned when the bytes were read). The link prepends
+    /// `<chan:1> <seq:8 BE>` to the frame on the wire; warren passes
+    /// both through verbatim and forwards them to the browser, so the
+    /// browser can pin a late-arriving `ScreenSnapshot::after_seq`
+    /// against its buffered live frames.
+    SendBinary { chan: u8, seq: u64, data: Vec<u8> },
     /// Structured meta event. The link assigns the next seq, buffers the
     /// serialized frame in the meta ring, then sends. The frame is replayed
     /// on the next WS attempt until warren sends `Ack{seq}` for it.
@@ -68,9 +75,11 @@ pub struct Link {
     shutdown: Arc<AtomicBool>,
 }
 
-/// Returns the current replay bytes (concatenated, in order) to send as the
-/// initial binary frame on each link attempt. Empty Vec = no replay.
-pub type ReplaySnapFn = Arc<dyn Fn() -> Vec<u8> + Send + Sync>;
+/// Returns the current replay frames (in chronological order) to send as the
+/// initial sequence of binary frames on each link attempt. One binary frame
+/// per element; each frame carries `<chan:1> <seq:8 BE> <data>` on the wire.
+/// Empty Vec = no replay.
+pub type ReplaySnapFn = Arc<dyn Fn() -> Vec<TermFrame> + Send + Sync>;
 
 impl Link {
     #[allow(clippy::too_many_arguments)]
@@ -188,10 +197,21 @@ impl Link {
         let hello_json = serde_json::to_string(&hello)?;
         let (mut sink, mut stream) = ws.split();
         sink.send(Message::Text(hello_json)).await?;
-        let replay_bytes = (self.replay_snap)();
-        if !replay_bytes.is_empty() {
-            let mut frame = vec![TERM_CHAN_CLAUDE];
-            frame.extend_from_slice(&replay_bytes);
+        // §A.7: each replay frame is its own `<chan:1> <seq:8 BE> <data>`
+        // binary message, in the order the producer emitted them. warren
+        // re-emits each frame verbatim to its browser subscribers so a
+        // freshly-connected browser sees the exact same on-wire bytes
+        // (including `seq`) that any other browser already subscribed
+        // through this connection would have seen.
+        let replay_frames = (self.replay_snap)();
+        for TermFrame { chan, seq, data } in replay_frames {
+            if data.is_empty() {
+                continue;
+            }
+            let mut frame = Vec::with_capacity(9 + data.len());
+            frame.push(chan);
+            frame.extend_from_slice(&seq.to_be_bytes());
+            frame.extend_from_slice(&data);
             sink.send(Message::Binary(frame)).await?;
         }
         // Replay any meta events warren hasn't acked yet. Seq numbers carry
@@ -207,9 +227,21 @@ impl Link {
                 cmd = self.cmd_rx.recv() => {
                     let Some(cmd) = cmd else { break; };
                     match cmd {
-                        LinkCmd::SendBinary { chan, mut data } => {
+                        // §A.7: every server→browser terminal binary
+                        // frame is now `<chan:1> <seq:8 BE> <data>`.
+                        // warren parses the prelude off the frame,
+                        // forwards both `chan` and `seq` to its
+                        // subscribers verbatim, and rewrites the same
+                        // prelude when broadcasting to browser panes.
+                        LinkCmd::SendBinary {
+                            chan,
+                            seq,
+                            mut data,
+                        } => {
                             if data.is_empty() { continue; }
-                            let mut frame = vec![chan];
+                            let mut frame = Vec::with_capacity(9 + data.len());
+                            frame.push(chan);
+                            frame.extend_from_slice(&seq.to_be_bytes());
                             frame.append(&mut data);
                             sink.send(Message::Binary(frame)).await?;
                         }

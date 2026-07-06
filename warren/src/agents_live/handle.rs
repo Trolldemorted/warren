@@ -1,5 +1,7 @@
 use crate::agents_live::actor::{Command, TurnOutcomeMsg};
-use crate::agents_live::wire::{AgentState, EnvelopeBody, StateFrame, TermSize, UsageSnapshot};
+use crate::agents_live::wire::{
+    AgentState, EnvelopeBody, StateFrame, TermFrame, TermSize, UsageSnapshot,
+};
 use crate::error::{AppError, AppResult};
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -16,12 +18,22 @@ const TERM_RING_MAX_CHUNKS: usize = 128;
 pub struct AgentHandle {
     pub agent_id: Uuid,
     state: Arc<Mutex<AgentStateSnapshot>>,
-    term_tx: broadcast::Sender<Bytes>,
-    /// Bounded ring of the most recent terminal bytes for late subscribers.
-    /// `broadcast::Sender` only delivers to receivers attached at send time,
-    /// so a browser WS that joins after the agent has been running would
-    /// otherwise see an empty screen. This ring fills the gap.
-    term_ring: Arc<Mutex<VecDeque<Bytes>>>,
+    // §A.7: the broadcast/ring carry full `TermFrame`s (chan, seq, data)
+    // so a browser pane that joins late can replay the seq alongside the
+    // bytes — when a late-arriving `ScreenSnapshot::after_seq` arrives,
+    // the browser trims its buffered frames to `seq > after_seq` before
+    // applying the snapshot, which kills the empty-snapshot flicker the
+    // old §A.6 SIGWINCH-jiggle heuristic patched around. Pre-v2 this was
+    // `Bytes`; the upgrade widens the type shape (rabbit's wire still
+    // discards the seq for browser→warren traffic — that's a separate
+    // channel with no seq).
+    term_tx: broadcast::Sender<TermFrame>,
+    /// Bounded ring of the most recent terminal frames for late
+    /// subscribers. `broadcast::Sender` only delivers to receivers
+    /// attached at send time, so a browser WS that joins after the agent
+    /// has been running would otherwise see an empty screen. This ring
+    /// fills the gap.
+    term_ring: Arc<Mutex<VecDeque<TermFrame>>>,
     meta_tx: broadcast::Sender<EnvelopeBody>,
     /// Shared handle to the actor's command channel. Wrapped in
     /// `Arc<Mutex<Sender>>` (not a bare `mpsc::Sender`) so that
@@ -318,7 +330,7 @@ impl AgentHandle {
         false
     }
 
-    pub fn publish_term(&self, bytes: Bytes) {
+    pub fn publish_term(&self, frame: TermFrame) {
         // Push into the ring first (bounded) so a slow subscriber that joins
         // later can still replay the recent screen. Broadcast is best-effort;
         // only currently-attached receivers see it live.
@@ -327,16 +339,16 @@ impl AgentHandle {
             if ring.len() == TERM_RING_MAX_CHUNKS {
                 ring.pop_front();
             }
-            ring.push_back(bytes.clone());
+            ring.push_back(frame.clone());
         }
-        let _ = self.term_tx.send(bytes);
+        let _ = self.term_tx.send(frame);
     }
 
     pub fn publish_meta(&self, ev: EnvelopeBody) {
         let _ = self.meta_tx.send(ev);
     }
 
-    pub fn subscribe_term(&self) -> broadcast::Receiver<Bytes> {
+    pub fn subscribe_term(&self) -> broadcast::Receiver<TermFrame> {
         self.term_tx.subscribe()
     }
 
@@ -344,7 +356,7 @@ impl AgentHandle {
         self.meta_tx.subscribe()
     }
 
-    pub fn replay_term(&self) -> Vec<Bytes> {
+    pub fn replay_term(&self) -> Vec<TermFrame> {
         let ring = self.term_ring.lock().expect("term_ring poisoned");
         ring.iter().cloned().collect()
     }
@@ -479,6 +491,11 @@ mod tests {
     //! claim must succeed even when a prior leader is still around (the
     //! common path: a second tab takes control from the first).
     use super::*;
+    // §A.7 wire-shape pins: the new `TermFrame` and `ScreenSnapshotBody`
+    // constructors live in `wire.rs`; bring the constants and types the
+    // §6.3 tests need into scope explicitly rather than chasing every
+    // rename back through `super`.
+    use crate::agents_live::wire::{ScreenSnapshotBody, TERM_CHAN_CLAUDE};
 
     fn h() -> AgentHandle {
         AgentHandle::new(Uuid::nil())
@@ -756,5 +773,131 @@ mod tests {
 
         // 9. A's release post-disconnect is a no-op
         assert!(!handle.release_leader(a));
+    }
+
+    // -----------------------------------------------------------------
+    // §A.7 / seq-numbered snapshot protocol — `publish_term` /
+    // `subscribe_term` / `replay_term` operate on `TermFrame` (chan,
+    // seq, data), not bare bytes. warren must NEVER invent or rewrite a
+    // seq on the broadcast path — the same `seq` the rabbit blocking
+    // PTY thread assigned has to land on every browser subscriber for
+    // the snapshot's `after_seq` watermark to mean anything.
+    //
+    // The two tests below pin that contract; a future "optimization"
+    // that strips the seq (e.g. treating the broadcast payload as
+    // pure bytes) would silently break two-step-apply on the browser
+    // and re-introduce the §A.6 flicker.
+    // -----------------------------------------------------------------
+
+    /// Push a sequence of `TermFrame`s through `publish_term` and
+    /// confirm `replay_term()` returns them in order with `chan`/`seq`/
+    /// `data` byte-for-byte. The bounded ring (TERM_RING_MAX_CHUNKS =
+    /// 128) trims oldest first, so verify the surviving tail still
+    /// matches the input exactly.
+    #[test]
+    fn term_frame_passes_through_publish_and_replay() {
+        let h = AgentHandle::new(Uuid::nil());
+        // Push 200 frames; only the last 128 must survive the
+        // TERM_RING_MAX_CHUNKS bound.
+        for i in 1..=200u64 {
+            h.publish_term(TermFrame {
+                chan: TERM_CHAN_CLAUDE,
+                seq: i,
+                data: vec![i as u8, (i >> 1) as u8],
+            });
+        }
+        let replayed = h.replay_term();
+        assert_eq!(
+            replayed.len(),
+            128,
+            "ring must cap at TERM_RING_MAX_CHUNKS=128 entries"
+        );
+        // The oldest surviving frame carries seq=200-128+1 = 73.
+        let expected_oldest = 200 - 128 + 1;
+        assert_eq!(replayed[0].seq, expected_oldest);
+        assert_eq!(replayed[0].chan, TERM_CHAN_CLAUDE);
+        assert_eq!(
+            replayed[0].data,
+            vec![expected_oldest as u8, (expected_oldest >> 1) as u8]
+        );
+        // The newest surviving frame carries seq=200.
+        assert_eq!(replayed.last().unwrap().seq, 200);
+        // Strict monotonic — every entry exactly +1 from the prior.
+        for w in replayed.windows(2) {
+            assert_eq!(w[1].seq, w[0].seq + 1);
+            assert_eq!(w[1].chan, w[0].chan);
+        }
+    }
+
+    /// A late-joining subscriber sees the bounded ring in the same
+    /// order `publish_term` was called — i.e. the seq ordering is
+    /// preserved through the ring so a fresh browser pane that joins
+    /// mid-session can replay (or buffer-and-apply on snapshot arrival)
+    /// identical data.
+    #[tokio::test]
+    async fn subscribe_term_receives_term_frame_with_chan_seq_data() {
+        let h = AgentHandle::new(Uuid::nil());
+        // Subscribe BEFORE publishing so we don't miss any frames.
+        let mut rx = h.subscribe_term();
+        h.publish_term(TermFrame {
+            chan: TERM_CHAN_CLAUDE,
+            seq: 7,
+            data: b"hello".to_vec(),
+        });
+        let got = rx.recv().await.expect("subscriber receives TermFrame");
+        assert_eq!(got.chan, TERM_CHAN_CLAUDE);
+        assert_eq!(got.seq, 7, "seq must ride through untouched");
+        assert_eq!(got.data, b"hello");
+    }
+
+    /// §A.7 wire-tag lock — the v2 protocol requires the `ScreenSnapshot`
+    /// envelope's JSON to carry `"after_seq": <u64>` as a top-level
+    /// field so the browser can read the watermark off the envelope and
+    /// trim buffered frames whose seq ≤ after_seq before the apply. A
+    /// future rename (e.g. `seq_after`, `seq_watermark`) would silently
+    /// break the browser-side §4.3 two-step apply with no compile-time
+    /// error. Pin the wire shape here so a wire-tag change has to be
+    /// intentional.
+    #[tokio::test]
+    async fn screen_snapshot_envelope_carries_after_seq_to_browser() {
+        let h = AgentHandle::new(Uuid::nil());
+        let mut rx = h.subscribe_meta();
+
+        // Build a snapshot with a deliberately non-zero after_seq.
+        let snap = ScreenSnapshotBody {
+            chan: 0x01,
+            cols: 80,
+            rows: 24,
+            cursor_col: 0,
+            cursor_row: 0,
+            cursor_visible: true,
+            text: vec!["".into()],
+            after_seq: 42,
+        };
+        h.publish_meta(EnvelopeBody::ScreenSnapshot(snap.clone()));
+
+        let got = rx
+            .recv()
+            .await
+            .expect("subscriber receives ScreenSnapshot");
+        // Round-trip through serde to the exact wire shape the
+        // browser JS would deserialize.
+        let body = match &got {
+            EnvelopeBody::ScreenSnapshot(b) => b,
+            other => panic!("expected ScreenSnapshot, got {other:?}"),
+        };
+        assert_eq!(body.after_seq, 42);
+        let json = serde_json::to_value(&got).expect("serialize snapshot");
+        // Wire tag — must be snake_case "screen_snapshot" so
+        // `applyMeta::screen_snapshot` matches.
+        assert_eq!(
+            json["t"], "screen_snapshot",
+            "wire tag must match `t: \"screen_snapshot\"`"
+        );
+        // The new field must be present and have the value we set.
+        assert_eq!(
+            json["after_seq"], 42,
+            "wire JSON must carry after_seq as a top-level number"
+        );
     }
 }

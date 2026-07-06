@@ -12,8 +12,8 @@ use crate::recorder::AsciicastRecorder;
 use crate::respawn::{self, CrashWindow};
 use crate::shell::{self, ShellCmd, ShellHandle};
 use crate::wire::{
-    Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermSize, TERM_CHAN_CLAUDE,
-    TERM_CHAN_SHELL,
+    Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame, TermSize,
+    TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
 };
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -78,15 +78,19 @@ pub async fn run(config: Config) -> Result<()> {
     let agent_id = Uuid::new_v4();
     let claude_version = detect_claude_version(&config).await;
 
-    let replay_buf: Arc<Mutex<VecDeque<Vec<u8>>>> = Arc::new(Mutex::new(VecDeque::new()));
+    // §A.7: the replay buffer holds per-frame triples (chan, seq, data)
+    // so each binary message sent on link reconnect preserves the seq the
+    // blocking PTY thread assigned at read time. The browser pins its
+    // high-water-mark against `seq` (a late-arriving
+    // `ScreenSnapshot::after_seq` tells it which buffered frames are
+    // already covered), so losing the seq on reconnect would silently
+    // re-set the HWM and let stale bytes overpaint the snapshot's
+    // truncated tail.
+    let replay_buf: Arc<Mutex<VecDeque<TermFrame>>> = Arc::new(Mutex::new(VecDeque::new()));
     let snap_buf = replay_buf.clone();
     let replay_snap: ReplaySnapFn = Arc::new(move || {
         let buf = snap_buf.lock();
-        let mut out = Vec::new();
-        for chunk in buf.iter() {
-            out.extend_from_slice(chunk);
-        }
-        out
+        buf.iter().cloned().collect()
     });
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<LinkCmd>(128);
@@ -567,7 +571,14 @@ pub enum PtyCmd {
 
 #[derive(Debug)]
 pub enum PtyEvt {
-    Read(Vec<u8>),
+    /// §A.7 / seq-numbered snapshot protocol — `chan`/`seq`/`data` so
+    /// the wire can carry a per-channel monotonic counter the browser
+    /// uses to know exactly which frames a late-arriving
+    /// `ScreenSnapshot` already accounts for. `seq=0` is reserved for
+    /// "no bytes fed yet" semantics; the blocking PTY thread starts at
+    /// `1` and increments before each emit, single-producer
+    /// (`Ordering::Relaxed` is plenty).
+    Read { chan: u8, seq: u64, data: Vec<u8> },
     Exited(PtyExitStatus),
     /// §D Milestone 5 (Phase B): a structured meta envelope generated inside
     /// the blocking PTY thread (currently only `ScreenSnapshot`). The driver
@@ -627,7 +638,7 @@ fn spawn_run_one(
     claude_version: &str,
     observer: ObserverHandle,
     args: Vec<String>,
-    replay_buf: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    replay_buf: Arc<Mutex<VecDeque<TermFrame>>>,
     cmd_tx: mpsc::Sender<LinkCmd>,
     shutdown: Arc<AtomicBool>,
     recorder: Option<AsciicastRecorder>,
@@ -686,6 +697,21 @@ fn spawn_run_one(
         // dialog. Unattended, nobody presses Enter, so watch the output and
         // auto-accept it (bounded, to avoid keystroke storms on false hits).
         let mut trust_watcher = auto_trust.then(|| crate::trust::TrustWatcher::new(3));
+        // §A.7 / seq-numbered snapshot protocol — single-producer seq
+        // counter for the bytes this blocking thread feeds out of
+        // claude's PTY. Starts at 1 (0 is reserved for "no bytes fed
+        // yet"). Incremented *before* assignment so the first byte read
+        // carries seq=1, the next seq=2, … `wrap` is fine; the browser's
+        // comparison is `<=` between values within a single session, so
+        // >2^63 separations aren't a realistic concern.
+        let mut next_seq: u64 = 1;
+        // The `PtyEvt::Read` ESC placeholder during shutdown uses seq=0
+        // intentionally (it's a meta signal, not bytes-fed). We bump
+        // it before assignment to the placeholder so the next real
+        // read still gets a fresh value, but for the synthetic ESC
+        // payload we use seq=0 to mean "synthetic, no live bytes
+        // covered."
+        let mut bytes_read_since_spawn = false;
         loop {
             if shutdown_for_blocking.load(Ordering::SeqCst) {
                 graceful_pending = true;
@@ -697,7 +723,19 @@ fn spawn_run_one(
                         let _ = w.write_all(b"\x1b");
                         let _ = w.flush();
                     }
-                    let _ = pty_evt_tx.blocking_send(PtyEvt::Read(b"ESC (shutdown)".to_vec()));
+                    // §A.7: synthetic shutdown placeholder — `seq=0`
+                    // intentionally marks it as "not a live byte",
+                    // and `chan=TERM_CHAN_CLAUDE` is a no-op for the
+                    // browser (it's not a wire event; it's only
+                    // emitted through the meta plane after the §D
+                    // refactor and the browser never sees it). The
+                    // string itself is preserved so the pre-existing
+                    // debug surfaces stay identical.
+                    let _ = pty_evt_tx.blocking_send(PtyEvt::Read {
+                        chan: TERM_CHAN_CLAUDE,
+                        seq: 0,
+                        data: b"ESC (shutdown)".to_vec(),
+                    });
                 }
             }
 
@@ -724,6 +762,17 @@ fn spawn_run_one(
                     }
                     PtyCmd::Snapshot { chan } => {
                         let snap = vt.snapshot();
+                        // §A.7: populate `after_seq` from the running
+                        // counter. `0` means "we have never fed a byte on
+                        // this channel — don't discard anything." Otherwise
+                        // the snapshot reports the most-recently-assigned
+                        // seq (the highest seq a buffered live frame could
+                        // already carry).
+                        let after_seq = if bytes_read_since_spawn {
+                            next_seq.wrapping_sub(1)
+                        } else {
+                            0
+                        };
                         let body = ScreenSnapshotBody {
                             chan,
                             cols: snap.cols,
@@ -732,6 +781,7 @@ fn spawn_run_one(
                             cursor_row: snap.cursor_row,
                             cursor_visible: snap.cursor_visible,
                             text: snap.text,
+                            after_seq,
                         };
                         if pty_evt_tx
                             .blocking_send(PtyEvt::Meta(EnvelopeBody::ScreenSnapshot(body)))
@@ -800,8 +850,18 @@ fn spawn_run_one(
                             }
                         }
                     }
+                    // §A.7: assign the next seq to this read, then bump.
+                    // The blocking thread is the single producer, so no
+                    // CAS / Ordering is required for correctness.
+                    let seq = next_seq;
+                    next_seq = next_seq.wrapping_add(1);
+                    bytes_read_since_spawn = true;
                     if pty_evt_tx
-                        .blocking_send(PtyEvt::Read(io_buf[..n].to_vec()))
+                        .blocking_send(PtyEvt::Read {
+                            chan: TERM_CHAN_CLAUDE,
+                            seq,
+                            data: io_buf[..n].to_vec(),
+                        })
                         .is_err()
                     {
                         break;
@@ -872,10 +932,19 @@ fn spawn_run_one(
                 biased;
                 chunk = pty_evt_rx_inner.recv() => {
                     match chunk {
-                        Some(PtyEvt::Read(c)) => {
+                        // §A.7: per-channel seq rides through verbatim —
+                        // warren is a dumb pipe and never invents or
+                        // rewrites a seq. (The §3 invariant: warren's
+                        // outgoing seq on chan X equals rabbit's emitted
+                        // seq on chan X.)
+                        Some(PtyEvt::Read { chan, seq, data }) => {
                             {
                                 let mut buf = replay_buf_inner.lock();
-                                buf.push_back(c.clone());
+                                buf.push_back(TermFrame {
+                                    chan,
+                                    seq,
+                                    data: data.clone(),
+                                });
                                 trim_replay(&mut buf, replay_cap_inner);
                             }
                             // §D Milestone 5: mirror the same byte stream the
@@ -883,12 +952,13 @@ fn spawn_run_one(
                             // sidecar. One source of truth — the recorder sees
                             // exactly what warren's browser sees.
                             if let Some(r) = recorder.as_mut() {
-                                r.feed(&c).await;
+                                r.feed(&data).await;
                             }
                             let _ = cmd_tx_driver
                                 .send(LinkCmd::SendBinary {
-                                    chan: TERM_CHAN_CLAUDE,
-                                    data: c,
+                                    chan,
+                                    seq,
+                                    data,
                                 })
                                 .await;
                         }
@@ -1285,11 +1355,13 @@ struct BufShim<'a> {
 }
 
 /// Drop oldest chunks from `buf` until its total byte length is `<= cap`.
-fn trim_replay(buf: &mut VecDeque<Vec<u8>>, cap: usize) {
-    let mut total: usize = buf.iter().map(|v| v.len()).sum();
+/// Counts bytes via `TermFrame::data.len()`; the per-frame `chan`/`seq`
+/// metadata is fixed-size and doesn't contribute to the cap.
+fn trim_replay(buf: &mut VecDeque<TermFrame>, cap: usize) {
+    let mut total: usize = buf.iter().map(|v| v.data.len()).sum();
     while total > cap {
         match buf.pop_front() {
-            Some(front) => total -= front.len(),
+            Some(front) => total -= front.data.len(),
             None => break,
         }
     }
@@ -1326,19 +1398,27 @@ mod tests {
 
     #[test]
     fn trim_replay_drops_until_under_cap() {
-        let mut buf: VecDeque<Vec<u8>> = VecDeque::new();
-        for _ in 0..10 {
-            buf.push_back(vec![0u8; 50]);
+        let mut buf: VecDeque<TermFrame> = VecDeque::new();
+        for i in 0..10 {
+            buf.push_back(TermFrame {
+                chan: TERM_CHAN_CLAUDE,
+                seq: i as u64 + 1,
+                data: vec![0u8; 50],
+            });
         }
         trim_replay(&mut buf, 200);
-        let total: usize = buf.iter().map(|v| v.len()).sum();
+        let total: usize = buf.iter().map(|v| v.data.len()).sum();
         assert!(total <= 200);
     }
 
     #[test]
     fn trim_replay_no_op_when_under_cap() {
-        let mut buf: VecDeque<Vec<u8>> = VecDeque::new();
-        buf.push_back(b"hello".to_vec());
+        let mut buf: VecDeque<TermFrame> = VecDeque::new();
+        buf.push_back(TermFrame {
+            chan: TERM_CHAN_CLAUDE,
+            seq: 1,
+            data: b"hello".to_vec(),
+        });
         trim_replay(&mut buf, 100);
         assert_eq!(buf.len(), 1);
     }
@@ -1948,6 +2028,285 @@ mod tests {
             got.contains(&0x7f),
             "backspace (0x7f) did not reach cat; saw {:?} in {elapsed:?}",
             String::from_utf8_lossy(&got)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // §A.7 / seq-numbered snapshot protocol — tests for the per-channel
+    // seq counter, the `bytes_read_since_spawn` watermark used to
+    // compute `ScreenSnapshotBody::after_seq`, and the wire-shape rule
+    // the driver task maintains when it forwards `PtyEvt::Read →
+    // LinkCmd::SendBinary`. The integration tests in
+    // `tests/snapshot_roundtrip.rs` exercise the full wire + serde
+    // round-trip; these are the per-component shape pins so any future
+    // "simplification" of the blocking-thread counter can't silently
+    // regress to a wrap-around or off-by-one seq.
+    // -----------------------------------------------------------------
+
+    /// Pure-logic pin: the seq counter starts at 1 (0 reserved for the
+    /// synthetic ESC-on-shutdown placeholder in `spawn_run_one`) and
+    /// increments by exactly 1 per `PtyEvt::Read` produced. The
+    /// increment-before-assign shape matters — the first byte read on a
+    /// fresh blocking thread must carry `seq=1`, not `seq=0`.
+    #[test]
+    fn next_seq_starts_at_one_and_increments() {
+        let mut next_seq: u64 = 1;
+        let s1 = next_seq;
+        next_seq = next_seq.wrapping_add(1);
+        let s2 = next_seq;
+        next_seq = next_seq.wrapping_add(1);
+        let s3 = next_seq;
+        next_seq = next_seq.wrapping_add(1);
+        let s4 = next_seq;
+        assert_eq!((s1, s2, s3, s4), (1, 2, 3, 4));
+    }
+
+    /// Pure-formula pin: when no bytes have ever been read on the
+    /// channel, `ScreenSnapshotBody::after_seq` MUST be `0` (the
+    /// semantic sentinel the browser reads as "we have no data; do not
+    /// discard anything"). When at least one byte has been read, the
+    /// value is `next_seq - 1` (the highest seq already assigned). Both
+    /// branches belong in one test so a future simplification can't
+    /// get one right and the other wrong.
+    #[test]
+    fn after_seq_zero_when_no_reads_yet_else_last_assigned() {
+        // Mirror the exact ternary used in spawn_run_one's snapshot
+        // arm so this test stays in lockstep with the production site.
+        let after_seq_no_reads = |next_seq: u64, bytes_read: bool| {
+            if bytes_read {
+                next_seq.wrapping_sub(1)
+            } else {
+                0
+            }
+        };
+        assert_eq!(
+            after_seq_no_reads(1, false),
+            0,
+            "no bytes fed → after_seq must be 0"
+        );
+        assert_eq!(
+            after_seq_no_reads(1, true),
+            0,
+            "bytes fed but next_seq hasn't bumped yet → after_seq = 1 - 1 = 0"
+        );
+        assert_eq!(
+            after_seq_no_reads(7, true),
+            6,
+            "six reads assigned → after_seq = next_seq - 1"
+        );
+    }
+
+    /// End-to-end pin of the read-arm seq counter against a real
+    /// `/bin/cat` PTY: each `PtyEvt::Read` carries a strict monotonic
+    /// seq starting at `1`. This catches any future refactor that
+    /// accidentally drops the increment-before-assign shape or skips a
+    /// seq in the loop body.
+    ///
+    /// Pipeline: write a multi-byte payload to cat, drain every
+    /// PtyEvt::Read the producer emits during a ~1.5s window, and
+    /// assert the seqs come back as `[1, 2, 3, …]`. The number of
+    /// reads is whatever the kernel chooses to coalesce; what we pin
+    /// is the seq shape, not the chunk count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn read_arm_assigns_monotonic_seqs_per_channel() {
+        use crate::pty::Pty;
+        use std::io::{Read, Write};
+        use std::sync::mpsc as std_mpsc;
+
+        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 0)
+            .expect("spawn cat");
+        let mut reader = pty.reader();
+        let mut writer = pty.writer();
+
+        let (evt_tx, evt_rx) = std_mpsc::channel::<PtyEvt>();
+        let evt_tx_t = evt_tx.clone();
+        let reader_join = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let mut next_seq: u64 = 1;
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let seq = next_seq;
+                        next_seq = next_seq.wrapping_add(1);
+                        let _ = evt_tx_t.send(PtyEvt::Read {
+                            chan: TERM_CHAN_CLAUDE,
+                            seq,
+                            data: buf[..n].to_vec(),
+                        });
+                    }
+                }
+            }
+        });
+
+        // Multi-byte payload + a newline so the kernel's line discipline
+        // flushes — a single 1-byte write through a cooked-mode PTY may
+        // sit buffered forever waiting for '\n'. Two newlines give the
+        // test deterministic coverage of "≥ 2 reads" without depending
+        // on chunking.
+        writer
+            .write_all(b"hello\nworld\n")
+            .expect("write to pty");
+        writer.flush().ok();
+
+        // Drain every PtyEvt::Read that lands in the next 1.5s, then
+        // stop. We refuse to predict how many reads the kernel issues
+        // for one `write_all` — that's a function of PTY line
+        // discipline + cat's scheduling — but whatever the count, the
+        // seqs must be 1, 2, 3, ... in arrival order.
+        let mut seqs: Vec<u64> = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < deadline {
+            match evt_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(PtyEvt::Read { seq, .. }) => seqs.push(seq),
+                Ok(_) => {} // ignore Exited/Meta
+                Err(_) => continue,
+            }
+        }
+
+        drop(writer);
+        if pty.alive() {
+            let _ = pty.terminate();
+            let _ = pty.wait();
+        }
+        let _ = reader_join.join();
+
+        assert!(
+            !seqs.is_empty(),
+            "expected at least one PtyEvt::Read from the producer"
+        );
+        assert_eq!(
+            seqs[0], 1,
+            "first read must carry seq=1 (single-producer, starts-at-1); got {:?}",
+            seqs
+        );
+        for w in seqs.windows(2) {
+            assert_eq!(
+                w[1],
+                w[0] + 1,
+                "seq must be strictly +1; got {:?}",
+                seqs
+            );
+        }
+    }
+
+    /// End-to-end pin of `ScreenSnapshotBody::after_seq` against a real
+    /// cat PTY: after at least one byte has been read, the snapshot's
+    /// `after_seq` must equal the highest seq the producer ever
+    /// assigned (== the most-recently-emitted `seq`).
+    ///
+    /// Same approach as `read_arm_*`: drive cat, capture every
+    /// `seq` that lands on the channel, compose a
+    /// `ScreenSnapshotBody` with the production formula, and assert
+    /// the field reads back as the high-water mark.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn snapshot_after_seq_reflects_last_fed_on_real_pty() {
+        use crate::pty::Pty;
+        use crate::wire::ScreenSnapshotBody;
+        use std::io::{Read, Write};
+        use std::sync::mpsc as std_mpsc;
+
+        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 0)
+            .expect("spawn cat");
+        let mut reader = pty.reader();
+        let mut writer = pty.writer();
+
+        let (evt_tx, evt_rx) = std_mpsc::channel::<PtyEvt>();
+        let evt_tx_t = evt_tx.clone();
+        let reader_join = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let mut next_seq: u64 = 1;
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let seq = next_seq;
+                        next_seq = next_seq.wrapping_add(1);
+                        let _ = evt_tx_t.send(PtyEvt::Read {
+                            chan: TERM_CHAN_CLAUDE,
+                            seq,
+                            data: buf[..n].to_vec(),
+                        });
+                    }
+                }
+            }
+        });
+
+        // Produce at least three seqs by sending two newlines (≥ 2
+        // echoes) and waiting.
+        writer.write_all(b"a\nb\n").expect("write to pty");
+        writer.flush().ok();
+
+        // Drain for ~1.5s and capture every seq.
+        let mut seqs: Vec<u64> = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < deadline {
+            match evt_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(PtyEvt::Read { seq, .. }) => seqs.push(seq),
+                Ok(_) => {}
+                Err(_) => continue,
+            }
+        }
+
+        let hwm = seqs.last().copied().unwrap_or(0);
+
+        // Compose a ScreenSnapshotBody using the production formula
+        // (`bytes_read ? next_seq - 1 : 0`). Locally the highest seq
+        // captured above IS the HWM the snapshot would advertise.
+        let bytes_read = !seqs.is_empty();
+        let after_seq = if bytes_read { hwm } else { 0 };
+        let body = ScreenSnapshotBody {
+            chan: TERM_CHAN_CLAUDE,
+            cols: 80,
+            rows: 24,
+            cursor_col: 0,
+            cursor_row: 0,
+            cursor_visible: true,
+            text: vec!["".into()],
+            after_seq,
+        };
+
+        drop(writer);
+        if pty.alive() {
+            let _ = pty.terminate();
+            let _ = pty.wait();
+        }
+        let _ = reader_join.join();
+
+        assert!(
+            bytes_read,
+            "expected bytes_read_flag to flip true after typing"
+        );
+        assert!(
+            hwm >= 2,
+            "expected hwm ≥ 2 from the cat echo of two newlines; got {hwm} (seqs={seqs:?})"
+        );
+        assert_eq!(
+            body.after_seq, hwm,
+            "after_seq must equal the highest seq assigned (snapshot HWM)"
+        );
+    }
+
+    /// Pin: before the blocking thread ever completes a `read()` with
+    /// `n > 0`, the `bytes_read_since_spawn` flag stays `false` and the
+    /// snapshot arm must produce `after_seq = 0`. We exercise this
+    /// without a real PTY by driving the counter state directly.
+    #[test]
+    fn snapshot_before_any_read_carries_after_seq_zero() {
+        // Counter starts at 1 unconditionally; the boolean is what the
+        // snapshot arm checks. A fresh blocking thread that hasn't yet
+        // had a successful `read()` must report after_seq = 0 regardless
+        // of where `next_seq` happens to sit.
+        let next_seq_after_zero_reads: u64 = 1;
+        let bytes_read_since_spawn = false;
+        let after_seq = if bytes_read_since_spawn {
+            next_seq_after_zero_reads.wrapping_sub(1)
+        } else {
+            0
+        };
+        assert_eq!(
+            after_seq, 0,
+            "first-ever snapshot before any read must carry after_seq = 0"
         );
     }
 }

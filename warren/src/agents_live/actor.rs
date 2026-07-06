@@ -1,6 +1,6 @@
 use crate::agents_live::handle::AgentStateSnapshot;
 use crate::agents_live::wire::{
-    Envelope, EnvelopeBody, HelloDown, TermSize, UsageSnapshot, PROTOCOL_VERSION,
+    Envelope, EnvelopeBody, HelloDown, TermFrame, TermSize, UsageSnapshot, PROTOCOL_VERSION,
 };
 use crate::agents_live::AgentHandle;
 use crate::db::Db;
@@ -299,15 +299,26 @@ async fn run_inner(
                         handle.publish_meta(env.body);
                     }
                     Message::Binary(b) => {
-                        if b.is_empty() { continue; }
-                        // §D multi-channel: pass the channel byte through
-                        // unchanged. Subscribers (ws_browser, ws_shell, …)
-                        // filter by the leading byte. The previous
-                        // implementation stripped the channel byte here,
-                        // which silently collapsed everything onto a single
-                        // terminal stream — fine for one PTY, broken for
-                        // /shell.
-                        handle.publish_term(Bytes::from(b));
+                        // §A.7: server→browser terminal binary frames are
+                        // now `<chan:1> <seq:8 BE> <data>`. Drop malformed
+                        // frames (too short for the prelude) entirely —
+                        // warren is a dumb pipe and would rather miss a
+                        // frame than seed the broadcast with a partial
+                        // seq that downstream panes interpret as
+                        // "everything since seq=N has been delivered." A
+                        // Rabbit that misroutes bytes would still land
+                        // here; the prelude check is cheap (10-byte
+                        // bound) and keeps the invariant auditable.
+                        if b.len() < 10 { continue; }
+                        let chan = b[0];
+                        let mut seq_arr = [0u8; 8];
+                        seq_arr.copy_from_slice(&b[1..9]);
+                        let seq = u64::from_be_bytes(seq_arr);
+                        handle.publish_term(TermFrame {
+                            chan,
+                            seq,
+                            data: b[9..].to_vec(),
+                        });
                     }
                     Message::Close(_) => break,
                     Message::Ping(_) | Message::Pong(_) => {}
