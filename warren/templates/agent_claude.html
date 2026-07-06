@@ -197,6 +197,34 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
   fontSize: 13,
   scrollback: 5000,
+  // §A.6 + Firefox-quirk fix: claude's TUI enables DECSET mouse-tracking
+  // modes (`\x1b[?1000h / ?1002h / ?1003h / ?1006h`) so its UI can react
+  // to clicks. With `mouseEvents: true` (the default), xterm.js installs
+  // MouseEvent listeners and *forwards every click/hover to claude as an
+  // SGR report `\x1b[<button;col;rowM`*. On Firefox desktop this is a
+  // disaster:
+  //
+  //   1. Hover emits `1003h`-style motion reports at every frame, which
+  //      claude re-renders against → render storm that visibly wipes the
+  //      screen for users who haven't even clicked yet ("screen is black
+  //      from the beginning").
+  //   2. Each render storms in turn lets the late-arriving `screen_snapshot`
+  //      hit a freshly-cleared VT, so the `applyMeta` reset on the browser
+  //      writes an empty grid → terminal pane goes blank.
+  //   3. The spurious SGR reports also trickle back through `term.onData`,
+  //      which is why Backspace was unreliable on Firefox mobile (the
+  //      `attachCustomKeyEventHandler` shim below was finding itself
+  //      side-by-side with mouse-driven noise that confuses xterm's
+  //      internal keymap).
+  //
+  // Setting `mouseEvents: false` disables the canvas MouseEvent listeners
+  // while keeping keyboard event handling, click-to-focus, and the helper
+  // textarea intact. claude's TUI still emits the modes, but xterm.js
+  // ignores them — phantom reports never reach the PTY, the render storm
+  // stays gone, and the Backspace shim below reverts to a clean keyboard
+  // codepath. Trade-off: claude's mouse-driven UI affordances won't
+  // respond to clicks (acceptable — the War UI is keyboard-driven).
+  mouseEvents: false,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
@@ -204,8 +232,28 @@ term.open(document.getElementById('term'));
 fit.fit();
 term.focus();
 
-// (Firefox mobile Backspace shim temporarily removed to isolate the
-// display-clearing bug — see tasks.)
+// §A.6 / Firefox-quirk fix: claude's TUI handles `\x7f` correctly when
+// xterm.js's `_keyDown → _evaluateKeyboardEvent` codepath emits `o.key =
+// s.C0.DEL` (the normal case). But Firefox mobile (Desktop Mode), and
+// sometimes Firefox desktop with certain input layouts, delivers Backspace
+// to the canvas with `key === "Backspace"` AND `keyCode === 8` while
+// still letting the browser default action run (Backspace-navigates-back
+// to the prior page). Bypass xterm.js's internal keymap for that exact
+// key combo: emit `\x7f` as a raw byte on the WS, and `preventDefault`
+// even if the WS isn't currently connected (so the browser doesn't
+// trigger history navigation).
+term.attachCustomKeyEventHandler(e => {
+  if (e.type !== 'keydown') return true;
+  if (e.key !== 'Backspace' && e.keyCode !== 8) return true;
+  e.preventDefault();
+  e.stopPropagation();
+  if (!connected || !ws || viewerMode) return false;
+  const buf = new Uint8Array(2);
+  buf[0] = 0x01;
+  buf[1] = 0x7f;
+  ws.send(buf);
+  return false;
+});
 
 let ws = null;
 let wsBackoff = 500;
@@ -245,28 +293,12 @@ term.onData(data => {
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
-  // §diagnose backspace: opt-in via `?debug_typing=1` on the page URL.
-  // Logs the bytes going out so we can confirm the browser is sending
-  // what xterm.js claims (0x7f for Backspace). Off by default — keystroke
-  // chatter is noisy in devtools.
-  if (location.search.includes('debug_typing=1')) {
-    console.log('term.onData',
-      JSON.stringify(data),
-      '->',
-      Array.from(buf).map(b => b.toString(16).padStart(2,'0')).join(' '));
-  }
   ws.send(buf);
 });
 
 // Envelope body shapes per warren/src/agents_live/wire.rs::EnvelopeBody.
 function applyMeta(env) {
   const t = env && env.t;
-  // §diagnose display-clearing: log every meta envelope. The bug shows
-  // up after typing, so we want to see if any reset/snapshot envelope
-  // arrives at that moment.
-  if (location.search.includes('debug_typing=1')) {
-    console.log('applyMeta t=' + t, JSON.stringify(env));
-  }
   switch (t) {
     case 'state':
       setBadge(env.state);
@@ -371,21 +403,7 @@ function connectWs() {
       if (view.length === 0) return;
       // Only the Claude channel (0x01) is defined; drop other ids.
       if (view[0] !== 0x01) return;
-      const payload = view.subarray(1);
-      // §diagnose display-clearing: opt-in via `?debug_typing=1`. Logs
-      // the bytes coming back from rabbit before they reach xterm.js,
-      // so we can see if claude is emitting something that wipes the
-      // screen (e.g. clear-screen ESC[2J, alternate-screen 1049,
-      // cursor-home + scroll-up region tricks) on each keystroke.
-      if (location.search.includes('debug_typing=1')) {
-        console.log(
-          'ws.onmessage (binary)',
-          payload.length, 'bytes:',
-          Array.from(payload).map(b => b.toString(16).padStart(2,'0')).join(' '),
-          '-> utf8:', JSON.stringify(bytesToUtf8(payload)),
-        );
-      }
-      term.write(bytesToUtf8(payload));
+      term.write(bytesToUtf8(view.subarray(1)));
       return;
     }
     try {
