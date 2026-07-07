@@ -31,6 +31,16 @@ pub enum Command {
     },
     Compact,
     Interrupt,
+    /// §Usage-limits: triggered by `POST /api/agents/:id/claude/usage_check`.
+    /// The actor sends `EnvelopeBody::UsageCheck` to rabbit over the
+    /// existing WS link; the rabbit supervisor runs the synchronous
+    /// `/usage` scrape (write `\x15/usage\r`, drain ~2s of PTY bytes,
+    /// parse with `observer::limits::LimitsParser`, send single Esc to
+    /// dismiss the overlay) and publishes the parsed `Usage` envelope
+    /// back through the link. The HTTP handler returns 202 Accepted
+    /// immediately — the parsed data arrives on the SSE
+    /// `/events/stream` channel a moment later.
+    UsageCheck,
     Restart {
         fresh: bool,
     },
@@ -483,6 +493,22 @@ async fn dispatch<T: WsTransport>(
             sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
+        Command::UsageCheck => {
+            // §Usage-limits: send a UsageCheck envelope to rabbit; the
+            // supervisor runs the synchronous `/usage` scrape and
+            // publishes the parsed result back as an `EnvelopeBody::Usage`
+            // carrying the new `weekly_pct` / `session_pct` fields. This
+            // arm is fire-and-forget — the HTTP handler already returned
+            // 202 Accepted to the browser; the parsed data arrives on
+            // the SSE `/events/stream` channel via the meta plane.
+            let env = Envelope {
+                v: PROTOCOL_VERSION,
+                seq: 0,
+                body: EnvelopeBody::UsageCheck,
+            };
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
+                .await?;
+        }
         Command::Restart { fresh } => {
             let env = Envelope {
                 v: PROTOCOL_VERSION,
@@ -648,6 +674,7 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::Slash { .. } => "slash",
         EnvelopeBody::Interrupt => "interrupt",
         EnvelopeBody::Clear { .. } => "clear",
+        EnvelopeBody::UsageCheck => "usage_check",
         EnvelopeBody::Restart { .. } => "restart",
         EnvelopeBody::Resize { .. } => "resize",
         EnvelopeBody::Repaint => "repaint",

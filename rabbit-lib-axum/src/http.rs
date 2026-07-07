@@ -62,6 +62,10 @@ pub fn router() -> Router<Arc<ServerState>> {
             axum::routing::post(claude_interrupt),
         )
         .route(
+            "/api/agents/:id/claude/usage_check",
+            axum::routing::post(claude_usage_check),
+        )
+        .route(
             "/api/agents/:id/claude/restart",
             axum::routing::post(claude_restart),
         )
@@ -251,6 +255,19 @@ async fn claude_interrupt(
 ) -> Result<StatusCode, AxumServerError> {
     state.http_interrupt(&headers, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn claude_usage_check(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, AxumServerError> {
+    state.http_usage_check(&headers, id).await?;
+    // 202 Accepted: the request triggered an async scrape on the
+    // rabbit side; the parsed limits arrive on the SSE stream a
+    // moment later. The browser already has the open SSE connection
+    // and re-renders the Usage panel on the next `case 'usage':`.
+    Ok(StatusCode::ACCEPTED)
 }
 
 async fn claude_restart(

@@ -144,11 +144,14 @@ body.viewer-mode #viewer-mode-banner { display: block; }
       <dt>output tokens</dt><dd id="usage-out">0</dd>
       <dt>cache read</dt><dd id="usage-cr">0</dd>
       <dt>cache write</dt><dd id="usage-cw">0</dd>
+      <dt>weekly limit</dt><dd id="usage-weekly">—</dd>
+      <dt>session limit</dt><dd id="usage-session">—</dd>
     </dl>
     <h2 class="h6">Actions</h2>
     <button class="btn btn-outline-warning action" data-action="interrupt">Interrupt</button>
     <button class="btn btn-outline-secondary action" data-action="clear">Clear</button>
     <button class="btn btn-outline-secondary action" data-action="compact">Compact</button>
+    <button class="btn btn-outline-info action" data-action="usage_check">Usage</button>
     <button class="btn btn-outline-danger action" data-action="restart">Restart</button>
     {# §A.6 leader-based resize. Visibility is JS-driven from
        `ConnectionAssigned` (button show) and `LeaderChanged` (toggle).
@@ -174,6 +177,12 @@ const usageIn = document.getElementById('usage-in');
 const usageOut = document.getElementById('usage-out');
 const usageCr = document.getElementById('usage-cr');
 const usageCw = document.getElementById('usage-cw');
+// §Usage-limits: the plan-level weekly + session limits. Populated
+// only when an explicit "Usage" button click (or a future warren
+// bg-task scheduler) drives a `/usage` scrape; otherwise the
+// default "—" placeholder in the HTML stays put.
+const usageWeekly = document.getElementById('usage-weekly');
+const usageSession = document.getElementById('usage-session');
 const promptRejectedBanner = document.getElementById('prompt-rejected-banner');
 
 // §D read-only viewer mode: `?viewer=true` on the URL puts the page into
@@ -350,6 +359,23 @@ function applyMeta(env) {
       if (env.output_tokens != null) usageOut.textContent = env.output_tokens;
       if (env.cache_read != null)   usageCr.textContent = env.cache_read;
       if (env.cache_write != null)  usageCw.textContent = env.cache_write;
+      // §Usage-limits: the four plan-level fields ride on the same
+      // `Usage` envelope. They're `None` until the operator clicks
+      // the "Usage" button (or a future warren bg-task scheduler
+      // hits `POST /claude/usage_check`); the dashboard keeps
+      // showing "—" until then.
+      if (env.weekly_pct != null) {
+        const reset = env.weekly_resets_at
+          ? ' (resets ' + new Date(env.weekly_resets_at).toLocaleString() + ')'
+          : '';
+        usageWeekly.textContent = env.weekly_pct.toFixed(0) + '%' + reset;
+      }
+      if (env.session_pct != null) {
+        const reset = env.session_resets_at
+          ? ' (resets in ' + formatRelative(env.session_resets_at) + ')'
+          : '';
+        usageSession.textContent = env.session_pct.toFixed(0) + '%' + reset;
+      }
       break;
     case 'cleared':
       if (env.hard) term.reset();
@@ -542,6 +568,16 @@ function bytesToUtf8(bytes) {
 document.querySelectorAll('button.action').forEach(btn => {
   btn.addEventListener('click', async () => {
     const action = btn.dataset.action;
+    // §Usage-limits: the `/usage` scrape takes ~2s on the rabbit
+    // side; debounce the button so an operator mashing it doesn't
+    // queue four scrapes back-to-back. 2.5s leaves a small margin
+    // for the parsed envelope to land on the SSE stream.
+    if (action === 'usage_check') {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      setTimeout(() => { btn.disabled = false; }, 2500);
+      showActionToast('fetching usage limits…');
+    }
     let body = null;
     if (action === 'restart') {
       body = JSON.stringify({fresh: true});
@@ -569,6 +605,23 @@ document.querySelectorAll('button.action').forEach(btn => {
     }
   });
 });
+
+// §Usage-limits: relative-time formatter for the "resets in Nh Nm"
+// suffix on the session-limit row. Walks the diff in coarse
+// buckets so the string stays short ("2h 14m" not "2:14:33.123").
+function formatRelative(iso) {
+  const target = new Date(iso).getTime();
+  const now = Date.now();
+  const diffMs = target - now;
+  if (diffMs <= 0) return 'now';
+  const totalMin = Math.floor(diffMs / 60000);
+  const days = Math.floor(totalMin / (60 * 24));
+  const hours = Math.floor((totalMin % (60 * 24)) / 60);
+  const minutes = totalMin % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
 
 // Lightweight toast so action-button outcomes are visible. A click on
 // `restart` triggers an async restart on the rabbit side; without this,

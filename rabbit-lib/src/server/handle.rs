@@ -372,6 +372,19 @@ impl AgentHandle {
             .map_err(|_| anyhow::anyhow!("actor not running"))
     }
 
+    /// §Usage-limits: ask rabbit to drive the `/usage` overlay and
+    /// report back the plan-level weekly + 5-hour session limits.
+    /// Fire-and-forget — the HTTP handler returns 202 Accepted
+    /// immediately; the parsed data arrives on the SSE
+    /// `/events/stream` channel a moment later as a fresh
+    /// `Usage` envelope carrying the new fields.
+    pub async fn usage_check(&self) -> AnyResult<()> {
+        self.cmd_tx()
+            .send(Command::UsageCheck)
+            .await
+            .map_err(|_| anyhow::anyhow!("actor not running"))
+    }
+
     pub async fn restart(&self, fresh: bool) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Restart { fresh })

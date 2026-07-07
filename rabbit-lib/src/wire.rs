@@ -73,6 +73,19 @@ pub enum EnvelopeBody {
     Clear {
         hard: bool,
     },
+    /// §Usage-limits: server-initiated request for rabbit to scrape
+    /// Claude's `/usage` overlay and return a fresh `Usage` envelope
+    /// carrying the new `weekly_pct` / `session_pct` fields. Currently
+    /// triggered by the "Usage" button in the warren UI; the same
+    /// envelope will be used by future warren bg-task schedulers
+    /// (the HTTP endpoint `POST /api/agents/:id/claude/usage_check`
+    /// is forward-compatible). The rabbit supervisor handles this
+    /// synchronously: it writes `\x15/usage\r` to the PTY, drains the
+    /// broadcast `TermFrame` stream for ~2s, parses with
+    /// `observer::limits::LimitsParser`, sends single Esc to dismiss
+    /// the overlay, and publishes the parsed limits back as
+    /// `EnvelopeBody::Usage(snap)` with the four new fields set.
+    UsageCheck,
     Restart {
         fresh: bool,
     },
@@ -268,6 +281,25 @@ pub struct UsageSnapshot {
     #[serde(default)]
     pub parse_errors: u64,
     pub source: String,
+    /// §Usage-limits: plan-level weekly usage as a percentage in [0, 100].
+    /// None when the user is not on a plan with weekly limits (API key,
+    /// free tier) or no scrape has happened yet. Populated by the
+    /// explicit `/usage` scrape (see `EnvelopeBody::UsageCheck`); not
+    /// present on every envelope.
+    #[serde(default)]
+    pub weekly_pct: Option<f64>,
+    /// §Usage-limits: ISO-8601 timestamp for the next weekly reset.
+    /// Paired with `weekly_pct` — both `Some` or both `None`.
+    #[serde(default)]
+    pub weekly_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// §Usage-limits: plan-level 5-hour session usage as a percentage in
+    /// [0, 100]. Paired with `session_resets_at`.
+    #[serde(default)]
+    pub session_pct: Option<f64>,
+    /// §Usage-limits: ISO-8601 timestamp for the next 5-hour session
+    /// reset. Paired with `session_pct`.
+    #[serde(default)]
+    pub session_resets_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,5 +358,64 @@ mod tests {
         let body: ScreenSnapshotBody = serde_json::from_value(v1_json)
             .expect("v1 envelope must deserialize under a v2 struct");
         assert_eq!(body.after_seq, 0);
+    }
+
+    #[test]
+    fn usage_snapshot_round_trips_with_limit_fields() {
+        // §Usage-limits: a v2 rabbit that has scraped a plan with
+        // weekly + session caps emits all four new fields as
+        // `Some(...)`. The shape must round-trip through serde so
+        // warren's HTTP handler can deserialize the envelope it
+        // receives on the SSE stream.
+        use chrono::TimeZone;
+        let weekly_resets = chrono::Utc.with_ymd_and_hms(2026, 7, 9, 5, 0, 0).unwrap();
+        let session_resets = chrono::Utc.with_ymd_and_hms(2026, 7, 7, 12, 20, 0).unwrap();
+        let snap = UsageSnapshot {
+            input_tokens: 12_345,
+            output_tokens: 6_789,
+            cache_read: 1_000,
+            cache_write: 200,
+            context_pct_est: Some(42.5),
+            parse_errors: 0,
+            source: "usage_check".to_string(),
+            weekly_pct: Some(73.0),
+            weekly_resets_at: Some(weekly_resets),
+            session_pct: Some(12.0),
+            session_resets_at: Some(session_resets),
+        };
+        let json = serde_json::to_value(&snap).expect("serialize");
+        assert_eq!(json["weekly_pct"], 73.0);
+        assert_eq!(json["session_pct"], 12.0);
+        assert!(json["weekly_resets_at"].is_string());
+        assert!(json["session_resets_at"].is_string());
+        let back: UsageSnapshot = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.weekly_pct, Some(73.0));
+        assert_eq!(back.session_pct, Some(12.0));
+        assert_eq!(back.weekly_resets_at, Some(weekly_resets));
+        assert_eq!(back.session_resets_at, Some(session_resets));
+    }
+
+    #[test]
+    fn usage_snapshot_v1_json_without_limit_fields_deserializes_to_none() {
+        // A v1 producer (pre-usage-limits rabbit) never emitted the
+        // four new fields; the v2 struct must tolerate their
+        // absence and default them to `None`. This keeps the
+        // rollout window safe: a v1 rabbit talking to a v2 warren
+        // (or vice-versa) must not panic on the missing keys.
+        let v1_json = serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read": 10,
+            "cache_write": 5,
+            "context_pct_est": null,
+            "parse_errors": 0,
+            "source": "transcript",
+        });
+        let snap: UsageSnapshot = serde_json::from_value(v1_json)
+            .expect("v1 envelope must deserialize under a v2 struct");
+        assert_eq!(snap.weekly_pct, None);
+        assert_eq!(snap.weekly_resets_at, None);
+        assert_eq!(snap.session_pct, None);
+        assert_eq!(snap.session_resets_at, None);
     }
 }

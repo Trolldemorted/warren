@@ -164,6 +164,17 @@ impl TranscriptTail {
                 context_pct_est,
                 parse_errors: *parse_errors,
                 source: "transcript".to_string(),
+                // §Usage-limits: the transcript JSONL has no
+                // plan-level weekly / session data; the supervisor
+                // populates those fields on the next `Usage` envelope
+                // it ships after a successful `/usage` scrape. The
+                // transcript-side default of `None` is what makes
+                // "I haven't scraped yet" distinguishable from "I
+                // scraped and got 73%."
+                weekly_pct: None,
+                weekly_resets_at: None,
+                session_pct: None,
+                session_resets_at: None,
             };
             let kind = msg.role.unwrap_or_else(|| "unknown".to_string());
             out.push(UsageUpdate {

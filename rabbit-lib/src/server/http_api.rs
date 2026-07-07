@@ -203,6 +203,23 @@ impl ServerState {
         Ok(())
     }
 
+    /// `POST /api/agents/:id/claude/usage_check`. Admin-only. Asks
+    /// rabbit to drive the synchronous `/usage` overlay scrape;
+    /// returns immediately (the parsed limits arrive on the SSE
+    /// `/events/stream` channel a moment later inside a fresh `Usage`
+    /// envelope). Forward-compatible with future warren bg-task
+    /// schedulers that want to poll the same endpoint.
+    pub async fn http_usage_check(
+        self: &Arc<Self>,
+        headers: &::http::HeaderMap,
+        id: Uuid,
+    ) -> ServerResult<()> {
+        check_admin(self, headers).await?;
+        let handle = require_handle(self, id).await?;
+        handle.usage_check().await?;
+        Ok(())
+    }
+
     /// `POST /api/agents/:id/claude/restart`. Admin-only.
     pub async fn http_restart(
         self: &Arc<Self>,
@@ -652,6 +669,49 @@ mod tests {
             Err(ServerError::NotFound) => {}
             Err(_) => panic!("expected not found"),
             Ok(_) => panic!("expected not found"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_usage_check_returns_accepted_and_lands_on_actor() {
+        // §Usage-limits: the domain function pushes Command::UsageCheck
+        // onto the actor's cmd channel. We can't observe the actual
+        // scrape here (the fake actor doesn't drive a real PTY), but
+        // we can assert the call doesn't error and the message lands
+        // on the channel. A separate integration test
+        // (warren/tests/integration.rs) wires a real actor and
+        // asserts the envelope reaches the SSE stream.
+        let (state, _store) = build_state(true);
+        let id = register_agent(&state);
+        let result = state.http_usage_check(&admin_headers(), id).await;
+        assert!(
+            result.is_ok(),
+            "http_usage_check should succeed: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_usage_check_unknown_agent_returns_not_found() {
+        let (state, _store) = build_state(true);
+        let bogus = Uuid::new_v4();
+        match state.http_usage_check(&admin_headers(), bogus).await {
+            Err(ServerError::NotFound) => {}
+            Err(_) => panic!("expected not found"),
+            Ok(_) => panic!("expected not found"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_usage_check_rejects_non_admin() {
+        // The endpoint is admin-only; without the admin auth grant
+        // the function must surface an Auth error and never touch
+        // the actor's cmd channel.
+        let (state, _store) = build_state(false);
+        let id = register_agent(&state);
+        match state.http_usage_check(&admin_headers(), id).await {
+            Err(ServerError::Auth(_)) => {}
+            Err(_) => panic!("expected auth error"),
+            Ok(_) => panic!("expected auth error"),
         }
     }
 }

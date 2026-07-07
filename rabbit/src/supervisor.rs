@@ -5,6 +5,7 @@ use crate::input;
 use crate::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
 use crate::meta_ring::MetaRing;
 use crate::observer::hooks::{ObserverEvent, ObserverHandle};
+use crate::observer::limits::{LimitsParser, UsageLimits};
 use crate::observer::state::State;
 use crate::observer::transcript::{default_transcript_path, TranscriptTail, UsageUpdate};
 use crate::pty::{ExitKind, Pty, PtyExitStatus};
@@ -15,7 +16,7 @@ use parking_lot::Mutex;
 use portable_pty::ChildKiller;
 use rabbit_lib::wire::{
     Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame, TermSize,
-    TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+    UsageSnapshot, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
 };
 use std::collections::VecDeque;
 use std::io::Write;
@@ -24,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 pub async fn run(config: Config) -> Result<()> {
@@ -189,6 +190,7 @@ pub async fn run(config: Config) -> Result<()> {
                         pty_link_tx,
                         killer: sess.killer,
                         writer: sess.writer,
+                        term_bcast_tx: sess.term_bcast_tx,
                     });
                 }
                 Err(e) => {
@@ -258,6 +260,36 @@ pub async fn run(config: Config) -> Result<()> {
                                         "Restart: shared killer.kill returned {e:?} (child likely already gone)"
                                     );
                                 }
+                            }
+                        } else if let EnvelopeBody::UsageCheck = &env.body {
+                            // §Usage-limits: drive the synchronous
+                            // `/usage` scrape. The HTTP handler at
+                            // `/api/agents/:id/claude/usage_check`
+                            // already returned 202 Accepted; we
+                            // publish the parsed limits as a fresh
+                            // `Usage` envelope through the same
+                            // `LinkCmd::SendMeta` path the transcript
+                            // relay uses. Forward-compatible: future
+                            // warren bg-task schedulers can call the
+                            // same HTTP endpoint at whatever cadence
+                            // makes sense.
+                            if let Some(active) = &active {
+                                let limits = run_usage_scrape(
+                                    active.writer.clone(),
+                                    active.term_bcast_tx.clone(),
+                                )
+                                .await;
+                                let snap = UsageSnapshot {
+                                    source: "usage_check".to_string(),
+                                    weekly_pct: limits.weekly_pct,
+                                    weekly_resets_at: limits.weekly_resets_at,
+                                    session_pct: limits.session_pct,
+                                    session_resets_at: limits.session_resets_at,
+                                    ..Default::default()
+                                };
+                                let _ = cmd_tx
+                                    .send(LinkCmd::SendMeta(EnvelopeBody::Usage(snap)))
+                                    .await;
                             }
                         } else if let EnvelopeBody::SnapshotRequest { chan } = &env.body {
                             // §D Milestone 5 (Phase B): late-join screen dump.
@@ -564,6 +596,16 @@ struct ActiveSession {
     /// serialized (and these are short, OS-buffered writes; no
     /// contention matters).
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// §Usage-limits: every byte the blocking PTY reader pulls off
+    /// the master is also published here, so the synchronous
+    /// `/usage` scrape routine in the outer loop can subscribe a
+    /// short-lived `Receiver` and drain the overlay for ~2s without
+    /// racing the broadcast sender. Capacity is small (256) — the
+    /// scrape's deadline is 2s and Claude's TUI emits at most a
+    /// few KB while the `/usage` overlay paints. If a scrape
+    /// somehow falls behind, the `Lagged` variant of `RecvError`
+    /// signals the parser to keep draining.
+    term_bcast_tx: broadcast::Sender<TermFrame>,
 }
 
 struct OutcomeChannels {
@@ -575,6 +617,7 @@ struct SpawnResult {
     outcome_channels: OutcomeChannels,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    term_bcast_tx: broadcast::Sender<TermFrame>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -592,6 +635,16 @@ fn spawn_run_one(
     let (pty_tx, mut pty_rx) = mpsc::channel::<PtyCmd>(128);
     let (pty_evt_tx, pty_evt_rx) = mpsc::channel::<PtyEvt>(128);
     let (outcome_tx, outcome_rx_in) = mpsc::channel::<RunOutcome>(8);
+    // §Usage-limits: a broadcast channel lets the synchronous
+    // `/usage` scrape (driven by `EnvelopeBody::UsageCheck` from the
+    // outer loop) observe PTY bytes without contending with the
+    // existing `pty_evt_tx` mpsc — the mpsc is owned by the driver
+    // task and can't be safely subscribed to a second time. The
+    // blocking PTY reader clones the sender and emits a copy of
+    // every `PtyEvt::Read` payload here; the outer loop subscribes
+    // a short-lived `Receiver` for the duration of the scrape.
+    let (term_bcast_tx, _) = broadcast::channel::<TermFrame>(256);
+    let term_bcast_tx_for_blocking = term_bcast_tx.clone();
 
     let replay_cap = config.replay_bytes;
     let bin = config.claude_bin.clone();
@@ -629,6 +682,7 @@ fn spawn_run_one(
         let mut pty = pty;
         let mut reader = pty.reader();
         let writer = writer_for_blocking;
+        let term_bcast_tx = term_bcast_tx_for_blocking;
 
         let mut io_buf = [0u8; 4096];
         let mut graceful_pending = false;
@@ -801,11 +855,25 @@ fn spawn_run_one(
                     let seq = next_seq;
                     next_seq = next_seq.wrapping_add(1);
                     bytes_read_since_spawn = true;
+                    let frame = TermFrame {
+                        chan: TERM_CHAN_CLAUDE,
+                        seq,
+                        data: io_buf[..n].to_vec(),
+                    };
+                    // §Usage-limits: also publish a copy to the
+                    // broadcast so the synchronous `/usage` scrape
+                    // (driven by `EnvelopeBody::UsageCheck`) can
+                    // observe overlay bytes without contending with
+                    // the driver task's mpsc subscription. We
+                    // `clone()` because the broadcast sender takes
+                    // ownership; cloning the underlying bytes is
+                    // cheap for the typical ~256-byte PTY read.
+                    let _ = term_bcast_tx.send(frame.clone());
                     if pty_evt_tx
                         .blocking_send(PtyEvt::Read {
-                            chan: TERM_CHAN_CLAUDE,
-                            seq,
-                            data: io_buf[..n].to_vec(),
+                            chan: frame.chan,
+                            seq: frame.seq,
+                            data: frame.data,
                         })
                         .is_err()
                     {
@@ -936,6 +1004,7 @@ fn spawn_run_one(
         },
         killer,
         writer,
+        term_bcast_tx,
     })
 }
 
@@ -1141,6 +1210,98 @@ async fn write_claude_terminal_bytes(data: &[u8], active: Option<&ActiveSession>
     let w: &mut dyn Write = &mut *g;
     let _ = w.write_all(data);
     let _ = w.flush();
+}
+
+/// §Usage-limits: drive the synchronous `/usage` overlay scrape.
+///
+/// 1. Writes `\x15/usage\r` (Ctrl-U, "/usage", Enter) to the PTY
+///    through the shared writer — same path the `Clear` arm in
+///    `dispatch_to_pty` uses.
+/// 2. Subscribes a fresh `broadcast::Receiver<TermFrame>` and
+///    drains it for ~2s, feeding each frame's bytes to
+///    `LimitsParser`. The parser returns early when all four
+///    fields are populated; the deadline caps the wait if the
+///    overlay paint is slow (e.g. mid-turn rendering noise).
+/// 3. Sends a single `Esc` to dismiss the overlay so the next
+///    scrape starts clean. Per the Claude Code keyboard doc,
+///    single Esc closes a dialog; double-Esc would rewind the
+///    conversation and steal input focus.
+///
+/// Returns the parsed limits. Any field the parser did not see
+/// is `None`; the calling code publishes the result as a fresh
+/// `Usage` envelope and the UI shows "—" for missing fields.
+async fn run_usage_scrape(
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    term_bcast_tx: broadcast::Sender<TermFrame>,
+) -> UsageLimits {
+    use std::io::Write;
+    use tokio::time::{timeout, Duration};
+
+    const SCRAPE_DEADLINE: Duration = Duration::from_secs(2);
+    const TICK: Duration = Duration::from_millis(250);
+
+    // 1. Inject /usage. `input::slash` emits exactly
+    //    `\x15/usage\r` (Ctrl-U clear, /usage, Enter), the same
+    //    shape the other action arms use.
+    {
+        let mut g = writer.lock();
+        let w: &mut dyn Write = &mut *g;
+        if let Err(e) = input::slash(w, "usage") {
+            log::warn!("usage_check: slash write failed: {e:?}");
+            return UsageLimits::default();
+        }
+        let _ = w.flush();
+    }
+
+    // 2. Drain broadcast frames for up to SCRAPE_DEADLINE.
+    let mut rx = term_bcast_tx.subscribe();
+    let mut parser = LimitsParser::new();
+    let deadline = Instant::now() + SCRAPE_DEADLINE;
+    while Instant::now() < deadline {
+        // `recv` is cancellation-safe — even if the future is
+        // dropped mid-wait, the next `subscribe()` picks up from
+        // the same point. We tick in 250ms slices so a frame
+        // arriving during a tick is processed in the same loop
+        // iteration rather than after a full timeout.
+        match timeout(TICK, rx.recv()).await {
+            Ok(Ok(frame)) => {
+                if parser.feed(&frame.data).is_some() {
+                    break;
+                }
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                // The broadcast buffer overflowed (we fell
+                // behind). Drain whatever's queued before
+                // continuing — Lagged fires once per overflow
+                // and the next `recv` resumes from the new tip.
+                continue;
+            }
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
+                // Sender dropped — the active session ended
+                // mid-scrape. Bail.
+                break;
+            }
+            Err(_) => {
+                // Tick timeout — keep draining until the
+                // overall deadline.
+            }
+        }
+    }
+
+    // 3. Dismiss the overlay so the user's terminal isn't left
+    //    hanging with a stale /usage pane. Single Esc per the
+    //    keyboard doc; the actor's normal input flow resumes
+    //    on the next keystroke.
+    {
+        let mut g = writer.lock();
+        let w: &mut dyn Write = &mut *g;
+        let _ = w.write_all(b"\x1b");
+        let _ = w.flush();
+    }
+
+    parser
+        .flush()
+        .unwrap_or_else(|| parser.feed(&[]).unwrap_or_default())
 }
 
 async fn dispatch_to_pty(
@@ -1749,6 +1910,7 @@ mod tests {
             },
             killer: dummy_killer,
             writer: writer.clone(),
+            term_bcast_tx: broadcast::channel::<TermFrame>(1).0,
         };
 
         // Reader thread drains whatever cat echoes back. This mirrors
@@ -1865,6 +2027,7 @@ mod tests {
             },
             killer: dummy_killer,
             writer: writer.clone(),
+            term_bcast_tx: broadcast::channel::<TermFrame>(1).0,
         };
 
         let (echo_tx, echo_rx) = std_mpsc::channel::<Vec<u8>>();
