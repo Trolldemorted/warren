@@ -1,11 +1,11 @@
 use crate::server::handle::AgentHandle;
 use crate::server::handle::AgentStateSnapshot;
+use crate::server::transport::{TransportMsg, WsTransport};
 use crate::server::SessionStore;
 use crate::wire::{
     Envelope, EnvelopeBody, HelloDown, TermFrame, TermSize, UsageSnapshot, PROTOCOL_VERSION,
 };
 use anyhow::Result;
-use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
@@ -105,7 +105,7 @@ pub async fn run(
     store: Arc<dyn SessionStore>,
     handle: AgentHandle,
     agent_id: Uuid,
-    socket: WebSocket,
+    socket: impl WsTransport + 'static,
     cmd_rx: mpsc::Receiver<Command>,
 ) -> Result<()> {
     let join = tokio::spawn(run_inner(store, handle, agent_id, socket, cmd_rx));
@@ -113,11 +113,11 @@ pub async fn run(
     Ok(())
 }
 
-async fn run_inner(
+async fn run_inner<T: WsTransport>(
     store: Arc<dyn SessionStore>,
     handle: AgentHandle,
     agent_id: Uuid,
-    socket: WebSocket,
+    socket: T,
     mut cmd_rx: mpsc::Receiver<Command>,
 ) {
     let (mut sink, mut stream) = socket.split();
@@ -223,7 +223,7 @@ async fn run_inner(
                     }
                 };
                 match msg {
-                    Message::Text(t) => {
+                    TransportMsg::Text(t) => {
                         let env: Envelope = match serde_json::from_str(&t) {
                             Ok(v) => v,
                             Err(e) => {
@@ -301,7 +301,7 @@ async fn run_inner(
                         }
                         handle.publish_meta(env.body);
                     }
-                    Message::Binary(b) => {
+                    TransportMsg::Binary(b) => {
                         // §A.7: server→browser terminal binary frames are
                         // now `<chan:1> <seq:8 BE> <data>`. Drop malformed
                         // frames (too short for the prelude) entirely —
@@ -323,8 +323,8 @@ async fn run_inner(
                             data: b[9..].to_vec(),
                         });
                     }
-                    Message::Close(_) => break,
-                    Message::Ping(_) | Message::Pong(_) => {}
+                    TransportMsg::Close(_) => break,
+                    TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
                 }
             }
             _ = ack_ticker.tick() => {
@@ -342,25 +342,28 @@ async fn run_inner(
     }
 }
 
-async fn send_ack(sink: &mut futures_util::stream::SplitSink<WebSocket, Message>, ack_seq: i64) {
+async fn send_ack<T: WsTransport>(
+    sink: &mut futures_util::stream::SplitSink<T, TransportMsg>,
+    ack_seq: i64,
+) {
     let env = Envelope {
         v: PROTOCOL_VERSION,
         seq: 0,
         body: EnvelopeBody::Ack { ack_seq },
     };
     if let Ok(s) = serde_json::to_string(&env) {
-        if sink.send(Message::Text(s)).await.is_err() {
+        if sink.send(TransportMsg::Text(s)).await.is_err() {
             log::debug!("ack send failed (sink closed)");
         }
     }
 }
 
-async fn read_hello(
-    stream: &mut futures_util::stream::SplitStream<WebSocket>,
+async fn read_hello<T: WsTransport>(
+    stream: &mut futures_util::stream::SplitStream<T>,
 ) -> Result<HelloDown> {
     while let Some(msg) = stream.next().await {
         let msg = msg?;
-        if let Message::Text(t) = msg {
+        if let TransportMsg::Text(t) = msg {
             let env: Envelope = serde_json::from_str(&t)?;
             if env.v != PROTOCOL_VERSION {
                 anyhow::bail!("protocol mismatch: {}", env.v);
@@ -373,10 +376,10 @@ async fn read_hello(
     anyhow::bail!("no hello from rabbit")
 }
 
-async fn dispatch(
+async fn dispatch<T: WsTransport>(
     cmd: Command,
     handle: &AgentHandle,
-    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    sink: &mut futures_util::stream::SplitSink<T, TransportMsg>,
     pending: &mut std::collections::VecDeque<(Uuid, oneshot::Sender<TurnOutcomeMsg>)>,
     started_at: &mut HashMap<Uuid, chrono::DateTime<Utc>>,
 ) -> Result<()> {
@@ -400,7 +403,7 @@ async fn dispatch(
                 seq: 0,
                 body: EnvelopeBody::Prompt { id, text, by },
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
         Command::Clear { hard, reply } => {
@@ -409,7 +412,7 @@ async fn dispatch(
                 seq: 0,
                 body: EnvelopeBody::Clear { hard },
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
             if let Some(tx) = reply {
                 let _ = tx.send(());
@@ -423,7 +426,7 @@ async fn dispatch(
                     cmd: "compact".to_string(),
                 },
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
         Command::Interrupt => {
@@ -432,7 +435,7 @@ async fn dispatch(
                 seq: 0,
                 body: EnvelopeBody::Interrupt,
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
         Command::Restart { fresh } => {
@@ -441,7 +444,7 @@ async fn dispatch(
                 seq: 0,
                 body: EnvelopeBody::Restart { fresh },
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
         Command::Resize { cols, rows } => {
@@ -450,7 +453,7 @@ async fn dispatch(
                 seq: 0,
                 body: EnvelopeBody::Resize { cols, rows },
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
         Command::Repaint => {
@@ -459,13 +462,13 @@ async fn dispatch(
                 seq: 0,
                 body: EnvelopeBody::Repaint,
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
         Command::SendKeys { chan, data } => {
             let mut frame = vec![chan];
             frame.extend_from_slice(&data);
-            sink.send(Message::Binary(frame)).await?;
+            sink.send(TransportMsg::Binary(frame)).await?;
         }
         Command::SnapshotRequest { chan } => {
             let env = Envelope {
@@ -473,7 +476,7 @@ async fn dispatch(
                 seq: 0,
                 body: EnvelopeBody::SnapshotRequest { chan },
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
         // §A.6 leader-based resize — see `handle_leader_command` for the
@@ -524,7 +527,7 @@ async fn dispatch(
                     seq: 0,
                     body: EnvelopeBody::Resize { cols, rows },
                 };
-                sink.send(Message::Text(serde_json::to_string(&env)?))
+                sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                     .await?;
             }
         }
@@ -563,7 +566,7 @@ async fn dispatch(
                 seq: 0,
                 body: EnvelopeBody::Resize { cols, rows },
             };
-            sink.send(Message::Text(serde_json::to_string(&env)?))
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
         Command::ConnectionClosed { connection_id } => {
@@ -621,9 +624,21 @@ async fn persist_event(
     kind: &str,
     seq: i64,
 ) -> Result<()> {
+    // Serialize once into a String so the trait can stay FFI-shaped
+    // (&str over the wire). For callers that already hold a `Value`
+    // and want to skip the serialization, `insert_event_value` is the
+    // escape hatch.
+    let payload_json = serde_json::to_string(payload)
+        .map_err(|e| anyhow::anyhow!("event payload serialize: {e}"))?;
     store
-        .insert_event(agent_id, seq, kind, payload.clone())
-        .await?;
+        .insert_event(agent_id, seq, kind, &payload_json)
+        .await
+        .map_err(|e| match e {
+            crate::server::StoreError::Duplicate => {
+                anyhow::anyhow!("event already persisted at seq {seq}")
+            }
+            other => anyhow::anyhow!("insert_event: {other}"),
+        })?;
     Ok(())
 }
 
@@ -631,11 +646,13 @@ async fn persist_event(
 mod tests {
     //! §A.6 leader-based resize: actor-level dispatch tests.
     //!
-    //! The `dispatch` function takes a `SplitSink<WebSocket, Message>`,
-    //! which is hard to construct without a real `WebSocketStream` (e.g.
-    //! over a `tokio::io::DuplexStream`); that requires `tokio_tungstenite`
-    //! integration in `Cargo.toml`'s `[dev-dependencies]` and a fair amount
-    //! of boilerplate to wire into the actor's `dispatch` signature.
+    //! The `dispatch` function takes a generic
+    //! `SplitSink<T: WsTransport, TransportMsg>`. End-to-end tests
+    //! that exercise dispatch against a fake transport live in
+    //! `transport::tests` (the `dyn_ws_transport_round_trips_every_variant`
+    //! and `split_works_on_dyn_ws_transport` cases); the leader-state
+    //! side-effects (claim/release/clear, the `LeaderChanged`
+    //! broadcast) are fully covered here.
     //!
     //! The leader-state side-effects (claim/release/clear, the
     //! `LeaderChanged` broadcast) are fully covered by `handle.rs::tests`

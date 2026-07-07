@@ -300,12 +300,12 @@ fn build_router(state: AppState) -> Router {
         // The four rabbit-lib WebSocket endpoints (`/ws/rabbit`,
         // `/agent/:id/claude/ws`, `/agent/:id/shell/ws`) and the JSON
         // HTTP API (`/api/agents/:id/claude/...`) are all mounted by
-        // `ServerState::router` in one merge. We finalize the lib's
-        // router first with its `Arc<ServerState>` so the merged
-        // outer router still type-erases to `Router<()>`, and the
-        // lib's handlers then pull `Arc<ServerState>` back out of
-        // the outer `AppState` via the `FromRef` impl above.
-        .merge(state.live.router().with_state(state.live.clone()))
+        // `rabbit_lib_axum::router` in one merge. The lib is
+        // framework-agnostic now — the axum adapter crate does the
+        // wiring. We finalize the lib's router with `Arc<ServerState>`
+        // (its declared state type), then merge into the outer
+        // `Router<AppState>` via the `FromRef` impl above.
+        .merge(rabbit_lib_axum::router(state.live.clone()).with_state(state.live.clone()))
         .nest("/static", routes::static_files::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

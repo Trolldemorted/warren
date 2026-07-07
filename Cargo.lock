@@ -1974,17 +1974,41 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
- "axum",
  "bytes",
  "chrono",
  "dashmap",
  "futures-util",
+ "http",
  "log",
+ "parking_lot",
  "serde",
  "serde_json",
+ "simple_logger",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite",
+ "tower",
+ "uuid",
+]
+
+[[package]]
+name = "rabbit-lib-axum"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures-util",
+ "http",
+ "log",
+ "rabbit-lib",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
  "uuid",
 ]
 
@@ -3442,8 +3466,10 @@ dependencies = [
  "clap",
  "dashmap",
  "futures-util",
+ "http",
  "log",
  "rabbit-lib",
+ "rabbit-lib-axum",
  "rand 0.8.6",
  "reqwest",
  "sea-orm",

@@ -1,18 +1,12 @@
 use crate::server::actor::Command;
 use crate::server::handle::AgentHandle;
 use crate::server::registry::AgentRegistry;
+use crate::server::transport::TransportMsg;
+use crate::server::WsTransport;
 use crate::wire::{Envelope, EnvelopeBody, TermFrame, PROTOCOL_VERSION, TERM_CHAN_CLAUDE};
 
-use crate::server::{AuthError, ServerError, ServerState};
-use std::sync::Arc;
-
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
-use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -26,58 +20,24 @@ use uuid::Uuid;
 /// frames are noise on the wire.
 const BROWSER_WS_PING_INTERVAL: Duration = Duration::from_secs(20);
 
-/// §D read-only viewer mode: query params for `ws_browser`. When
-/// `viewer=true`, the server drops every inbound input frame from this WS
-/// (Prompts, Interrupts, Slash, Clear, Resize, Repaint, Restart) and every
-/// typed terminal byte, regardless of what the browser JS sends. The UI
-/// template also hides its input affordances, but the server-side drop is
-/// the actual contract — client-side enforcement is cosmetic.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct WsBrowserQuery {
-    #[serde(default)]
-    pub viewer: Option<bool>,
-}
-
-/// `axum` router for the browser-side WebSocket. Mounts
-/// `/agent/:id/claude/ws`. Carries `Arc<ServerState>` as its state
-/// type — the embedder is expected to call `.with_state(...)` on the
-/// parent router.
-pub fn router() -> axum::Router<Arc<ServerState>> {
-    axum::Router::new().route("/agent/:id/claude/ws", axum::routing::get(ws_browser))
-}
-
-pub async fn ws_browser(
-    State(state): State<Arc<ServerState>>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Query(q): Query<WsBrowserQuery>,
-    ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, ServerError> {
-    if !state.auth.authenticate_admin(&headers).await? {
-        return Err(ServerError::Auth(AuthError::Invalid));
-    }
-    let viewer_mode = q.viewer.unwrap_or(false);
-    let registry: AgentRegistry = state.registry.clone();
-    Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(e) = handle(socket, registry, id, viewer_mode).await {
-            log::debug!("browser ws closed for agent {}: {e:?}", id);
-        }
-    }))
-}
-
-async fn handle(
-    socket: WebSocket,
+/// Framework-agnostic browser-side session loop. Public so the
+/// `rabbit-lib-axum` adapter can call it after wrapping an axum
+/// `WebSocket` as a `DynWsTransport`. Kept in `rabbit-lib` because the
+/// logic (term/meta replay, leader gating, viewer-mode drop) is
+/// framework-free.
+pub async fn handle(
+    transport: impl WsTransport,
     registry: AgentRegistry,
     agent_id: Uuid,
     viewer_mode: bool,
 ) -> anyhow::Result<()> {
-    // Split the socket first so the wait-for-arrival guard below can
+    // Split the transport first so the wait-for-arrival guard below can
     // observe early client closes without burning the upgrade — once
     // we await `notified()` blindly, the only way out of that future
     // is the registry firing or the client going away. Detecting the
     // latter requires the read half to be polled concurrently with
     // the notifier.
-    let (mut sink, mut stream) = socket.split();
+    let (mut sink, mut stream) = transport.split();
 
     // If no rabbit has registered yet, hold the WS open and wait for
     // one. Without this gate the handle() would `Err` immediately,
@@ -99,7 +59,7 @@ async fn handle(
             _ = notified.as_mut() => continue,
             _msg = stream.next() => {
                 // Either `None` (stream closed) or `Some(Err(_))`
-                // (transport error) or `Some(Ok(Message::Close(_)))`
+                // (transport error) or `Some(Ok(TransportMsg::Close(_)))`
                 // — all of these mean the client gave up. We don't
                 // need to inspect the message to know to drop the
                 // upgrade path.
@@ -126,7 +86,7 @@ async fn handle(
         body: EnvelopeBody::ConnectionAssigned { connection_id },
     };
     if let Ok(s) = serde_json::to_string(&assigned_env) {
-        if sink.send(Message::Text(s)).await.is_err() {
+        if sink.send(TransportMsg::Text(s)).await.is_err() {
             // Peer went away before we even told it its id; nothing more
             // to do.
             return Ok(());
@@ -149,7 +109,7 @@ async fn handle(
         frame.push(chan);
         frame.extend_from_slice(&seq.to_be_bytes());
         frame.extend_from_slice(&data);
-        if sink.send(Message::Binary(frame)).await.is_err() {
+        if sink.send(TransportMsg::Binary(frame)).await.is_err() {
             break;
         }
     }
@@ -202,7 +162,7 @@ async fn handle(
                 out.push(chan);
                 out.extend_from_slice(&seq.to_be_bytes());
                 out.extend_from_slice(&data);
-                if sink.send(Message::Binary(out)).await.is_err() {
+                if sink.send(TransportMsg::Binary(out)).await.is_err() {
                     break;
                 }
             }
@@ -215,7 +175,7 @@ async fn handle(
                             body,
                         };
                         if let Ok(s) = serde_json::to_string(&env) {
-                            if sink.send(Message::Text(s)).await.is_err() {
+                            if sink.send(TransportMsg::Text(s)).await.is_err() {
                                 break;
                             }
                         }
@@ -230,7 +190,7 @@ async fn handle(
                     Err(_) => break,
                 };
                 match msg {
-                    Message::Text(t) => {
+                    TransportMsg::Text(t) => {
                         if let Ok(env) = serde_json::from_str::<Envelope>(&t) {
                             if let Err(e) = forward_browser_message(
                                 &handle,
@@ -242,7 +202,7 @@ async fn handle(
                             }
                         }
                     }
-                    Message::Binary(mut b) => {
+                    TransportMsg::Binary(mut b) => {
                         if b.is_empty() { continue; }
                         let chan = b.remove(0);
                         // The Claude channel carries raw bytes typed into the
@@ -266,13 +226,13 @@ async fn handle(
                             }
                         }
                     }
-                    Message::Close(_) => break,
+                    TransportMsg::Close(_) => break,
                     // Incoming Pings get a Pong reply automatically at the
                     // tungstenite protocol layer; we drop both Ping and
                     // Pong from the application loop (their only purpose
                     // here is keepalive, which we drive ourselves in the
                     // 4th select arm below).
-                    Message::Ping(_) | Message::Pong(_) => {}
+                    TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
                 }
             }
             _ = ping_interval.tick() => {
@@ -283,7 +243,7 @@ async fn handle(
                 // allows arbitrary application data, and the peer only
                 // needs the frame header to refresh the proxy's
                 // activity timer.
-                if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                if sink.send(TransportMsg::Ping(Vec::new())).await.is_err() {
                     break;
                 }
             }

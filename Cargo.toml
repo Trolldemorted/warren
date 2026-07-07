@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["warren", "warren-cli", "rabbit", "rabbit-lib"]
+members = ["warren", "warren-cli", "rabbit", "rabbit-lib", "rabbit-lib-axum"]
 
 [workspace.package]
 edition = "2021"
@@ -32,9 +32,16 @@ chrono = { version = "0.4", features = ["serde"] }
 subtle = "2"
 anyhow = "1"
 thiserror = "1"
+http = "1"
 log = "0.4"
 simple_logger = "5"
 rand = "0.8"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 ureq = { version = "2", features = ["json"] }
+async-trait = "0.1"
+async-stream = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+url = "2"
+avt = "0.18"
+tempfile = "3"

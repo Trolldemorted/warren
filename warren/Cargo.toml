@@ -6,7 +6,9 @@ rust-version.workspace = true
 
 [dependencies]
 rabbit-lib = { path = "../rabbit-lib" }
+rabbit-lib-axum = { path = "../rabbit-lib-axum" }
 axum.workspace = true
+http.workspace = true
 tokio.workspace = true
 sea-orm.workspace = true
 sqlx.workspace = true
@@ -31,7 +33,7 @@ dashmap.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 tokio-stream.workspace = true
-async-stream = "0.3"
-async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-url = "2"
+async-stream.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+url.workspace = true

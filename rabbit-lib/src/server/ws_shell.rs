@@ -10,67 +10,29 @@
 //! the right PTY on the rabbit side; this handler filters on that byte.
 
 use crate::server::registry::AgentRegistry;
+use crate::server::transport::TransportMsg;
+use crate::server::WsTransport;
 use crate::wire::TermFrame;
 
-use crate::server::{AuthError, ServerError, ServerState};
-use std::sync::Arc;
-
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
-use axum::response::IntoResponse;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use uuid::Uuid;
 
-/// `axum` router for the shell-side WebSocket. Mounts
-/// `/agent/:id/shell/ws`. Carries `Arc<ServerState>` as its state
-/// type — the embedder is expected to call `.with_state(...)` on the
-/// parent router.
-pub fn router() -> axum::Router<Arc<ServerState>> {
-    axum::Router::new().route("/agent/:id/shell/ws", axum::routing::get(ws_shell))
-}
-
-/// Same `?viewer=true` query contract as `ws_browser`. The shell endpoint
-/// is intrinsically a debug surface, but a viewer toggle is still useful
-/// for "just watch the shell, don't type" sessions.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct WsShellQuery {
-    #[serde(default)]
-    pub viewer: Option<bool>,
-}
-
-pub async fn ws_shell(
-    State(state): State<Arc<ServerState>>,
-    Path(id): Path<Uuid>,
-    headers: HeaderMap,
-    Query(q): Query<WsShellQuery>,
-    ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, ServerError> {
-    if !state.auth.authenticate_admin(&headers).await? {
-        return Err(ServerError::Auth(AuthError::Invalid));
-    }
-    let viewer_mode = q.viewer.unwrap_or(false);
-    let registry: AgentRegistry = state.registry.clone();
-    Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(e) = handle(socket, registry, id, viewer_mode).await {
-            log::debug!("shell ws closed for agent {}: {e:?}", id);
-        }
-    }))
-}
-
-async fn handle(
-    socket: WebSocket,
+/// Framework-agnostic shell-side session loop. Public so the
+/// `rabbit-lib-axum` adapter can call it after wrapping an axum
+/// `WebSocket` as a `DynWsTransport`. Kept in `rabbit-lib` because the
+/// logic (term-pump, viewer drop) is framework-free.
+pub async fn handle(
+    transport: impl WsTransport,
     registry: AgentRegistry,
     agent_id: Uuid,
     viewer_mode: bool,
 ) -> anyhow::Result<()> {
-    // Split the socket first so the wait-for-arrival guard below can
+    // Split the transport first so the wait-for-arrival guard below can
     // observe early client closes without burning the upgrade. Mirrors
     // the gate in `ws_browser::handle` — see the comment there for the
     // full rationale.
-    let (mut sink, mut stream) = socket.split();
+    let (mut sink, mut stream) = transport.split();
     let handle = loop {
         if let Some(h) = registry.get(&agent_id) {
             break h.clone();
@@ -101,7 +63,7 @@ async fn handle(
         frame.push(chan);
         frame.extend_from_slice(&seq.to_be_bytes());
         frame.extend_from_slice(&data);
-        if sink.send(Message::Binary(frame)).await.is_err() {
+        if sink.send(TransportMsg::Binary(frame)).await.is_err() {
             break;
         }
     }
@@ -131,7 +93,7 @@ async fn handle(
                 out.push(chan);
                 out.extend_from_slice(&seq.to_be_bytes());
                 out.extend_from_slice(&data);
-                if sink.send(Message::Binary(out)).await.is_err() {
+                if sink.send(TransportMsg::Binary(out)).await.is_err() {
                     break;
                 }
             }
@@ -142,7 +104,7 @@ async fn handle(
                     Err(_) => break,
                 };
                 match msg {
-                    Message::Binary(mut b) => {
+                    TransportMsg::Binary(mut b) => {
                         if b.is_empty() { continue; }
                         // §D read-only viewer: drop typed bytes for viewer
                         // connections, mirroring ws_browser's policy.
@@ -163,8 +125,8 @@ async fn handle(
                             log::debug!("shell send_terminal_bytes failed: {e:?}");
                         }
                     }
-                    Message::Text(_) | Message::Ping(_) | Message::Pong(_) => {}
-                    Message::Close(_) => break,
+                    TransportMsg::Text(_) | TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
+                    TransportMsg::Close(_) => break,
                 }
             }
         }
