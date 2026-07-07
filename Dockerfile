@@ -8,19 +8,21 @@ COPY warren/Cargo.toml warren/
 COPY warren-cli/Cargo.toml warren-cli/
 COPY rabbit/Cargo.toml rabbit/
 COPY rabbit-lib/Cargo.toml rabbit-lib/
-RUN mkdir -p warren/src warren-cli/src rabbit/src rabbit/src/bin rabbit-lib/src \
+COPY rabbit-lib-axum/Cargo.toml rabbit-lib-axum/
+RUN mkdir -p warren/src warren-cli/src rabbit/src rabbit/src/bin rabbit-lib/src rabbit-lib-axum/src \
  && echo 'fn main(){println!("fake main")}' > warren/src/main.rs \
  && echo 'fn main(){println!("fake main")}' > warren-cli/src/main.rs \
  && echo 'fn main(){println!("fake main")}' > rabbit/src/main.rs \
  && echo 'fn main(){println!("fake rabbit-hook")}' > rabbit/src/bin/rabbit-hook.rs \
- # `rabbit` and `rabbit-lib` are both library crates (consumed by warren
- # and each other). The cache pre-warming layer must satisfy BOTH lib
- # targets, otherwise cargo refuses the dependency as "missing a lib
- # target" and downstream crates fail to resolve.
+ # `rabbit`, `rabbit-lib`, and `rabbit-lib-axum` are all library crates
+ # (consumed by warren and each other). The cache pre-warming layer must
+ # satisfy EVERY lib target, otherwise cargo refuses the dependency as
+ # "missing a lib target" and downstream crates fail to resolve.
  && echo '// fake lib.rs — real source copied below' > rabbit/src/lib.rs \
  && echo '// fake lib.rs — real source copied below' > rabbit-lib/src/lib.rs \
+ && echo '// fake lib.rs — real source copied below' > rabbit-lib-axum/src/lib.rs \
  && cargo build --release --bin warren --bin warren-cli --bin rabbit --bin rabbit-hook \
- && rm -rf warren/src warren-cli/src rabbit/src rabbit-lib/src
+ && rm -rf warren/src warren-cli/src rabbit/src rabbit-lib/src rabbit-lib-axum/src
 COPY warren/src warren/src
 COPY warren/migrations_atlas warren/migrations_atlas
 COPY warren/templates warren/templates
@@ -29,6 +31,7 @@ COPY warren/static warren/static
 COPY warren-cli/src warren-cli/src
 COPY rabbit/src rabbit/src
 COPY rabbit-lib/src rabbit-lib/src
+COPY rabbit-lib-axum/src rabbit-lib-axum/src
 # Force cargo to rebuild now that the real sources are in place. The
 # `rabbit-lib` library target + the `rabbit` and `rabbit-hook` bin
 # entry points need touching — without this, `cargo build` may reuse
@@ -40,6 +43,7 @@ RUN touch warren/src/main.rs \
          rabbit/src/lib.rs \
          rabbit/src/bin/rabbit-hook.rs \
          rabbit-lib/src/lib.rs \
+         rabbit-lib-axum/src/lib.rs \
  && cargo build --release --bin warren --bin warren-cli --bin rabbit --bin rabbit-hook
 
 FROM debian:bookworm-slim AS swagger
