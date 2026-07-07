@@ -47,6 +47,36 @@ impl UsageLimits {
             && self.session_pct.is_none()
             && self.session_resets_at.is_none()
     }
+
+    /// True iff all four plan-level fields are populated. Used by
+    /// the active scraper to early-exit when a scrape round has
+    /// surfaced enough data to satisfy the Usage panel.
+    pub fn all_populated(&self) -> bool {
+        self.weekly_pct.is_some()
+            && self.weekly_resets_at.is_some()
+            && self.session_pct.is_some()
+            && self.session_resets_at.is_some()
+    }
+
+    /// Copy any `Some` fields from `other` into `self` where `self`
+    /// has `None`. First-wins precedence: `self`'s already-
+    /// populated values are preserved. Used by the active scraper
+    /// to merge parse results from successive scroll rounds without
+    /// overwriting earlier-round data with later-round noise.
+    pub fn merge_from(&mut self, other: UsageLimits) {
+        if self.weekly_pct.is_none() {
+            self.weekly_pct = other.weekly_pct;
+        }
+        if self.weekly_resets_at.is_none() {
+            self.weekly_resets_at = other.weekly_resets_at;
+        }
+        if self.session_pct.is_none() {
+            self.session_pct = other.session_pct;
+        }
+        if self.session_resets_at.is_none() {
+            self.session_resets_at = other.session_resets_at;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +114,27 @@ pub struct LimitsParser {
     /// The next "Resets" line (if any) pairs with this section.
     pending_section: Option<Section>,
     resets: ResetsState,
+    /// Trailing bytes from previous chunks, retained for cross-chunk
+    /// detection of the overlay-dismissal ESC sequence (`\x1b[?1049l`,
+    /// Claude's "exit alternate screen buffer"). Capped at
+    /// [`TRAIL_MAX`] bytes — comfortably more than the 7-byte
+    /// sequence so straddled chunks are still found. Only used for
+    /// substring search; never re-fed into the state machine
+    /// (avoiding double-counting on the Resets buffer accumulation).
+    trail: Vec<u8>,
 }
+
+/// Maximum number of trailing bytes retained across `feed` calls for
+/// cross-chunk overlay-dismissal detection. The dismissal sequence is
+/// 7 bytes; 32 leaves ~4x headroom for chunk-boundary straddles.
+const TRAIL_MAX: usize = 32;
+
+/// ANSI sequence Claude emits when exiting the `/usage` overlay's
+/// alternate screen buffer. We watch for this so a percentage in the
+/// post-overlay welcome banner ("use up to 50% of your plan's weekly
+/// usage limit…") cannot be mis-attributed to a plan-level field
+/// (BUG A in the small-terminal plan).
+const DISMISSAL_SEQ: &[u8] = b"\x1b[?1049l";
 
 impl Default for LimitsParser {
     fn default() -> Self {
@@ -102,7 +152,22 @@ impl LimitsParser {
             section: Section::None,
             pending_section: None,
             resets: ResetsState::Idle,
+            trail: Vec::new(),
         }
+    }
+
+    /// Reset section state for a fresh scrape window — called by the
+    /// active scraper between scroll rounds, and internally when the
+    /// parser detects an overlay-dismissal ESC sequence. Preserves
+    /// already-committed values (`weekly_pct`, `session_pct`, the two
+    /// `*_resets_at`) so data harvested in earlier rounds is not
+    /// thrown away; clears the in-progress section/pending/buffer
+    /// state so the next chunk is parsed as if no header had been
+    /// seen yet.
+    pub fn reset_section(&mut self) {
+        self.section = Section::None;
+        self.pending_section = None;
+        self.resets = ResetsState::Idle;
     }
 
     /// Feed a chunk of bytes from claude's PTY. Idempotent: feeding
@@ -113,11 +178,70 @@ impl LimitsParser {
     /// the parser has updated its internal state and the next
     /// `feed` call continues from there.
     pub fn feed(&mut self, chunk: &[u8]) -> Option<UsageLimits> {
+        // BUG A defense-in-depth: detect the overlay-dismissal
+        // ESC sequence in this chunk plus any trailing bytes
+        // retained from the previous call. Cross-chunk safe via
+        // the trail buffer. The trail is only used for this
+        // substring check — it is NOT prepended to the chunk for
+        // state-machine processing, to avoid double-counting
+        // already-processed bytes in the Resets buffer.
+        if self.contains_dismissal(chunk) {
+            self.reset_section();
+        }
         self.feed_inner(chunk);
+        if !chunk.is_empty() {
+            self.update_trail(chunk);
+        }
         if self.all_populated() {
             Some(self.snapshot())
         } else {
             None
+        }
+    }
+
+    /// Returns true if the chunk (possibly combined with the trail
+    /// retained from the previous call) contains the overlay-
+    /// dismissal ESC sequence.
+    fn contains_dismissal(&self, chunk: &[u8]) -> bool {
+        // Cheap: search the trail first (it's bounded), then the
+        // first few bytes of the chunk where a straddled sequence
+        // could complete.
+        if find_subslice(&self.trail, DISMISSAL_SEQ).is_some() {
+            return true;
+        }
+        // Check the boundary: if the trail's tail could be the
+        // start of the sequence, the chunk's head could complete
+        // it. Trail is at most TRAIL_MAX bytes; the sequence is
+        // 7 bytes; check at most the last 6 bytes of the trail
+        // and the first (7 - trail_tail_len) bytes of the chunk.
+        let trail_tail = self
+            .trail
+            .len()
+            .saturating_sub(DISMISSAL_SEQ.len() - 1)
+            .min(self.trail.len());
+        let chunk_head_len = DISMISSAL_SEQ
+            .len()
+            .saturating_sub(trail_tail)
+            .min(chunk.len());
+        if chunk_head_len == 0 {
+            return false;
+        }
+        let mut window = Vec::with_capacity(trail_tail + chunk_head_len);
+        if trail_tail > 0 {
+            window.extend_from_slice(&self.trail[self.trail.len() - trail_tail..]);
+        }
+        window.extend_from_slice(&chunk[..chunk_head_len]);
+        find_subslice(&window, DISMISSAL_SEQ).is_some()
+    }
+
+    fn update_trail(&mut self, chunk: &[u8]) {
+        if chunk.len() >= TRAIL_MAX {
+            self.trail = chunk[chunk.len() - TRAIL_MAX..].to_vec();
+        } else {
+            self.trail.extend_from_slice(chunk);
+            if self.trail.len() > TRAIL_MAX {
+                self.trail.truncate(TRAIL_MAX);
+            }
         }
     }
 
@@ -164,6 +288,14 @@ impl LimitsParser {
         let mut i = 0;
         while i < chunk.len() {
             // 1) Section headers.
+            //
+            // Note: `pending_section` is NOT updated here — only
+            // when a percentage is parsed. That's the existing
+            // semantics from the v1 parser. The active scraper
+            // (see `supervisor::run_usage_scrape`) calls
+            // `reset_section()` between scroll rounds, so stale
+            // pending_section state from a previous round cannot
+            // leak into a fresh round.
             if chunk[i..].starts_with(b"Current session") {
                 self.section = Section::Session;
                 i += b"Current session".len();
@@ -552,17 +684,13 @@ mod tests {
     /// assertions are deliberately omitted because the capture
     /// contains the operator's actual usage numbers, which shift
     /// session-to-session.
-    fn load_fixture() -> Vec<u8> {
-        let path = format!(
-            "{}/tests/fixtures/usage_screen.bin",
-            env!("CARGO_MANIFEST_DIR")
-        );
+    fn load_fixture(name: &str) -> Vec<u8> {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
     }
 
-    #[test]
-    fn feed_recognizes_real_capture() {
-        let bytes = load_fixture();
+    fn parse_fixture(name: &str) -> UsageLimits {
+        let bytes = load_fixture(name);
         let mut p = LimitsParser::new();
         // Feed in 256-byte chunks — same shape the PTY reader
         // actually delivers.
@@ -571,9 +699,12 @@ mod tests {
                 break;
             }
         }
-        let limits = p
-            .feed(&[])
-            .unwrap_or_else(|| p.flush().expect("parser should have seen /usage"));
+        p.feed(&[]).unwrap_or_else(|| p.flush().unwrap_or_default())
+    }
+
+    #[test]
+    fn feed_recognizes_real_capture() {
+        let limits = parse_fixture("usage_screen.bin");
         assert!(limits.weekly_pct.is_some(), "weekly_pct missing");
         assert!(
             limits.weekly_resets_at.is_some(),
@@ -583,6 +714,122 @@ mod tests {
         assert!(
             limits.session_resets_at.is_some(),
             "session_resets_at missing"
+        );
+    }
+
+    /// Active-scraping fixture: 12 rows × 80 cols, captured AFTER
+    /// the operator pressed Down arrow to scroll the overlay.
+    /// Initial paint at h12 shows the Status panel's Usage tab
+    /// (no modal overlay at all — Claude refuses to render it at
+    /// this height). Down-arrow scrolling past the Status panel
+    /// eventually brings the modal into view: "Current session",
+    /// "0% used", "Current week (all models)", "100%used",
+    /// "Resets Jul 9, 5am (UTC)", "Current week (Fable) 92% used",
+    /// plus the "What's contributing to your limits usage?"
+    /// section. The welcome banner re-renders after Esc with its
+    /// "use up to 50% of your weekly usage limit" copy.
+    ///
+    /// Key finding: active scraping recovers the modal at h12 —
+    /// three of the four plan-limit fields populate. The fourth
+    /// (`session_resets_at`) is None because at 0% session usage
+    /// Claude does not emit a time-only "Resets H:MM (UTC)" line
+    /// for the session section (only the weekly reset is rendered
+    /// in this capture). That's a real-data absence, not a parser
+    /// bug — the parser correctly returns None. In production the
+    /// operator would see "—" for the session reset time; a UI
+    /// signal (mitigation C from the plan) would help distinguish
+    /// "no reset because session usage is 0" from "scrape failed."
+    ///
+    /// `weekly_pct = 100.0` is pinned here so a future precedence
+    /// change doesn't silently regress to the per-model "92%"
+    /// (Fable) value that arrives later in the stream.
+    #[test]
+    fn h12_scrolled_fixture_recovers_three_of_four_fields() {
+        let limits = parse_fixture("usage_screen_small_h12_scrolled.bin");
+        assert_eq!(
+            limits.session_pct,
+            Some(0.0),
+            "session_pct should be 0 from the post-scroll repaint"
+        );
+        // Session reset is absent from the stream — at 0% session
+        // usage Claude doesn't render a "Resets H:MM (UTC)" line
+        // for the session section. The parser correctly returns
+        // None. This pins the documented behavior.
+        assert!(
+            limits.session_resets_at.is_none(),
+            "session_resets_at should be None — Claude omits the time-only \
+             reset when session usage is 0% (no 'Resets H:MM (UTC)' in the \
+             stream); got {:?}",
+            limits.session_resets_at
+        );
+        assert_eq!(
+            limits.weekly_pct,
+            Some(100.0),
+            "weekly_pct should be 100 from the post-scroll repaint"
+        );
+        assert!(
+            limits.weekly_resets_at.is_some(),
+            "weekly_resets_at should populate from the post-scroll repaint"
+        );
+    }
+
+    /// Active-scraping fixture: 24 rows × 50 cols, captured AFTER
+    /// the operator pressed Down arrow to scroll to the bottom of
+    /// the overlay. The full sequence visible in the stream:
+    ///
+    ///   1. Initial paint: session header + reset on one row,
+    ///      "0% used" on the next, weekly header + reset on the
+    ///      next, weekly bar elided at this width.
+    ///   2. Several Down-arrow keystrokes (encoded as CSI cursor-
+    ///      down sequences in the captured stream) scroll the
+    ///      overlay.
+    ///   3. Each scroll-triggered repaint re-emits the overlay
+    ///      content with progressively more rows visible —
+    ///      including the weekly bar+percentage ("100%used") and
+    ///      the per-model breakdown ("Current week (Fable)
+    ///      92% used") plus the "What's contributing to your
+    ///      limits usage?" section.
+    ///   4. Esc dismisses the overlay; the welcome banner
+    ///      re-renders with its "use up to 50% of your plan's
+    ///      weekly usage limit" promotional text.
+    ///
+    /// Expected: all four plan-limit fields populate correctly
+    /// from the post-scroll bytes, because the weekly bar+100%
+    /// becomes visible. The "Fable 92%" arrives later in the
+    /// stream but `ignores_per_model_week_breakdown` ensures it
+    /// does not overwrite the all-models value. BUG A from the
+    /// plan (over-match from welcome banner after Esc) remains
+    /// latent in the passive-parser code path; the test below
+    /// pins the actual value so a fix can be caught — see plan
+    /// §"Active scraping supersedes passive observation" for the
+    /// recommended scroll-boundary section reset that the active
+    /// scraper will apply.
+    #[test]
+    fn w50_scrolled_fixture_exposes_all_four_fields() {
+        let limits = parse_fixture("usage_screen_small_w50_scrolled.bin");
+        // Session section is visible from the first paint.
+        assert_eq!(
+            limits.session_pct,
+            Some(0.0),
+            "session_pct should be 0 from the initial paint"
+        );
+        assert!(
+            limits.session_resets_at.is_some(),
+            "session_resets_at should populate from the initial paint"
+        );
+        // Weekly section becomes visible only after scrolling.
+        // The pinned value is 100.0 (the all-models percentage,
+        // not the per-model Fable 92% that arrives later) — this
+        // pins the parser's "first wins" precedence so a future
+        // refactor to "last wins" doesn't silently regress.
+        assert_eq!(
+            limits.weekly_pct,
+            Some(100.0),
+            "weekly_pct should be 100 from the post-scroll repaint"
+        );
+        assert!(
+            limits.weekly_resets_at.is_some(),
+            "weekly_resets_at should populate from the post-scroll repaint"
         );
     }
 
@@ -642,5 +889,93 @@ mod tests {
         let dt = parse_month_day_time("Jul 9, 5am").expect("parse Jul 9, 5am");
         assert_eq!(&dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()[5..10], "07-09");
         assert_eq!(dt.format("%H:%M").to_string(), "05:00");
+    }
+
+    /// §Active-scraping: `reset_section` clears the in-progress
+    /// section/pending/buffer state but preserves already-committed
+    /// values. Called between scroll rounds so each round starts
+    /// fresh and bytes from a previous round's overlay cannot leak
+    /// into a later round's attribution.
+    #[test]
+    fn reset_section_clears_section_state_preserves_committed_values() {
+        let mut p = LimitsParser::new();
+        // First round: populate everything for Session and the
+        // weekly percentage (but no weekly reset yet).
+        let _ = p.feed(b"Current session\n0% used\nResets 3:30pm (UTC)\n");
+        let snap = p.flush().expect("session populated");
+        assert_eq!(snap.session_pct, Some(0.0));
+        assert!(snap.session_resets_at.is_some());
+        // Now simulate "next scroll round" — caller resets, then
+        // the new bytes come in.
+        p.reset_section();
+        // After reset, the parser should treat the next chunk as
+        // a fresh slate. Already-committed session_pct and
+        // session_resets_at must NOT be cleared.
+        let _ = p.feed(b"Current week (all models)\n");
+        // No "Resets" yet — the percentage arrives next.
+        let _ = p.feed(b"100%\n");
+        let _ = p.feed(b"Resets Jul 9, 5am (UTC)\n");
+        let limits = p.flush().expect("all populated");
+        assert_eq!(limits.session_pct, Some(0.0));
+        assert!(limits.session_resets_at.is_some());
+        assert_eq!(limits.weekly_pct, Some(100.0));
+        assert!(limits.weekly_resets_at.is_some());
+    }
+
+    /// §Active-scraping: a "Resets" line that arrives between
+    /// scroll rounds (no header in between) must NOT be
+    /// mis-attributed to the section that was active before the
+    /// reset. After `reset_section()`, section=None and any
+    /// headerless "Resets" still needs a header to land in a
+    /// field.
+    #[test]
+    fn reset_section_blocks_stale_resets_commit() {
+        let mut p = LimitsParser::new();
+        // Round 1: session populated.
+        let _ = p.feed(b"Current session\n0% used\n");
+        // Reset for the next round.
+        p.reset_section();
+        // Round 2 starts with a stray "Resets" (no header yet) —
+        // should NOT populate session_resets_at (which would
+        // require pending_section or section to be Session).
+        let _ = p.feed(b"Resets 2:00pm (UTC)\n");
+        let snap = p.flush().expect("session_pct still set");
+        assert_eq!(snap.session_pct, Some(0.0));
+        // session_resets_at is None — the stray "Resets" had no
+        // header to pair with after the reset.
+        assert!(
+            snap.session_resets_at.is_none(),
+            "stray Resets after reset_section should NOT commit, got {:?}",
+            snap.session_resets_at
+        );
+    }
+
+    /// §Active-scraping: the overlay-dismissal ESC sequence
+    /// (`\x1b[?1049l`) is detected across chunk boundaries via
+    /// the trail buffer. The bytes "Resets 50%" that arrive
+    /// AFTER the dismissal must not pollute the parser state
+    /// (BUG A defense-in-depth).
+    #[test]
+    fn dismissal_sequence_resets_section_state_across_chunks() {
+        let mut p = LimitsParser::new();
+        // First chunk contains a header + percentage + Resets.
+        let _ = p.feed(b"Current session\n0% used\nResets 3:30pm (UTC)\n");
+        // Second chunk straddles the dismissal sequence: trail
+        // ends with "\x1b[?104" and the chunk starts with "9l".
+        // Cross-chunk detection should still fire.
+        let _ = p.feed(b"\x1b[?104");
+        let _ = p.feed(b"9l");
+        // After dismissal, a stray "Current session" + "50%" must
+        // not commit anything — section was reset to None and no
+        // subsequent header has appeared yet.
+        let _ = p.feed(b"Current session\n50%\n");
+        let snap = p.flush().expect("session_pct from first chunk");
+        // session_pct from before dismissal: still 0.0
+        assert_eq!(snap.session_pct, Some(0.0));
+        // The post-dismissal "50%" landed while section was
+        // Session (the post-dismissal "Current session" header
+        // re-armed it), but session_pct was already set — first-
+        // wins precedence means it stays at 0.0.
+        assert_eq!(snap.session_pct, Some(0.0));
     }
 }

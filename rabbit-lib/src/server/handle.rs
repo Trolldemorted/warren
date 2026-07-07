@@ -320,6 +320,42 @@ impl AgentHandle {
             by: "admin".to_string(),
             wait,
             reply: if wait { Some(tx) } else { None },
+            by_connection_id: None,
+        };
+        if self.cmd_tx().send(cmd).await.is_err() {
+            return Err(anyhow::anyhow!("agent actor not running"));
+        }
+        if wait {
+            rx.await.map_err(|_| anyhow::anyhow!("actor dropped"))
+        } else {
+            let now = chrono::Utc::now();
+            Ok(TurnOutcomeMsg {
+                prompt_id: id,
+                started_at: now,
+                ended_at: now,
+                usage: None,
+                error: None,
+            })
+        }
+    }
+
+    /// Prompt with a stamped `connection_id` so `PromptEcho` and
+    /// `PromptRejected` broadcasts carry the originating tab's id.
+    pub async fn prompt_with_origin(
+        &self,
+        text: &str,
+        wait: bool,
+        connection_id: Uuid,
+    ) -> AnyResult<TurnOutcomeMsg> {
+        let id = Uuid::new_v4();
+        let (tx, rx) = oneshot::channel();
+        let cmd = Command::Prompt {
+            id,
+            text: text.to_string(),
+            by: "browser".to_string(),
+            wait,
+            reply: if wait { Some(tx) } else { None },
+            by_connection_id: Some(connection_id),
         };
         if self.cmd_tx().send(cmd).await.is_err() {
             return Err(anyhow::anyhow!("agent actor not running"));
@@ -393,11 +429,22 @@ impl AgentHandle {
     }
 
     /// Send raw terminal bytes toward rabbit on the given channel
-    /// (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`). The channel decides which
-    /// PTY on the rabbit side receives the keystrokes.
-    pub async fn send_terminal_bytes(&self, chan: u8, bytes: Bytes) -> AnyResult<()> {
+    /// (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`).
+    ///
+    /// `Some(connection_id)` enables the actor's leader-gate on the
+    /// typed bytes; `None` skips it.
+    pub async fn send_terminal_bytes(
+        &self,
+        chan: u8,
+        bytes: Bytes,
+        connection_id: Option<Uuid>,
+    ) -> AnyResult<()> {
         self.cmd_tx()
-            .send(Command::SendKeys { chan, data: bytes })
+            .send(Command::SendKeys {
+                chan,
+                data: bytes,
+                connection_id,
+            })
             .await
             .map_err(|_| anyhow::anyhow!("actor not running"))?;
         Ok(())

@@ -157,6 +157,36 @@ pub async fn run(config: Config) -> Result<()> {
         None => config.claude_args.clone(),
     };
 
+    // §Writer actor — coalesce concurrent `UsageCheck` envelopes
+    // so two clicks within a single scrape window share ONE scrape
+    // instead of starting two parallel scrapers competing for the
+    // broadcast receiver and the writer actor's FIFO.
+    //
+    // Implementation: a `watch::Sender`/`watch::Receiver` pair
+    // carries the result. The first UsageCheck creates the pair,
+    // stashes the receiver behind an `Arc<Mutex<...>>` slot here,
+    // and spawns the scrape task with the sender. Subsequent
+    // UsageChecks during the scrape see `Some` and clone the Arc'd
+    // receiver — they `changed().await` on the SAME channel and
+    // publish the same result envelope. The scrape task clears
+    // the slot back to `None` AFTER sending, so the third
+    // UsageCheck (after the scrape finishes) starts a fresh scrape.
+    //
+    // `watch::Receiver` is `Clone`-able BUT its `changed()` future
+    // isn't — so we wrap in `Arc<tokio::sync::Mutex<Receiver>>`
+    // to share a single underlying receiver across all coalesced
+    // waiters. Each waiter locks the mutex, awaits `changed()`,
+    // then borrows the result.
+    //
+    // `tokio::sync::Mutex` is fine here: the critical section is a
+    // few clones + a maybe-spawn, and the outer loop is
+    // single-threaded anyway. No contention with the writer actor
+    // (which uses its own mpsc).
+    type SharedScrapeReceiver =
+        Arc<tokio::sync::Mutex<tokio::sync::watch::Receiver<(UsageLimits, bool)>>>;
+    let current_scrape: Arc<tokio::sync::Mutex<Option<SharedScrapeReceiver>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     loop {
         // Spawn a new claude generation if we have nothing running and aren't dead.
         if active.is_none() && !dead && !shutdown.load(Ordering::SeqCst) {
@@ -216,12 +246,11 @@ pub async fn run(config: Config) -> Result<()> {
             // we exit. The link also polls `shutdown` itself, so this is
             // best-effort — if the send fails (channel full / closed), the
             // flag will still break the link's reconnect loop.
-            let _ = cmd_tx.send(LinkCmd::Shutdown).await;
-            break;
+            crate::dispatch::send_or_warn("LinkCmd::Shutdown", &cmd_tx, LinkCmd::Shutdown).await;
         }
 
         let active_link_tx = active.as_ref().map(|s| s.pty_link_tx.clone());
-        let active_shared_writer = active.as_ref().map(|s| s.writer.clone());
+        let active_writer = active.as_ref().map(|s| s.writer.clone());
         tokio::select! {
             biased;
             _ = tokio::time::sleep(Duration::from_millis(50)), if active.is_some() => {
@@ -262,34 +291,92 @@ pub async fn run(config: Config) -> Result<()> {
                                 }
                             }
                         } else if let EnvelopeBody::UsageCheck = &env.body {
-                            // §Usage-limits: drive the synchronous
-                            // `/usage` scrape. The HTTP handler at
-                            // `/api/agents/:id/claude/usage_check`
-                            // already returned 202 Accepted; we
-                            // publish the parsed limits as a fresh
-                            // `Usage` envelope through the same
-                            // `LinkCmd::SendMeta` path the transcript
-                            // relay uses. Forward-compatible: future
-                            // warren bg-task schedulers can call the
-                            // same HTTP endpoint at whatever cadence
-                            // makes sense.
+                            // §Usage-limits + §Writer actor: drive the
+                            // synchronous `/usage` scrape. Two clicks
+                            // within the scrape window coalesce — the
+                            // second UsageCheck awaits the same
+                            // oneshot receiver the first one
+                            // registered, instead of starting a
+                            // parallel scraper competing for the
+                            // broadcast receiver and the writer
+                            // actor's FIFO.
+                            //
+                            // §Small-terminal mitigation C is
+                            // applied AFTER coalescing so both
+                            // duplicates see the same
+                            // partial-vs-complete classification.
                             if let Some(active) = &active {
-                                let limits = run_usage_scrape(
-                                    active.writer.clone(),
-                                    active.term_bcast_tx.clone(),
-                                )
-                                .await;
+                                let receiver = {
+                                    let mut g = current_scrape.lock().await;
+                                    if let Some(rx) = g.as_ref() {
+                                        rx.clone()
+                                    } else {
+                                        // First UsageCheck in the
+                                        // window: create the
+                                        // watch pair, store the
+                                        // receiver, spawn the
+                                        // scrape with the sender.
+                                        // Extract just the
+                                        // writer + broadcast (the
+                                        // only things the scrape
+                                        // task needs) — avoids
+                                        // cloning the whole
+                                        // `ActiveSession`.
+                                        let (tx, rx) = tokio::sync::watch::channel(
+                                            (UsageLimits::default(), false),
+                                        );
+                                        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+                                        *g = Some(rx.clone());
+                                        let writer_for_scrape = active.writer.clone();
+                                        let bcast_for_scrape = active.term_bcast_tx.clone();
+                                        let current_scrape_for_task = current_scrape.clone();
+                                        tokio::spawn(async move {
+                                            let (limits, aborted) =
+                                                run_usage_scrape(writer_for_scrape, bcast_for_scrape)
+                                                    .await;
+                                            // Send BEFORE clearing the
+                                            // slot so a third
+                                            // UsageCheck arriving
+                                            // during this brief gap
+                                            // sees `Some` and joins
+                                            // the just-finished
+                                            // scrape (gets the same
+                                            // result envelope) rather
+                                            // than starting a wasted
+                                            // fresh scrape.
+                                            let _ = tx.send((limits, aborted));
+                                            *current_scrape_for_task.lock().await = None;
+                                        });
+                                        rx
+                                    }
+                                };
+                                // Lock the shared receiver, await a
+                                // change since the last seen value
+                                // (initially the default, so the
+                                // scrape's `tx.send` is what wakes
+                                // us), then borrow the result.
+                                let mut rx = receiver.lock().await;
+                                let _ = rx.changed().await;
+                                let (limits, aborted) = rx.borrow().clone();
+                                drop(rx);
+                                let scrape_incomplete =
+                                    !limits.is_empty() && !limits.all_populated();
                                 let snap = UsageSnapshot {
                                     source: "usage_check".to_string(),
                                     weekly_pct: limits.weekly_pct,
                                     weekly_resets_at: limits.weekly_resets_at,
                                     session_pct: limits.session_pct,
                                     session_resets_at: limits.session_resets_at,
+                                    scrape_incomplete,
+                                    scrape_aborted: aborted,
                                     ..Default::default()
                                 };
-                                let _ = cmd_tx
-                                    .send(LinkCmd::SendMeta(EnvelopeBody::Usage(snap)))
-                                    .await;
+                                crate::dispatch::send_or_warn(
+                                    "LinkCmd::SendMeta(Usage)",
+                                    &cmd_tx,
+                                    LinkCmd::SendMeta(EnvelopeBody::Usage(snap)),
+                                )
+                                .await;
                             }
                         } else if let EnvelopeBody::SnapshotRequest { chan } = &env.body {
                             // §D Milestone 5 (Phase B): late-join screen dump.
@@ -311,44 +398,29 @@ pub async fn run(config: Config) -> Result<()> {
                                 );
                             }
                         } else if let Some(tx) = &active_link_tx {
-                            // §D prompt policy: reject-when-Running. A prompt
-                            // arriving mid-turn would inject keystrokes into a
-                            // live turn (possibly over a human's edit), so bounce
-                            // it back with a dedicated `PromptRejected` envelope
-                            // instead of dispatching. Control frames
-                            // (Interrupt/Slash/Clear/Resize/Repaint) still pass
-                            // through unconditionally.
-                            //
-                            // The dedicated variant (vs. a generic `Log { warn }`)
-                            // lets warren render a targeted UI affordance tied to
-                            // the original prompt id — see
-                            // `warren/templates/agent_claude.html`.
-                            let reject =
-                                should_reject_prompt(observer.latest_state(), &env.body);
-                            if reject {
-                                log::info!(
-                                    "rejecting prompt: agent is Running (reject-when-Running policy)"
-                                );
-                                let rejected = prompt_rejected_for(&env);
-                                let _ = cmd_tx
-                                    .send(LinkCmd::SendMeta(rejected))
-                                    .await;
-                            } else {
-                                dispatch_to_pty(
-                                    &env,
-                                    active_shared_writer.as_ref(),
-                                    tx,
-                                    config.term_cols,
-                                    config.term_rows,
-                                )
-                                .await;
-                            }
+                            // The actor already decided the prompt's
+                            // fate (`PromptEcho` accepts, `PromptRejected`
+                            // already reached warren, `StopHook` is a
+                            // no-op). Dispatch what survived.
+                            dispatch_to_pty(
+                                &env,
+                                active_writer.as_ref(),
+                                tx,
+                                config.term_cols,
+                                config.term_rows,
+                            )
+                            .await;
                         }
                     }
                     Some(LinkEvent::Binary { chan, data }) => {
                         if chan == TERM_CHAN_SHELL {
                             if let Some(sh) = &shell {
-                                let _ = sh.tx.send(ShellCmd::Write(data)).await;
+                                crate::dispatch::send_or_warn(
+                                    "ShellCmd::Write",
+                                    &sh.tx,
+                                    ShellCmd::Write(data),
+                                )
+                                .await;
                             }
                         } else if chan == TERM_CHAN_CLAUDE {
                             // §diagnose backspace: opt-in via RUST_LOG=debug.
@@ -425,7 +497,12 @@ pub async fn run(config: Config) -> Result<()> {
                 log::info!("shutdown signal received; signaling graceful exit");
                 health.set_shutting_down(true);
                 if let Some(tx) = &active_link_tx {
-                    let _ = tx.send(PtyCmd::GracefulShutdown).await;
+                    crate::dispatch::send_or_warn(
+                        "PtyCmd::GracefulShutdown",
+                        tx,
+                        PtyCmd::GracefulShutdown,
+                    )
+                    .await;
                 }
             }
             _ = wait_for_shutdown(shutdown.clone()), if active.is_none() && !shutdown_acked => {
@@ -558,6 +635,14 @@ pub enum PtyEvt {
         seq: u64,
         data: Vec<u8>,
     },
+    /// §Once-and-for-all writer actor: the blocking PTY thread no
+    /// longer holds the PTY master writer. When it needs to write
+    /// bytes (trust-dialog auto-accept, shutdown ESC, legacy
+    /// `PtyCmd::Write` fallbacks in tests) it sends `WriteBack`
+    /// here. The driver task receives the event and submits the
+    /// bytes through the [`WriterHandle`] so ordering stays
+    /// inside the FIFO actor.
+    WriteBack(Vec<u8>),
     Exited(PtyExitStatus),
     /// §D Milestone 5 (Phase B): a structured meta envelope generated inside
     /// the blocking PTY thread (currently only `ScreenSnapshot`). The driver
@@ -566,6 +651,7 @@ pub enum PtyEvt {
     Meta(EnvelopeBody),
 }
 
+#[derive(Debug)]
 pub enum RunOutcome {
     #[allow(dead_code)]
     CleanExit(PtyExitStatus),
@@ -581,21 +667,14 @@ struct ActiveSession {
     /// (e.g. on a wire-level `Restart` envelope) even when the blocking
     /// PTY reader thread is wedged in `read()`.
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
-    /// Shared handle to the PTY master. The outer loop uses it to write
-    /// interactive bytes (Interrupt / Slash / Prompt / Clear) directly,
-    /// bypassing the blocking reader thread's `pty_rx` queue.
-    ///
-    /// The shared slot exists for the same reason the shared killer
-    /// does: when claude is parked at a TUI prompt emitting no further
-    /// output, the blocking thread's `reader.read()` sits idle
-    /// indefinitely, and any `PtyCmd::Write` queued on `pty_rx` is
-    /// never processed. The outer loop can't be starved of a write
-    /// mechanism, so we let it lock this mutex and write straight to
-    /// the master. The blocking thread uses its own clone — both lock
-    /// the same `parking_lot::Mutex`, so concurrent writers are
-    /// serialized (and these are short, OS-buffered writes; no
-    /// contention matters).
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// §Once-and-for-all PTY writer: a [`WriterHandle`] backed by a
+    /// dedicated tokio task that owns the kernel-side writer end of
+    /// the claude PTY master. The outer loop and the blocking PTY
+    /// thread both submit `WriteCmd`s (binary keystrokes, slash
+    /// commands, interrupt bytes, scraper sequences) through this
+    /// handle. FIFO ordering and Sequence atomicity are enforced
+    /// inside the actor — see `rabbit/src/pty_writer.rs`.
+    writer: crate::pty_writer::WriterHandle,
     /// §Usage-limits: every byte the blocking PTY reader pulls off
     /// the master is also published here, so the synchronous
     /// `/usage` scrape routine in the outer loop can subscribe a
@@ -616,7 +695,7 @@ struct OutcomeChannels {
 struct SpawnResult {
     outcome_channels: OutcomeChannels,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: crate::pty_writer::WriterHandle,
     term_bcast_tx: broadcast::Sender<TermFrame>,
 }
 
@@ -658,30 +737,56 @@ fn spawn_run_one(
 
     // Spawn the PTY *before* moving into the blocking thread so we can
     // extract a `ChildKiller` and the writer and share both with the
-    // outer supervisor loop. See the doc on `ActiveSession::killer`
-    // and `ActiveSession::writer` for the cross-thread signaling and
-    // direct-write rationales.
+    // outer supervisor loop. The blocking thread no longer takes
+    // the writer directly — see `PtyEvt::WriteBack` below.
     let pty = Pty::spawn(&bin, &args, &workdir, cols, rows, replay)?;
     let initial_replay = pty.snapshot_replay().to_vec();
     let killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>> =
         Arc::new(Mutex::new(pty.child.clone_killer()));
-    // Take the writer from the master *before* moving pty into the
-    // blocking thread. `take_writer` is `&self`-ish — it doesn't
-    // consume the master, but it does gate future calls (callable
-    // once). Wrapping it in `Arc<Mutex<...>>` lets the outer loop
-    // share it concurrently.
-    let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-        Arc::new(Mutex::new(pty.master.take_writer().map_err(|e| {
-            anyhow::anyhow!("taking pty writer before spawn_blocking: {e}")
-        })?));
-    // Clone for the blocking thread. The original `writer` is returned
-    // through `SpawnResult` so the outer loop can lock it directly. The
-    // `Mutex` serializes writes from both call sites.
-    let writer_for_blocking = writer.clone();
+    // `Pty` and `TermTracker` are shared between the blocking thread
+    // (reads + feeds) and the writer actor (resize callback). The
+    // callback covers both `pty.resize` (kernel TIOCSWINSZ) and
+    // `vt.resize` (so `ScreenSnapshot` reports the new dims).
+    let pty_arc: Arc<parking_lot::Mutex<crate::pty::Pty>> = Arc::new(parking_lot::Mutex::new(pty));
+    let vt_arc: Arc<parking_lot::Mutex<crate::vt::TermTracker>> = Arc::new(
+        parking_lot::Mutex::new(crate::vt::TermTracker::new(cols, rows, 5_000)),
+    );
+    // §Once-and-for-all writer actor: take the writer ONCE here,
+    // hand it to the dedicated tokio actor task, and let every
+    // other site (outer loop, blocking thread via WriteBack
+    // events, scraper) submit through the `WriterHandle`'s
+    // FIFO `mpsc`. The blocking thread's `PtyEvt::WriteBack`
+    // path is the only way it ever gets bytes onto the master,
+    // and that bridges through the actor too — so the actor
+    // remains the SOLE owner of the kernel-side write end and
+    // ordering/cancellation properties hold across every site.
+    let writer_box: Box<dyn Write + Send> = pty_arc
+        .lock()
+        .master
+        .take_writer()
+        .map_err(|e| anyhow::anyhow!("taking pty writer before spawn_blocking: {e}"))?;
+    // Resize closure: locks both halves in order — `pty` first
+    // (the kernel side, which can fail with an ioctl error), then
+    // `vt` (always succeeds). We log + swallow the kernel-side
+    // failure here because a failed TIOCSWINSZ on an exited child
+    // is operationally a no-op.
+    let resize_pty = pty_arc.clone();
+    let resize_vt = vt_arc.clone();
+    let resize_callback: Option<crate::pty_writer::ResizeCallback> =
+        Some(Arc::new(parking_lot::Mutex::new(Box::new(move |c, r| {
+            if let Err(e) = resize_pty.lock().resize(c, r) {
+                log::warn!("resize callback: pty.resize failed: {e:?}");
+            }
+            resize_vt.lock().resize(c, r);
+        }))));
+    let writer_handle = crate::pty_writer::spawn_pty_writer(writer_box, resize_callback);
+    // Clone for the driver task (consumed by the WriteBack
+    // forwarding arm) and for the outer loop via `SpawnResult`.
+    let writer_handle_for_driver = writer_handle.clone();
     let pty_join = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-        let mut pty = pty;
-        let mut reader = pty.reader();
-        let writer = writer_for_blocking;
+        let pty_arc = pty_arc;
+        let vt_arc = vt_arc;
+        let mut reader = pty_arc.lock().reader();
         let term_bcast_tx = term_bcast_tx_for_blocking;
 
         let mut io_buf = [0u8; 4096];
@@ -691,10 +796,8 @@ fn spawn_run_one(
         // server-side virtual terminal. Passive today — a later phase
         // serializes `vt.snapshot()` for late browser joiners in place of the
         // SIGWINCH jiggle. 5k-line scrollback matches the design budget.
-        let mut vt = crate::vt::TermTracker::new(cols, rows, 5_000);
-        // §A.7: on a fresh workdir claude blocks on a "trust this folder?"
-        // dialog. Unattended, nobody presses Enter, so watch the output and
-        // auto-accept it (bounded, to avoid keystroke storms on false hits).
+        // `vt` is shared with the writer actor's resize callback via the
+        // `Arc<Mutex<TermTracker>>` taken in the outer scope.
         let mut trust_watcher = auto_trust.then(|| crate::trust::TrustWatcher::new(3));
         // §A.7 / seq-numbered snapshot protocol — single-producer seq
         // counter for the bytes this blocking thread feeds out of
@@ -717,10 +820,18 @@ fn spawn_run_one(
                 if graceful_since.is_none() {
                     graceful_since = Some(Instant::now());
                     log::info!("shutdown: sending ESC + waiting up to {grace_period:?}");
+                    // §Once-and-for-all writer actor: the blocking
+                    // thread no longer holds the master writer.
+                    // Hand the shutdown ESC off via `PtyEvt::WriteBack`
+                    // so the driver task submits it through the
+                    // actor's FIFO. Latency is sub-ms in practice —
+                    // the driver's select! arm processes WriteBack
+                    // alongside `Read` events.
+                    if pty_evt_tx
+                        .blocking_send(PtyEvt::WriteBack(b"\x1b".to_vec()))
+                        .is_err()
                     {
-                        let mut w = writer.lock();
-                        let _ = w.write_all(b"\x1b");
-                        let _ = w.flush();
+                        break;
                     }
                     // §A.7: synthetic shutdown placeholder — `seq=0`
                     // intentionally marks it as "not a live byte",
@@ -730,6 +841,12 @@ fn spawn_run_one(
                     // refactor and the browser never sees it). The
                     // string itself is preserved so the pre-existing
                     // debug surfaces stay identical.
+                    // intentional: `pty_evt_tx.blocking_send` fails only
+                    // if the driver task is gone (shutdown racing the
+                    // blocking PTY thread's last words). The blocking
+                    // thread is already tearing down at this point;
+                    // logging the failure adds noise without changing
+                    // the outcome.
                     let _ = pty_evt_tx.blocking_send(PtyEvt::Read {
                         chan: TERM_CHAN_CLAUDE,
                         seq: 0,
@@ -741,26 +858,31 @@ fn spawn_run_one(
             if let Ok(cmd) = pty_rx.try_recv() {
                 match cmd {
                     PtyCmd::Write(b) => {
-                        use std::io::Write;
-                        {
-                            let mut w = writer.lock();
-                            if w.write_all(&b).is_err() {
-                                break;
-                            }
-                            let _ = w.flush();
+                        // §Once-and-for-all writer actor: bytes
+                        // coming in via `PtyCmd::Write` (legacy
+                        // fallback path; tests; pre-`WriterHandle`
+                        // callers) are forwarded to the driver
+                        // task via `PtyEvt::WriteBack`, which
+                        // submits them through the actor's FIFO.
+                        // The blocking thread no longer holds the
+                        // master writer at all.
+                        if pty_evt_tx.blocking_send(PtyEvt::WriteBack(b)).is_err() {
+                            break;
                         }
                     }
                     PtyCmd::Resize { cols, rows } => {
-                        let _ = pty.resize(cols, rows);
-                        vt.resize(cols, rows);
+                        // Resize is driven by the writer actor; this arm is a no-op
+                        // backstop.
+                        let _ = (cols, rows);
+                        log::debug!("PtyCmd::Resize is now a no-op; writer actor handles resizes");
                     }
                     PtyCmd::Repaint { cols, rows } => {
-                        if let Err(e) = pty.jiggle(cols, rows) {
+                        if let Err(e) = pty_arc.lock().jiggle(cols, rows) {
                             log::warn!("repaint jiggle failed: {e:?}");
                         }
                     }
                     PtyCmd::Snapshot { chan } => {
-                        let snap = vt.snapshot();
+                        let snap = vt_arc.lock().snapshot();
                         // §A.7: populate `after_seq` from the running
                         // counter. `0` means "we have never fed a byte on
                         // this channel — don't discard anything." Otherwise
@@ -790,17 +912,20 @@ fn spawn_run_one(
                         }
                     }
                     PtyCmd::Terminate => {
-                        let _ = pty.terminate();
+                        let _ = pty_arc.lock().terminate();
                     }
                     PtyCmd::GracefulShutdown => {
                         graceful_pending = true;
                         if graceful_since.is_none() {
                             graceful_since = Some(Instant::now());
                             log::info!("graceful shutdown: sending ESC");
+                            // §Writer actor: same WriteBack path as
+                            // the shutdown branch above.
+                            if pty_evt_tx
+                                .blocking_send(PtyEvt::WriteBack(b"\x1b".to_vec()))
+                                .is_err()
                             {
-                                let mut w = writer.lock();
-                                let _ = w.write_all(b"\x1b");
-                                let _ = w.flush();
+                                break;
                             }
                         }
                     }
@@ -810,9 +935,12 @@ fn spawn_run_one(
 
             if graceful_pending {
                 if let Some(since) = graceful_since {
-                    let alive = pty.alive();
+                    let alive = pty_arc.lock().alive();
                     if graceful_expired(since.elapsed(), grace_period, alive) {
-                        terminate_and_report_exited(&mut pty, &pty_evt_tx);
+                        // Lock the Pty briefly to pass a `&mut Pty`
+                        // into `terminate_and_report_exited`.
+                        let mut pty_g = pty_arc.lock();
+                        terminate_and_report_exited(&mut pty_g, &pty_evt_tx);
                         break;
                     }
                 }
@@ -834,18 +962,26 @@ fn spawn_run_one(
                     // Goes through the same `terminate_and_report_exited`
                     // helper the graceful-shutdown path uses, so the
                     // status capture + evt send stay in one place.
-                    terminate_and_report_exited(&mut pty, &pty_evt_tx);
+                    let mut pty_g = pty_arc.lock();
+                    terminate_and_report_exited(&mut pty_g, &pty_evt_tx);
                     break;
                 }
                 Ok(n) => {
-                    vt.feed(&io_buf[..n]);
+                    vt_arc.lock().feed(&io_buf[..n]);
                     if let Some(tw) = trust_watcher.as_mut() {
                         if let Some(resp) = tw.observe(&io_buf[..n]) {
                             log::info!("trust dialog detected; auto-accepting with Enter");
+                            // §Writer actor: trust-dialog bytes
+                            // forward via WriteBack. One-shot,
+                            // bounded (TrustWatcher::new(3) caps
+                            // the number of acceptances), so
+                            // any latency between detection and
+                            // write is harmless.
+                            if pty_evt_tx
+                                .blocking_send(PtyEvt::WriteBack(resp.to_vec()))
+                                .is_err()
                             {
-                                let mut w = writer.lock();
-                                let _ = w.write_all(resp);
-                                let _ = w.flush();
+                                break;
                             }
                         }
                     }
@@ -885,15 +1021,19 @@ fn spawn_run_one(
                     // common one — portable-pty converts it to Ok(0)
                     // on Unix, but if the platform doesn't, we still
                     // owe the driver a clean Exited before breaking.
-                    terminate_and_report_exited(&mut pty, &pty_evt_tx);
+                    let mut pty_g = pty_arc.lock();
+                    terminate_and_report_exited(&mut pty_g, &pty_evt_tx);
                     break;
                 }
             }
-            if !pty.alive() {
-                let status = pty.wait().unwrap_or_else(|e| {
-                    log::warn!("pty.wait failed: {e:?}");
-                    PtyExitStatus::with_exit_code(1)
-                });
+            if !pty_arc.lock().alive() {
+                let status = {
+                    let mut pty_g = pty_arc.lock();
+                    pty_g.wait().unwrap_or_else(|e| {
+                        log::warn!("pty.wait failed: {e:?}");
+                        PtyExitStatus::with_exit_code(1)
+                    })
+                };
                 let _ = pty_evt_tx.blocking_send(PtyEvt::Exited(status));
                 break;
             }
@@ -915,6 +1055,11 @@ fn spawn_run_one(
     let replay_cap_inner = replay_cap;
     let shutdown_for_driver = shutdown.clone();
     let pty_tx_for_cleanup = pty_tx.clone();
+    // §Writer actor: the driver task consumes `WriteBack` events
+    // from the blocking thread and submits them through the actor
+    // via this cloned handle. The blocking thread doesn't have
+    // direct access to the writer anymore.
+    let writer_handle_for_driver_task = writer_handle_for_driver.clone();
 
     {
         let cmd_tx_init = cmd_tx_driver.clone();
@@ -936,6 +1081,7 @@ fn spawn_run_one(
     tokio::spawn(async move {
         let mut obs_rx = observer.tx.subscribe();
         let mut pty_evt_rx_inner = pty_evt_rx;
+        let writer_handle = writer_handle_for_driver_task;
         loop {
             tokio::select! {
                 biased;
@@ -965,7 +1111,23 @@ fn spawn_run_one(
                                 .await;
                         }
                         Some(PtyEvt::Meta(body)) => {
-                            let _ = cmd_tx_driver.send(LinkCmd::SendMeta(body)).await;
+                            crate::dispatch::send_or_warn(
+                                "LinkCmd::SendMeta(PtyEvt::Meta)",
+                                &cmd_tx_driver,
+                                LinkCmd::SendMeta(body),
+                            )
+                            .await;
+                        }
+                        Some(PtyEvt::WriteBack(data)) => {
+                            // §Once-and-for-all writer actor: bytes
+                            // raised by the blocking PTY thread
+                            // (trust-dialog auto-accept, shutdown
+                            // ESC, legacy `PtyCmd::Write`
+                            // fallbacks) flow through the FIFO here
+                            // so they observe the same ordering /
+                            // cancellation properties as the
+                            // outer-loop's other submissions.
+                            writer_handle.bytes(data).await;
                         }
                         Some(PtyEvt::Exited(status)) => {
                             log::info!("claude exited: kind={:?}", ExitKind::from(&status));
@@ -976,7 +1138,12 @@ fn spawn_run_one(
                             } else {
                                 RunOutcome::Crashed(status)
                             };
-                            let _ = outcome_tx_driver.send(outcome).await;
+                            crate::dispatch::send_or_warn(
+                                "RunOutcome",
+                                &outcome_tx_driver,
+                                outcome,
+                            )
+                            .await;
                             break;
                         }
                         None => break,
@@ -990,7 +1157,8 @@ fn spawn_run_one(
             }
         }
         health.set_alive(false);
-        let _ = pty_tx_for_cleanup.send(PtyCmd::Terminate).await;
+        crate::dispatch::send_or_warn("PtyCmd::Terminate", &pty_tx_for_cleanup, PtyCmd::Terminate)
+            .await;
         let _ = pty_task.await;
     });
 
@@ -1003,7 +1171,7 @@ fn spawn_run_one(
             outcome_rx_in,
         },
         killer,
-        writer,
+        writer: writer_handle,
         term_bcast_tx,
     })
 }
@@ -1073,7 +1241,12 @@ async fn forward_observer_event(cmd_tx: &mpsc::Sender<LinkCmd>, ev: &ObserverEve
         Some(e) => e,
         None => return,
     };
-    let _ = cmd_tx.send(LinkCmd::SendMeta(body.clone())).await;
+    crate::dispatch::send_or_warn(
+        "LinkCmd::SendMeta(observer)",
+        cmd_tx,
+        LinkCmd::SendMeta(body.clone()),
+    )
+    .await;
 }
 
 fn build_envelope(ev: &ObserverEvent) -> Option<EnvelopeBody> {
@@ -1097,6 +1270,12 @@ fn build_envelope(ev: &ObserverEvent) -> Option<EnvelopeBody> {
                 .unwrap_or("")
                 .to_string(),
             by: "admin".to_string(),
+            // Server-side reconstruction from a transcript hook
+            // event has no originating browser connection. Browsers
+            // treat `None` as "not mine" and won't render the echo;
+            // the supervisor-side transcript path still records
+            // both the original prompt and the echo verbatim.
+            by_connection_id: None,
         }),
         "stop_hook" => EnvelopeBody::StopHook {
             prompt_id: ev.prompt_id.unwrap_or_else(Uuid::nil),
@@ -1110,34 +1289,6 @@ fn build_envelope(ev: &ObserverEvent) -> Option<EnvelopeBody> {
         _ => return None,
     };
     Some(raw)
-}
-
-/// §D prompt policy (reject-when-Running): decide whether an inbound envelope
-/// should be rejected rather than dispatched to the PTY. Only `Prompt` frames
-/// are gated, and only while the agent is `Running` — injecting a prompt
-/// mid-turn would interleave with the live turn (and possibly a human's edit).
-/// Control frames (Interrupt/Slash/Clear/Resize/Repaint) are never rejected.
-pub fn should_reject_prompt(state: State, body: &EnvelopeBody) -> bool {
-    matches!(body, EnvelopeBody::Prompt { .. }) && state == State::Running
-}
-
-/// Build the wire envelope to emit when `should_reject_prompt` returns true.
-/// Carries the original prompt id so the UI can render `prompt #xxx rejected`
-/// and tie the banner to the specific prompt the user attempted. Extracted
-/// for testability — the supervisor loop calls this on rejection.
-pub fn prompt_rejected_for(env: &Envelope) -> EnvelopeBody {
-    let id = match &env.body {
-        EnvelopeBody::Prompt { id, .. } => *id,
-        // `should_reject_prompt` only returns true for Prompt, so this is
-        // unreachable in practice; we still produce a valid envelope rather
-        // than panicking so a future caller that mis-uses this helper fails
-        // loudly via serde/the wire rather than crashing rabbit.
-        _ => uuid::Uuid::nil(),
-    };
-    EnvelopeBody::PromptRejected {
-        id,
-        reason: "agent is running a turn".into(),
-    }
 }
 
 /// During a pending graceful shutdown, decide whether the PTY loop should stop
@@ -1188,17 +1339,29 @@ pub(crate) fn terminate_and_report_exited(pty: &mut Pty, evt_tx: &mpsc::Sender<P
 /// When the child was alive but emitting no output (idle TUI, mid-
 /// prompt, mid-tool), `read()` blocked indefinitely and the keystrokes
 /// sat in the queue until the next time data flowed. The operator saw
+/// Direct-write path for terminal bytes coming back from the War UI.
+///
+/// Each keystroke the operator types in the browser arrives as a binary
+/// WS frame (`[TERM_CHAN_CLAUDE, byte]`). Before this helper, those
+/// bytes were queued as `PtyCmd::Write(data)` on the blocking PTY
+/// thread's `pty_rx` channel — drained only between `read()` calls.
+/// When the child was alive but emitting no output (idle TUI, mid-
+/// prompt, mid-tool), `read()` blocked indefinitely and the keystrokes
+/// sat in the queue until the next time data flowed. The operator saw
 /// multi-second input lag and dropped characters.
 ///
-/// This helper bypasses `pty_rx` entirely: lock the shared writer and
-/// write straight to the master. Latency is bounded by the mutex
-/// acquisition — sub-millisecond in practice.
+/// §Once-and-for-all writer actor: this helper now submits bytes
+/// through the [`crate::pty_writer::WriterHandle`] instead of
+/// locking a `Mutex<Writer>`. FIFO ordering vs. other writes
+/// (slash commands, scraper sequences) is enforced inside the
+/// actor — see `rabbit/src/pty_writer.rs`. Sub-millisecond mpsc
+/// `send` latency in practice; bounds the input lag exactly like
+/// the old mutex did for the binary keystroke path.
 ///
 /// Extracted from the outer select! `LinkEvent::Binary` arm so the
 /// regression test can drive it without standing up the whole
 /// supervisor (which would require a live `claude` child).
 async fn write_claude_terminal_bytes(data: &[u8], active: Option<&ActiveSession>) {
-    use std::io::Write;
     let Some(active) = active else {
         log::debug!(
             "claude terminal write of {} bytes dropped: no active session",
@@ -1206,74 +1369,201 @@ async fn write_claude_terminal_bytes(data: &[u8], active: Option<&ActiveSession>
         );
         return;
     };
-    let mut g = active.writer.lock();
-    let w: &mut dyn Write = &mut *g;
-    let _ = w.write_all(data);
-    let _ = w.flush();
+    active.writer.bytes(data.to_vec()).await;
 }
 
 /// §Usage-limits: drive the synchronous `/usage` overlay scrape.
 ///
-/// 1. Writes `\x15/usage\r` (Ctrl-U, "/usage", Enter) to the PTY
-///    through the shared writer — same path the `Clear` arm in
-///    `dispatch_to_pty` uses.
-/// 2. Subscribes a fresh `broadcast::Receiver<TermFrame>` and
-///    drains it for ~2s, feeding each frame's bytes to
-///    `LimitsParser`. The parser returns early when all four
-///    fields are populated; the deadline caps the wait if the
-///    overlay paint is slow (e.g. mid-turn rendering noise).
-/// 3. Sends a single `Esc` to dismiss the overlay so the next
-///    scrape starts clean. Per the Claude Code keyboard doc,
-///    single Esc closes a dialog; double-Esc would rewind the
-///    conversation and steal input focus.
+/// # Active scraping
+///
+/// The original implementation passively watched whatever bytes
+/// the TUI emitted within a 2s window. That worked for large PTYs
+/// (200×60) where Claude renders the entire overlay in one paint,
+/// but failed at small widths (24×50) where the overlay is
+/// scrollable — the weekly bar and per-model breakdown only
+/// become visible after the user (or us) scrolls down.
+///
+/// Rabbit owns the PTY, so the scrape routine can drive the TUI:
+/// inject `/usage`, wait for the initial paint, then send Down
+/// arrows to reveal more rows. Each round resets the parser's
+/// section state (`LimitsParser::reset_section`) so stale state
+/// from a previous round cannot pollute the next. Already-
+/// committed values are preserved via `UsageLimits::merge_from`'s
+/// first-wins precedence.
+///
+/// Round shape:
+/// 1. `/usage` (initial paint): up to 500ms.
+/// 2. Down arrow (`\x1b[B`) × N: 300ms each. The w50 fixture
+///    shows 4–5 Down arrows reveal the full overlay; we cap at
+///    [`MAX_SCROLL_ROUNDS`] to bound total scrape latency.
+/// 3. Esc to dismiss (per the Claude Code keyboard doc; single
+///    Esc closes a dialog, double-Esc would rewind the
+///    conversation and steal input focus).
+///
+/// §Once-and-for-all writer actor: all bytes the scraper emits
+/// (`/usage`, the Down-arrows, the dismissing Esc) are packed
+/// into ONE [`crate::pty_writer::WriteCmd::Sequence`] and
+/// submitted as a single FIFO unit. Nothing else can interleave
+/// inside the sequence — Operator `Interrupt`, `Slash`, or
+/// keystroke submissions that arrive during the scrape sit in
+/// the mpsc and are processed only AFTER the sequence
+/// completes (or is canceled via the cancel flag).
 ///
 /// Returns the parsed limits. Any field the parser did not see
 /// is `None`; the calling code publishes the result as a fresh
 /// `Usage` envelope and the UI shows "—" for missing fields.
 async fn run_usage_scrape(
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: crate::pty_writer::WriterHandle,
     term_bcast_tx: broadcast::Sender<TermFrame>,
-) -> UsageLimits {
-    use std::io::Write;
-    use tokio::time::{timeout, Duration};
+) -> (UsageLimits, bool) {
+    use crate::pty_writer::SequenceOutcome;
+    use tokio::time::Duration;
 
-    const SCRAPE_DEADLINE: Duration = Duration::from_secs(2);
-    const TICK: Duration = Duration::from_millis(250);
+    const INITIAL_BUDGET: Duration = Duration::from_millis(500);
+    const SCROLL_BUDGET: Duration = Duration::from_millis(300);
+    const TICK: Duration = Duration::from_millis(100);
+    /// Maximum number of Down-arrow rounds. Five covers the w50
+    /// fixture's full overlay (initial paint → weekly bar →
+    /// per-model → "What's contributing" → end). Going higher
+    /// would burn latency without surfacing new plan-level data.
+    const MAX_SCROLL_ROUNDS: usize = 5;
 
-    // 1. Inject /usage. `input::slash` emits exactly
-    //    `\x15/usage\r` (Ctrl-U clear, /usage, Enter), the same
-    //    shape the other action arms use.
-    {
-        let mut g = writer.lock();
-        let w: &mut dyn Write = &mut *g;
-        if let Err(e) = input::slash(w, "usage") {
-            log::warn!("usage_check: slash write failed: {e:?}");
-            return UsageLimits::default();
-        }
-        let _ = w.flush();
+    // §Writer actor: split the scrape into two phases so the
+    // first phase carries the higher initial-paint delay and
+    // the second phase carries the smaller per-scroll delay.
+    // The actor's `inter_item_delay` is uniform per Sequence,
+    // so two phases give us two different delays with the
+    // scrape's outer loop driving the parser's per-round
+    // budget in parallel.
+    //
+    // Phase 1 sequence: paste-close preamble concatenated with
+    // the `/usage` slash command. Always emit `\x1b[201~`
+    // unconditionally before the slash — if the TUI is in
+    // `BracketedPaste` (operator pasted a long block), this
+    // cleanly closes the paste before the slash lands; if the
+    // TUI is in any other mode, the stray `201~` is ignored by
+    // claude's input parser (it only acts on `201~` after
+    // seeing the matching `200~` open). Prepending
+    // unconditionally avoids the cost of tracking paste mode
+    // across the byte stream — see the conversation in this
+    // task's doc history.
+    //
+    // The whole sequence (preamble + slash) goes into ONE
+    // Sequence item so the writer actor's `write_all` lands
+    // it atomically against any concurrent operator
+    // submission.
+    let mut slash: Vec<u8> = Vec::with_capacity(8 + 6);
+    slash.extend_from_slice(b"\x1b[201~");
+    // `input::slash` writes to a `&mut dyn Write`; the actor
+    // is the writer, but here we just want the byte sequence
+    // it produces so we can submit it via `Sequence`. Use a
+    // tiny scratch buffer.
+    let mut shim = BufShim { out: &mut slash };
+    let _ = input::slash(&mut shim, "usage");
+    let slash_bytes = slash;
+    let init_items = vec![slash_bytes];
+    let init_delay = Duration::from_millis(10); // actor's intrinsic per-step delay; outer loop drives the 500ms
+    let init_outcome_rx = writer.sequence(init_items, init_delay).await;
+
+    // Wait for the initial paint. The actor finishes the
+    // `/usage` write in <1ms; the 500ms we then wait is the
+    // overlay paint time. We use this window to start parsing
+    // the broadcast stream in parallel — the parser is fed in
+    // `scrape_one_window`.
+    let mut parser = LimitsParser::new();
+    let mut limits = UsageLimits::default();
+    let mut rx = term_bcast_tx.subscribe();
+    parser.reset_section();
+    scrape_one_window(&mut rx, &mut parser, &mut limits, INITIAL_BUDGET, TICK).await;
+    // Wait for the actor's init sequence outcome (Completed)
+    // before sending the scroll sequence. This guards against
+    // the (unlikely) case where the actor's write failed
+    // because the master closed mid-scrape.
+    let init_outcome = init_outcome_rx.await.unwrap_or(SequenceOutcome::Failed(
+        "init outcome channel closed".into(),
+    ));
+    if matches!(init_outcome, SequenceOutcome::Failed(_)) {
+        log::warn!("usage_check: initial /usage write failed; aborting scrape");
+        writer.bytes(b"\x1b".to_vec()).await; // best-effort dismiss
+                                              // Not an operator interrupt — a writer failure. The
+                                              // `aborted` flag is reserved for the operator-interrupt
+                                              // path; leave it false here so the UI doesn't surface a
+                                              // misleading hint.
+        return (limits, false);
     }
 
-    // 2. Drain broadcast frames for up to SCRAPE_DEADLINE.
-    let mut rx = term_bcast_tx.subscribe();
-    let mut parser = LimitsParser::new();
-    let deadline = Instant::now() + SCRAPE_DEADLINE;
+    if limits.all_populated() {
+        // Already have everything from the initial paint;
+        // dismiss in a single Bytes command.
+        writer.bytes(b"\x1b".to_vec()).await;
+        return (limits, false);
+    }
+
+    // Phase 2 sequence: Down-arrows (one per round) followed
+    // by the dismissing Esc. The actor sleeps
+    // `inter_item_delay = SCROLL_BUDGET` between each step.
+    // We yield that same budget in our loop to drive the
+    // parser in parallel — the two timings are loose-coupled
+    // (the parser doesn't care if the actor is one step
+    // ahead because `reset_section` makes each round
+    // independent and `merge_from` is first-wins).
+    let mut scroll_items: Vec<Vec<u8>> = Vec::with_capacity(MAX_SCROLL_ROUNDS + 1);
+    for _ in 0..MAX_SCROLL_ROUNDS {
+        scroll_items.push(b"\x1b[B".to_vec());
+    }
+    scroll_items.push(b"\x1b".to_vec());
+    let scroll_delay = SCROLL_BUDGET;
+    let scroll_outcome_rx = writer.sequence(scroll_items, scroll_delay).await;
+
+    for _ in 0..MAX_SCROLL_ROUNDS {
+        tokio::time::sleep(SCROLL_BUDGET).await;
+        parser.reset_section();
+        scrape_one_window(&mut rx, &mut parser, &mut limits, SCROLL_BUDGET, TICK).await;
+        if limits.all_populated() {
+            break;
+        }
+    }
+
+    // The sequence is still running for MAX_SCROLL_ROUNDS
+    // items + 1 Esc. We waited SCROLL_BUDGET × N + parser-time
+    // for the actor to finish. To be safe, await its outcome
+    // so the actor's not still in flight when we return.
+    let scroll_outcome = scroll_outcome_rx.await.unwrap_or(SequenceOutcome::Failed(
+        "scroll outcome channel closed".into(),
+    ));
+    let aborted = matches!(scroll_outcome, SequenceOutcome::AbortedBeforeStep(_));
+    if aborted {
+        log::info!(
+            "usage_check: scrape sequence aborted by operator interrupt; \
+             publishing partial result"
+        );
+    }
+
+    (limits, aborted)
+}
+
+/// Drain broadcast frames for at most `budget`, feeding each
+/// frame's bytes to `parser`. Already-committed values in
+/// `limits` are preserved via first-wins merge.
+async fn scrape_one_window(
+    rx: &mut broadcast::Receiver<TermFrame>,
+    parser: &mut LimitsParser,
+    limits: &mut UsageLimits,
+    budget: tokio::time::Duration,
+    tick: tokio::time::Duration,
+) {
+    use tokio::time::{timeout, Instant};
+
+    let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
-        // `recv` is cancellation-safe — even if the future is
-        // dropped mid-wait, the next `subscribe()` picks up from
-        // the same point. We tick in 250ms slices so a frame
-        // arriving during a tick is processed in the same loop
-        // iteration rather than after a full timeout.
-        match timeout(TICK, rx.recv()).await {
+        match timeout(tick, rx.recv()).await {
             Ok(Ok(frame)) => {
-                if parser.feed(&frame.data).is_some() {
-                    break;
-                }
+                let _ = parser.feed(&frame.data);
             }
             Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                 // The broadcast buffer overflowed (we fell
-                // behind). Drain whatever's queued before
-                // continuing — Lagged fires once per overflow
-                // and the next `recv` resumes from the new tip.
+                // behind). The next `recv` resumes from the new
+                // tip — keep going.
                 continue;
             }
             Ok(Err(broadcast::error::RecvError::Closed)) => {
@@ -1283,127 +1573,123 @@ async fn run_usage_scrape(
             }
             Err(_) => {
                 // Tick timeout — keep draining until the
-                // overall deadline.
+                // overall budget expires.
             }
         }
     }
-
-    // 3. Dismiss the overlay so the user's terminal isn't left
-    //    hanging with a stale /usage pane. Single Esc per the
-    //    keyboard doc; the actor's normal input flow resumes
-    //    on the next keystroke.
-    {
-        let mut g = writer.lock();
-        let w: &mut dyn Write = &mut *g;
-        let _ = w.write_all(b"\x1b");
-        let _ = w.flush();
+    // Drain any pending "Resets" buffer into the right field
+    // before snapshotting. `flush` returns None if the parser
+    // saw nothing at all in this round (which is fine — the
+    // merge step is a no-op on `None`).
+    if let Some(pass) = parser.flush().or_else(|| parser.feed(&[])) {
+        limits.merge_from(pass);
     }
-
-    parser
-        .flush()
-        .unwrap_or_else(|| parser.feed(&[]).unwrap_or_default())
 }
 
 async fn dispatch_to_pty(
     env: &Envelope,
-    shared_writer: Option<&Arc<Mutex<Box<dyn Write + Send>>>>,
+    writer: Option<&crate::pty_writer::WriterHandle>,
     pty_tx: &mpsc::Sender<PtyCmd>,
     cols: u16,
     rows: u16,
 ) {
-    use std::io::Write;
-    // Byte-producing commands (Prompt / Slash / Interrupt / Clear) write
-    // DIRECTLY through `shared_writer` when one is available. This
-    // bypasses the blocking PTY thread's `pty_rx` queue — which is
-    // starved whenever the child is alive and emitting no further
-    // output (a TUI prompt, in particular). The outer loop previously
-    // enqueued these as `PtyCmd::Write` and waited for the blocking
-    // thread to drain it between read() calls; when claude was parked
-    // at a prompt, Ctrl+C never reached it.
-    //
-    // `Resize` / `Repaint` still go through `pty_rx` — they're rare and
-    // tolerate the latency. A future pass could promote them too.
-    match &env.body {
+    // §Once-and-for-all writer actor: byte-producing commands
+    // (Prompt / Slash / Interrupt / Clear) compose their bytes
+    // into a `Vec<u8>` and submit the whole thing as a single
+    // `WriteCmd::Bytes` through the writer actor's FIFO. Each
+    // command is atomic against any in-flight `WriteCmd::Sequence`
+    // (e.g. an active `/usage` scrape). `Resize` is also routed
+    // through the writer actor (the resize closure handles kernel
+    // `TIOCSWINSZ` + in-process VT resize in one atomic unit).
+    let mut out: Vec<u8> = Vec::with_capacity(64);
+    let bytes = match &env.body {
         EnvelopeBody::Prompt { text, .. } => {
-            if let Some(sw) = shared_writer {
-                let mut g = sw.lock();
-                let w: &mut dyn Write = &mut *g;
-                let _ = input::paste(w, text);
-                let _ = w.flush();
-            } else {
-                fallback_via_pty_tx(env, pty_tx).await;
-            }
+            let mut shim = BufShim { out: &mut out };
+            let _ = input::paste(&mut shim, text);
+            std::mem::take(&mut out)
         }
         EnvelopeBody::Slash { cmd } => {
-            if let Some(sw) = shared_writer {
-                let mut g = sw.lock();
-                let w: &mut dyn Write = &mut *g;
-                let _ = input::slash(w, cmd);
-                let _ = w.flush();
-            } else {
-                fallback_via_pty_tx(env, pty_tx).await;
-            }
+            let mut shim = BufShim { out: &mut out };
+            let _ = input::slash(&mut shim, cmd);
+            std::mem::take(&mut out)
         }
         EnvelopeBody::Interrupt => {
-            if let Some(sw) = shared_writer {
-                let mut g = sw.lock();
-                let w: &mut dyn Write = &mut *g;
-                let _ = input::interrupt(w);
-                let _ = w.flush();
-            } else {
-                fallback_via_pty_tx(env, pty_tx).await;
+            // §Writer actor — preempt an in-flight scrape before
+            // the Ctrl-C byte goes out. Order matters:
+            //
+            // 1. `cancel()` flips the cancellation flag
+            //    synchronously so the actor sees the abort at its
+            //    next Sequence step boundary (a few millis from
+            //    now).
+            // 2. `cancel_via_queue()` submits `WriteCmd::Cancel` to
+            //    the FIFO so the actor's `select!` wakes its
+            //    inter-item sleep within a few millis instead of
+            //    waiting out the full `inter_item_delay`. This is
+            //    the sub-step-latency preemption the operator
+            //    expects.
+            // 3. `bytes()` submits the Ctrl-C payload as a
+            //    subsequent FIFO entry, AFTER the Cancel. FIFO
+            //    ordering guarantees the byte lands only after the
+            //    in-flight Sequence has been aborted.
+            if let Some(w) = writer {
+                w.cancel();
+                w.cancel_via_queue().await;
+                let mut shim = BufShim { out: &mut out };
+                let _ = input::interrupt(&mut shim);
+                let payload = std::mem::take(&mut out);
+                if !payload.is_empty() {
+                    w.bytes(payload).await;
+                }
+                return;
             }
+            // No writer: fall through to the pty_tx fallback below
+            // by rebuilding bytes into `out` again.
+            let mut shim = BufShim { out: &mut out };
+            let _ = input::interrupt(&mut shim);
+            std::mem::take(&mut out)
         }
         EnvelopeBody::Clear { .. } => {
-            if let Some(sw) = shared_writer {
-                let mut g = sw.lock();
-                let w: &mut dyn Write = &mut *g;
-                let _ = input::slash(w, "clear");
-                let _ = w.flush();
-            } else {
-                fallback_via_pty_tx(env, pty_tx).await;
-            }
+            let mut shim = BufShim { out: &mut out };
+            let _ = input::slash(&mut shim, "clear");
+            std::mem::take(&mut out)
         }
         EnvelopeBody::Resize { cols: rc, rows: rr } => {
-            let _ = pty_tx.try_send(PtyCmd::Resize {
-                cols: *rc,
-                rows: *rr,
-            });
+            crate::dispatch::try_send_or_warn(
+                "PtyCmd::Resize",
+                pty_tx,
+                PtyCmd::Resize {
+                    cols: *rc,
+                    rows: *rr,
+                },
+            );
+            return;
         }
         EnvelopeBody::Repaint => {
-            let _ = pty_tx.try_send(PtyCmd::Repaint { cols, rows });
+            crate::dispatch::try_send_or_warn(
+                "PtyCmd::Repaint",
+                pty_tx,
+                PtyCmd::Repaint { cols, rows },
+            );
+            return;
         }
-        _ => {}
-    }
-}
-
-/// Fallback for byte-producing commands when the outer loop holds no
-/// shared writer (e.g. tests, or before the PTY has been spawned). Goes
-/// through the blocking-thread channel path — the legacy behavior. Kept
-/// in one place so the production and fallback paths produce identical
-/// byte sequences.
-async fn fallback_via_pty_tx(env: &Envelope, pty_tx: &mpsc::Sender<PtyCmd>) {
-    let mut out: Vec<u8> = Vec::with_capacity(64);
-    {
-        let mut shim = BufShim { out: &mut out };
-        match &env.body {
-            EnvelopeBody::Prompt { text, .. } => {
-                let _ = input::paste(&mut shim, text);
-            }
-            EnvelopeBody::Slash { cmd } => {
-                let _ = input::slash(&mut shim, cmd);
-            }
-            EnvelopeBody::Interrupt => {
-                let _ = input::interrupt(&mut shim);
-            }
-            EnvelopeBody::Clear { .. } => {
-                let _ = input::slash(&mut shim, "clear");
-            }
-            _ => return,
+        _ => return,
+    };
+    if !bytes.is_empty() {
+        if let Some(w) = writer {
+            w.bytes(bytes).await;
+        } else {
+            // No active session — still drain through the
+            // actor-shaped queueing primitive so an
+            // immediately-upcoming spawn picks up the bytes.
+            // `pty_tx.send(PtyCmd::Write)` queues the bytes for
+            // the blocking thread; today the blocking thread
+            // forwards them via `PtyEvt::WriteBack` so the actor
+            // is still the only kernel writer, even on this
+            // fallback. Pre-spawn contexts (tests / very early
+            // startup) still reach the actor because the driver
+            // task is alive once pty_tx has been wired.
+            crate::dispatch::send_or_warn("PtyCmd::Write", pty_tx, PtyCmd::Write(bytes)).await;
         }
-    }
-    if !out.is_empty() {
-        let _ = pty_tx.send(PtyCmd::Write(out)).await;
     }
 }
 
@@ -1788,8 +2074,9 @@ mod tests {
     /// blocking thread only drained between `read()` calls. With
     /// claude parked mid-turn (or at any prompt emitting no output),
     /// `read()` blocked indefinitely and the queued bytes never
-    /// reached the master. Now the abort bytes go directly through the
-    /// shared writer, bypassing the channel.
+    /// reached the master. Now the abort bytes go through the
+    /// writer actor, which writes them directly via the master's
+    /// writer end without queuing on the read-side channel.
     ///
     /// We verify the direct-write path end-to-end against a real PTY:
     /// spawn a `/bin/cat` (which reads stdin forever, just like a
@@ -1801,7 +2088,7 @@ mod tests {
     /// assertion is that dispatch_to_pty writes the byte without
     /// blocking on a channel that may be unreachable.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn interrupt_reaches_pty_via_shared_writer() {
+    async fn interrupt_reaches_pty_via_writer_actor() {
         use crate::pty::Pty;
         use rabbit_lib::wire::{Envelope, EnvelopeBody, PROTOCOL_VERSION};
 
@@ -1816,14 +2103,19 @@ mod tests {
         .expect("spawn cat");
         assert!(pty.alive(), "cat must be alive and waiting for input");
 
-        // Replicate exactly what `spawn_run_one` does: wrap the master
-        // writer + a dummy `pty_tx` so dispatch_to_pty can find both.
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
-            pty.master
+        // Replicate exactly what `spawn_run_one` does: spawn the
+        // writer actor on the master's writer end, plus a dummy
+        // `pty_tx` so dispatch_to_pty can find both. The actor is
+        // the sole owner of the writer — `take_writer` here is the
+        // final hand-off.
+        let writer = {
+            let w = pty
+                .master
                 .take_writer()
                 .map_err(|e| anyhow::anyhow!("take_writer: {e}"))
-                .expect("take_writer"),
-        ));
+                .expect("take_writer");
+            crate::pty_writer::spawn_pty_writer(w, None)
+        };
         // `dispatch_to_pty` still takes a `pty_tx` for Resize/Repaint;
         // we don't exercise those here so the channel can stay empty.
         let (pty_tx, _pty_rx) = mpsc::channel::<PtyCmd>(8);
@@ -1835,8 +2127,8 @@ mod tests {
             body: EnvelopeBody::Interrupt,
         };
 
-        // Drive the dispatch with the shared writer available. The
-        // dispatch should write the ESC byte directly without ever
+        // Drive the dispatch with the writer actor available. The
+        // dispatch should write the Ctrl-C byte directly without ever
         // touching pty_tx (which is empty anyway — proving the path
         // bypassed the channel).
         let started = std::time::Instant::now();
@@ -1874,24 +2166,26 @@ mod tests {
     /// echoes all six back within a 2s budget. Without the fix, the
     /// echoes land seconds later (or not at all within the budget).
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn typed_bytes_reach_pty_via_shared_writer() {
+    async fn typed_bytes_reach_pty_via_writer_actor() {
         use crate::pty::Pty;
         use std::io::Read;
         use std::sync::mpsc as std_mpsc;
         use std::time::Instant;
 
         // Real PTY, /bin/cat as the child — matches the production shape.
-        // `take_writer()` gives us the side of the master that the outer
-        // supervisor's shared slot would hold.
+        // `take_writer()` hands the master-side writer off to the
+        // writer actor — same shape `spawn_run_one` uses.
         let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 4096).expect("spawn cat");
         assert!(pty.alive(), "cat must be alive and waiting for input");
         let mut reader = pty.reader();
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
-            pty.master
+        let writer = {
+            let w = pty
+                .master
                 .take_writer()
                 .map_err(|e| anyhow::anyhow!("take_writer: {e}"))
-                .expect("take_writer"),
-        ));
+                .expect("take_writer");
+            crate::pty_writer::spawn_pty_writer(w, None)
+        };
 
         // Build a mock `ActiveSession`. `killer` is unused by the helper
         // we're testing, but the struct requires one — borrow a real
@@ -1987,7 +2281,7 @@ mod tests {
     /// translate `\x7f` into a BS-SPACE-BS erase sequence, so we use
     /// `stty raw` to keep the byte literal.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn backspace_byte_reaches_pty_via_shared_writer() {
+    async fn backspace_byte_reaches_pty_via_writer_actor() {
         use crate::pty::Pty;
         use std::io::Read;
         use std::sync::mpsc as std_mpsc;
@@ -2007,12 +2301,14 @@ mod tests {
         .expect("spawn sh+stty+cat");
         assert!(pty.alive());
         let mut reader = pty.reader();
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
-            pty.master
+        let writer = {
+            let w = pty
+                .master
                 .take_writer()
                 .map_err(|e| anyhow::anyhow!("take_writer: {e}"))
-                .expect("take_writer"),
-        ));
+                .expect("take_writer");
+            crate::pty_writer::spawn_pty_writer(w, None)
+        };
         let dummy_killer: Arc<Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>> = {
             let mut pty2 =
                 Pty::spawn("/bin/true", &[], "/tmp", 80, 24, 1024).expect("spawn /bin/true");

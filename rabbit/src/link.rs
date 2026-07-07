@@ -38,6 +38,7 @@ pub enum LinkEvent {
     Text(Envelope),
 }
 
+#[derive(Debug)]
 pub enum LinkCmd {
     /// §A.7 / seq-numbered snapshot protocol — raw PTY bytes from a
     /// terminal → warren → viewers, tagged with the channel byte and a

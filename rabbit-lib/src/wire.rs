@@ -54,17 +54,35 @@ pub enum EnvelopeBody {
         id: uuid::Uuid,
         text: String,
         by: String,
+        /// §Cross-tab prompt rejection visibility: the originating
+        /// browser's `connection_id` so subscribers can filter
+        /// `PromptEcho` / `PromptRejected` to their own prompts.
+        /// `None` when the producer is the HTTP path (no browser tab
+        /// owns the request) or a warren bg-task scheduler.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_connection_id: Option<uuid::Uuid>,
     },
     /// §D reject-when-Running outcome: a `Prompt` arrived while the agent
     /// was already `Running`, so the supervisor bounced it instead of
     /// injecting keystrokes into a live turn. Distinct from a generic
     /// `Log { level: "warn" }` so warren can surface a dedicated UI
     /// affordance (e.g. an inline banner tied to the original prompt id).
-    /// `reason` is human-readable; today the only value is
-    /// `"agent is running a turn"`.
+    /// `reason` is human-readable; known values:
+    /// - `"agent is running a turn"` — the actor's busy-gate fired.
+    /// - `"agent is dead"` — the actor's state shows `Dead` (post-
+    ///   connection-loss). No point in injecting keystrokes at a
+    ///   disconnected supervisor.
+    /// - `"turn queue full"` — the bounded `pending` queue is over
+    ///   `PENDING_CAP`; back off and retry.
     PromptRejected {
         id: uuid::Uuid,
         reason: String,
+        /// §Cross-tab prompt rejection visibility: the originating
+        /// connection id so the rejection banner only shows on the
+        /// tab that submitted the prompt. `None` for HTTP / bg-task
+        /// rejections (browsers treat it as "show to everyone").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_connection_id: Option<uuid::Uuid>,
     },
     Slash {
         cmd: String,
@@ -255,6 +273,13 @@ pub struct PromptEcho {
     pub prompt_id: uuid::Uuid,
     pub text: String,
     pub by: String,
+    /// §Cross-tab prompt rejection visibility: the originating
+    /// connection id. Browsers without this set treat the echo as
+    /// "not mine"; browsers with it treat the echo as their own.
+    /// `None` when the producer is HTTP / bg-task. The actor
+    /// stamps whatever the inbound `Prompt` carried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_connection_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +325,34 @@ pub struct UsageSnapshot {
     /// reset. Paired with `session_pct`.
     #[serde(default)]
     pub session_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// §Usage-limits / §Small-terminal: when `true`, the most
+    /// recent `/usage` scrape did not surface all four plan-level
+    /// fields — either the PTY was too small for Claude to render
+    /// the modal overlay (so the parser saw nothing), or the
+    /// overlay omitted one of the fields at 0% session usage (so
+    /// `session_resets_at` legitimately has no time-only line).
+    /// `false` (the default) means either all four fields are
+    /// populated or the scrape hasn't run yet. The UI uses this
+    /// flag to surface a "scrape incomplete — try a larger
+    /// window" hint alongside the "—" placeholder so the operator
+    /// can distinguish "no data yet" from "PTY too small".
+    #[serde(default)]
+    pub scrape_incomplete: bool,
+    /// §Writer-actor / §Usage-limits: when `true`, the most
+    /// recent `/usage` scrape was preempted by an operator
+    /// `Interrupt` mid-sequence — the writer actor's
+    /// `SequenceOutcome::AbortedBeforeStep` fired before all
+    /// planned scroll-and-parse rounds completed. The result
+    /// envelope still publishes whatever fields the parser
+    /// committed before the preempt so the operator sees the
+    /// partial state, but this flag tells the UI to surface a
+    /// distinct "scrape aborted by interrupt" hint instead of
+    /// the generic "scrape incomplete" one. Both flags can be
+    /// true on the same envelope (a preempted scrape that
+    /// happened to be on a too-small PTY); the aborted variant
+    /// is the more informative signal and should win in the UI.
+    #[serde(default)]
+    pub scrape_aborted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,6 +435,8 @@ mod tests {
             weekly_resets_at: Some(weekly_resets),
             session_pct: Some(12.0),
             session_resets_at: Some(session_resets),
+            scrape_incomplete: false,
+            scrape_aborted: false,
         };
         let json = serde_json::to_value(&snap).expect("serialize");
         assert_eq!(json["weekly_pct"], 73.0);
@@ -417,5 +472,51 @@ mod tests {
         assert_eq!(snap.weekly_resets_at, None);
         assert_eq!(snap.session_pct, None);
         assert_eq!(snap.session_resets_at, None);
+    }
+
+    #[test]
+    fn usage_snapshot_scrape_incomplete_round_trips_and_v1_defaults_to_false() {
+        // §Small-terminal mitigation C: a partial scrape (1–3
+        // fields populated) sets `scrape_incomplete = true` so the
+        // UI can surface the hint. v1 envelopes (no flag) default
+        // to `false` so a mixed-version rollout stays safe.
+        use chrono::TimeZone;
+        let snap = UsageSnapshot {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read: 0,
+            cache_write: 0,
+            context_pct_est: None,
+            parse_errors: 0,
+            source: "usage_check".to_string(),
+            weekly_pct: Some(73.0),
+            weekly_resets_at: Some(chrono::Utc.with_ymd_and_hms(2026, 7, 9, 5, 0, 0).unwrap()),
+            session_pct: Some(12.0),
+            session_resets_at: None, // partial — session reset missing
+            scrape_incomplete: true,
+            scrape_aborted: false,
+        };
+        let json = serde_json::to_value(&snap).expect("serialize");
+        assert_eq!(json["scrape_incomplete"], true);
+        let back: UsageSnapshot = serde_json::from_value(json).expect("deserialize");
+        assert!(back.scrape_incomplete);
+
+        // v1 JSON without the flag deserializes to false.
+        let v1_json = serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read": 10,
+            "cache_write": 5,
+            "context_pct_est": null,
+            "parse_errors": 0,
+            "source": "transcript",
+            "weekly_pct": null,
+            "weekly_resets_at": null,
+            "session_pct": null,
+            "session_resets_at": null,
+        });
+        let back: UsageSnapshot =
+            serde_json::from_value(v1_json).expect("v1 envelope must deserialize");
+        assert!(!back.scrape_incomplete);
     }
 }

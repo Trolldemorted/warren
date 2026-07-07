@@ -3,7 +3,9 @@ use crate::server::handle::AgentHandle;
 use crate::server::registry::AgentRegistry;
 use crate::server::transport::TransportMsg;
 use crate::server::WsTransport;
-use crate::wire::{Envelope, EnvelopeBody, TermFrame, PROTOCOL_VERSION, TERM_CHAN_CLAUDE};
+use crate::wire::{
+    Envelope, EnvelopeBody, TermFrame, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
+};
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -220,6 +222,7 @@ pub async fn handle(
                                 handle.send_terminal_bytes(
                                     TERM_CHAN_CLAUDE,
                                     Bytes::from(b),
+                                    Some(connection_id),
                                 ).await
                             {
                                 log::debug!("send_terminal_bytes failed: {e:?}");
@@ -249,19 +252,20 @@ pub async fn handle(
             }
         }
     }
-    // §A.6 leader-based resize: fire a `ConnectionClosed` so the actor
-    // can clear leadership if *this* tab was the leader. The leader
-    // state itself lives on `AgentHandle`; the actor wraps the clear
-    // with the `LeaderChanged { None }` broadcast.
-    if let Err(e) = handle
-        .cmd_tx()
-        .send(Command::ConnectionClosed { connection_id })
-        .await
-    {
-        // Channel full or actor gone (e.g. rabbit disconnected). The
-        // leader field will eventually go stale; that's acceptable —
-        // there's no auto-promotion, a fresh claim will overwrite it.
-        log::debug!("connection_closed send failed for {connection_id}: {e:?}");
+    // Clear leadership directly on the handle — the leader field
+    // doesn't need actor mediation. The actor's `ConnectionClosed`
+    // arm is a no-op backstop (it sees `false` from the second
+    // `clear_leader_if`).
+    if handle.clear_leader_if(connection_id) {
+        let cur = handle
+            .snapshot()
+            .term_size
+            .unwrap_or(TermSize { cols: 0, rows: 0 });
+        handle.publish_meta(EnvelopeBody::LeaderChanged {
+            leader_id: None,
+            cols: cur.cols,
+            rows: cur.rows,
+        });
     }
     Ok(())
 }
@@ -314,8 +318,15 @@ async fn forward_browser_message(
         return Ok(());
     }
     match env.body {
-        EnvelopeBody::Prompt { text, .. } => {
-            handle.prompt(&text, false).await?;
+        EnvelopeBody::Prompt {
+            text,
+            by_connection_id,
+            ..
+        } => {
+            // Fall back to this tab's id if older browsers didn't stamp
+            // `by_connection_id` on the inbound prompt.
+            let origin = by_connection_id.unwrap_or(connection_id);
+            handle.prompt_with_origin(&text, false, origin).await?;
         }
         EnvelopeBody::Interrupt => handle.interrupt().await?,
         EnvelopeBody::Clear { hard } => handle.clear(hard).await?,
@@ -378,6 +389,7 @@ mod tests {
             id: Uuid::new_v4(),
             text: "x".into(),
             by: "t".into(),
+            by_connection_id: None,
         }));
     }
 
@@ -413,6 +425,7 @@ mod tests {
         assert!(!should_drop_for_viewer(&EnvelopeBody::PromptRejected {
             id: Uuid::new_v4(),
             reason: "x".into(),
+            by_connection_id: None,
         }));
     }
 

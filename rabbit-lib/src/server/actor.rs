@@ -16,6 +16,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+/// `wait=true` prompts queue here waiting for `StopHook`. `wait=false`
+/// callers never enter the queue.
+const PENDING_CAP: usize = 16;
+
 #[derive(Debug)]
 pub enum Command {
     Prompt {
@@ -24,6 +28,13 @@ pub enum Command {
         by: String,
         wait: bool,
         reply: Option<oneshot::Sender<TurnOutcomeMsg>>,
+        /// §Cross-tab prompt rejection visibility: the originating
+        /// browser's connection id. The actor stamps this onto the
+        /// downstream `EnvelopeBody::Prompt` and onto the
+        /// `PromptRejected` envelope it publishes when the busy/queue
+        /// gates fire. `None` for HTTP / bg-task (the rejection
+        /// banner is treated as "everyone" by browsers).
+        by_connection_id: Option<Uuid>,
     },
     Clear {
         hard: bool,
@@ -59,6 +70,9 @@ pub enum Command {
     SendKeys {
         chan: u8,
         data: Bytes,
+        /// `Some(id)` triggers the leader-gate check on dispatch;
+        /// `None` skips it.
+        connection_id: Option<Uuid>,
     },
     /// §D Milestone 5 (Phase B): ask rabbit for a current `ScreenSnapshot`
     /// of the given channel. Sent by the browser WS right after flushing
@@ -445,7 +459,55 @@ async fn dispatch<T: WsTransport>(
             by,
             wait,
             reply,
+            by_connection_id,
         } => {
+            // Single-funnel gate: every prompt surface (HTTP, WS,
+            // future bg-task schedulers) lands here.
+            let snap = handle.snapshot();
+            let reject_reason: Option<&'static str> = match snap.state {
+                AgentState::Running => Some("agent is running a turn"),
+                AgentState::Dead => Some("agent is dead"),
+                _ => None,
+            };
+            if let Some(reason) = reject_reason {
+                handle.publish_meta(EnvelopeBody::PromptRejected {
+                    id,
+                    reason: reason.to_string(),
+                    by_connection_id,
+                });
+                if wait {
+                    if let Some(tx) = reply {
+                        let now = Utc::now();
+                        let _ = tx.send(TurnOutcomeMsg {
+                            prompt_id: id,
+                            started_at: now,
+                            ended_at: now,
+                            usage: None,
+                            error: Some(reason.to_string()),
+                        });
+                    }
+                }
+                return Ok(());
+            }
+            // Bounded queue: only `wait=true` callers enter `pending`.
+            if wait && pending.len() >= PENDING_CAP {
+                handle.publish_meta(EnvelopeBody::PromptRejected {
+                    id,
+                    reason: "turn queue full".to_string(),
+                    by_connection_id,
+                });
+                if let Some(tx) = reply {
+                    let now = Utc::now();
+                    let _ = tx.send(TurnOutcomeMsg {
+                        prompt_id: id,
+                        started_at: now,
+                        ended_at: now,
+                        usage: None,
+                        error: Some("turn queue full".to_string()),
+                    });
+                }
+                return Ok(());
+            }
             let started = Utc::now();
             started_at.insert(id, started);
             if wait {
@@ -456,7 +518,12 @@ async fn dispatch<T: WsTransport>(
             let env = Envelope {
                 v: PROTOCOL_VERSION,
                 seq: 0,
-                body: EnvelopeBody::Prompt { id, text, by },
+                body: EnvelopeBody::Prompt {
+                    id,
+                    text,
+                    by,
+                    by_connection_id,
+                },
             };
             sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
@@ -536,7 +603,22 @@ async fn dispatch<T: WsTransport>(
             sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
-        Command::SendKeys { chan, data } => {
+        Command::SendKeys {
+            chan,
+            data,
+            connection_id,
+        } => {
+            // Defense-in-depth for the JS-side `isLeader` gate:
+            // a hostile client could still send binary frames.
+            if let Some(cid) = connection_id {
+                if !handle.is_leader(cid) {
+                    log::debug!(
+                        "dropping non-leader SendKeys (chan={chan}, {} bytes, conn={cid})",
+                        data.len()
+                    );
+                    return Ok(());
+                }
+            }
             let mut frame = vec![chan];
             frame.extend_from_slice(&data);
             sink.send(TransportMsg::Binary(frame)).await?;
@@ -1070,5 +1152,32 @@ mod tests {
             !handle.is_leader(other_id),
             "non-leader's resize would be dropped at the dispatch boundary"
         );
+    }
+
+    #[tokio::test]
+    async fn send_keys_leader_gate_passes_for_leader() {
+        let handle = AgentHandle::new(Uuid::nil());
+        let leader_id = Uuid::from_bytes([10; 16]);
+        handle.claim_leader(leader_id, 80, 24);
+        let cid = leader_id;
+        assert!(handle.is_leader(cid), "leader's SendKeys must reach rabbit");
+    }
+
+    #[tokio::test]
+    async fn send_keys_leader_gate_drops_for_non_leader() {
+        let handle = AgentHandle::new(Uuid::nil());
+        let leader_id = Uuid::from_bytes([11; 16]);
+        let follower_id = Uuid::from_bytes([12; 16]);
+        handle.claim_leader(leader_id, 80, 24);
+        assert!(
+            !handle.is_leader(follower_id),
+            "follower's SendKeys must be dropped at the dispatch boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_keys_leader_gate_bypassed_when_connection_id_is_none() {
+        let handle = AgentHandle::new(Uuid::nil());
+        assert_eq!(handle.current_leader(), None);
     }
 }

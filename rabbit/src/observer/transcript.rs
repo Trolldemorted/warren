@@ -175,6 +175,17 @@ impl TranscriptTail {
                 weekly_resets_at: None,
                 session_pct: None,
                 session_resets_at: None,
+                // §Small-terminal mitigation C: transcript-side
+                // envelopes don't carry scrape results, so the
+                // "scrape incomplete" hint never applies here. The
+                // flag is set by the supervisor when it ships the
+                // `Usage` envelope after a `/usage` scrape.
+                scrape_incomplete: false,
+                // §Writer-actor: transcript-side envelopes are
+                // never the product of a scrape, so the
+                // "scrape aborted" hint never applies here. Same
+                // convention as `scrape_incomplete`.
+                scrape_aborted: false,
             };
             let kind = msg.role.unwrap_or_else(|| "unknown".to_string());
             out.push(UsageUpdate {

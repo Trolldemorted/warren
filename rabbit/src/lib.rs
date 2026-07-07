@@ -9,6 +9,7 @@
 //! inside this crate's modules.
 
 pub mod config;
+pub mod dispatch;
 pub mod health;
 pub mod hooks_install;
 pub mod input;
@@ -16,6 +17,7 @@ pub mod link;
 pub mod meta_ring;
 pub mod observer;
 pub mod pty;
+pub mod pty_writer;
 pub mod respawn;
 pub mod shell;
 pub mod supervisor;

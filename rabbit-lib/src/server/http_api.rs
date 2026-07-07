@@ -122,10 +122,18 @@ impl ServerState {
         if req.text.trim().is_empty() {
             return Err(ServerError::BadRequest("text required".into()));
         }
-        if matches!(handle.snapshot().state, AgentState::Running) {
-            return Err(ServerError::Conflict("agent busy".into()));
+        // Force `wait=true` so the actor's gate populates the oneshot with
+        // a rejection error; `wait=false` would fabricate success and
+        // hide the rejection.
+        let outcome = handle.prompt(&req.text, /*wait=*/ true).await?;
+        if let Some(err) = outcome.error.as_deref() {
+            if err == "agent is running a turn"
+                || err == "agent is dead"
+                || err == "turn queue full"
+            {
+                return Err(ServerError::Conflict(err.into()));
+            }
         }
-        let outcome = handle.prompt(&req.text, req.wait).await?;
         Ok(PromptResponse {
             prompt_id: outcome.prompt_id,
             started_at: outcome.started_at,
@@ -343,10 +351,14 @@ mod tests {
     //! HTTP wire shape — the adapter layer in `http.rs` is tested by
     //! the integration suite).
     use super::*;
+    use crate::server::actor::{Command, TurnOutcomeMsg};
     use crate::server::handle::AgentStateSnapshot;
     use crate::server::SessionStore;
-    use crate::wire::AgentState;
+    use crate::wire::{AgentState, EnvelopeBody};
+    use std::collections::VecDeque;
     use std::sync::Arc;
+    use tokio::sync::oneshot;
+    use uuid::Uuid;
 
     /// Auth that says "yes, you're an admin" if `accept_admin` is true.
     struct StubAuth {
@@ -435,12 +447,10 @@ mod tests {
         ::http::HeaderMap::new()
     }
 
-    /// Register an agent in the registry, wire a fresh cmd channel,
-    /// and spawn a fake-actor task that drains commands + replies to
-    /// oneshots. The fake actor's job is purely to keep the
-    /// `cmd_tx → cmd_rx → reply` round trip alive so the domain
-    /// functions under test don't block. It does not actually
-    /// drive any supervisor state.
+    /// Register an agent in the registry and spawn a fake-actor task
+    /// that drains commands + replies to oneshots. The fake actor
+    /// mirrors the real actor's busy-gate so the busy-path tests
+    /// drive end-to-end behavior.
     fn register_agent(state: &ServerState) -> Uuid {
         let id = Uuid::new_v4();
         let initial = state.registry.register(id);
@@ -450,15 +460,64 @@ mod tests {
         }
         // Keep the per-actor handle alive (it owns the broadcast senders
         // the registry subscribers use).
-        let _ = handle_for_actor;
+        let fake_handle = handle_for_actor.clone();
         // Spawn a fake actor that drains commands and replies to oneshots.
         tokio::spawn(async move {
-            use crate::server::actor::{Command, TurnOutcomeMsg};
+            const FAKE_PENDING_CAP: usize = 16;
+            let pending: VecDeque<(Uuid, oneshot::Sender<TurnOutcomeMsg>)> = VecDeque::new();
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     Command::Prompt {
-                        id, wait, reply, ..
+                        id,
+                        wait,
+                        reply,
+                        by_connection_id,
+                        ..
                     } => {
+                        let snap = fake_handle.snapshot();
+                        let reject_reason: Option<&'static str> = match snap.state {
+                            AgentState::Running => Some("agent is running a turn"),
+                            AgentState::Dead => Some("agent is dead"),
+                            _ => None,
+                        };
+                        if let Some(reason) = reject_reason {
+                            fake_handle.publish_meta(EnvelopeBody::PromptRejected {
+                                id,
+                                reason: reason.to_string(),
+                                by_connection_id,
+                            });
+                            if wait {
+                                if let Some(tx) = reply {
+                                    let now = chrono::Utc::now();
+                                    let _ = tx.send(TurnOutcomeMsg {
+                                        prompt_id: id,
+                                        started_at: now,
+                                        ended_at: now,
+                                        usage: None,
+                                        error: Some(reason.to_string()),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                        if wait && pending.len() >= FAKE_PENDING_CAP {
+                            fake_handle.publish_meta(EnvelopeBody::PromptRejected {
+                                id,
+                                reason: "turn queue full".to_string(),
+                                by_connection_id,
+                            });
+                            if let Some(tx) = reply {
+                                let now = chrono::Utc::now();
+                                let _ = tx.send(TurnOutcomeMsg {
+                                    prompt_id: id,
+                                    started_at: now,
+                                    ended_at: now,
+                                    usage: None,
+                                    error: Some("turn queue full".to_string()),
+                                });
+                            }
+                            continue;
+                        }
                         if let (true, Some(tx)) = (wait, reply) {
                             let now = chrono::Utc::now();
                             let _ = tx.send(TurnOutcomeMsg {
@@ -475,11 +534,6 @@ mod tests {
                     } => {
                         let _ = tx.send(());
                     }
-                    // Compact / Interrupt / Restart / Resize / Repaint /
-                    // SendKeys / SnapshotRequest / ClaimLeader /
-                    // ReleaseLeader / ResizeFromConnection / ConnectionClosed
-                    // all carry no oneshot — the sender doesn't wait for a
-                    // reply, so dropping them is fine.
                     _ => {}
                 }
             }

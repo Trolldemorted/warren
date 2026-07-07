@@ -147,6 +147,12 @@ body.viewer-mode #viewer-mode-banner { display: block; }
       <dt>weekly limit</dt><dd id="usage-weekly">—</dd>
       <dt>session limit</dt><dd id="usage-session">—</dd>
     </dl>
+    {# §Small-terminal mitigation C: hint shown when the `/usage`
+       scrape did not surface all four plan-level fields (e.g. PTY
+       too small for Claude's modal overlay). Empty by default so
+       the panel looks identical to before when the scrape is
+       either absent or fully populated. #}
+    <div id="usage-hint" class="small text-warning mb-2"></div>
     <h2 class="h6">Actions</h2>
     <button class="btn btn-outline-warning action" data-action="interrupt">Interrupt</button>
     <button class="btn btn-outline-secondary action" data-action="clear">Clear</button>
@@ -183,6 +189,11 @@ const usageCw = document.getElementById('usage-cw');
 // default "—" placeholder in the HTML stays put.
 const usageWeekly = document.getElementById('usage-weekly');
 const usageSession = document.getElementById('usage-session');
+// §Small-terminal mitigation C: hint element shown when the
+// active scraper returned a partial UsageSnapshot (1–3 fields
+// populated). Hidden until `scrape_incomplete` arrives on a
+// `Usage` envelope.
+const usageHint = document.getElementById('usage-hint');
 const promptRejectedBanner = document.getElementById('prompt-rejected-banner');
 
 // §D read-only viewer mode: `?viewer=true` on the URL puts the page into
@@ -326,6 +337,9 @@ term.onData(data => {
   // The server drops them, but skipping the send saves a round trip and
   // means a misconfigured proxy can't log viewer keystrokes.
   if (viewerMode) return;
+  // Leader gate on typed bytes. Skip the send so the operator
+  // doesn't see their keystrokes silently dropped at the actor.
+  if (!isLeader) return;
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
@@ -376,6 +390,31 @@ function applyMeta(env) {
           : '';
         usageSession.textContent = env.session_pct.toFixed(0) + '%' + reset;
       }
+      // §Small-terminal mitigation C: when the active scraper
+      // did not surface all four plan-level fields (e.g. because
+      // the operator's PTY is too small for Claude's overlay, or
+      // because Claude omits the time-only session reset at 0%
+      // session usage), surface a "scrape incomplete — try a
+      // larger window" hint so the operator can distinguish "no
+      // data yet" from "PTY too small." The flag is only set
+      // when at least one field IS populated — a fully-empty
+      // limits struct means the scrape hasn't run, which is the
+      // pre-existing "—" baseline.
+      //
+      // §Writer-actor: a separate `scrape_aborted` flag fires
+      // when an operator `Interrupt` preempted the scrape
+      // mid-sequence (the writer actor's
+      // `SequenceOutcome::AbortedBeforeStep`). The aborted
+      // variant is the more informative signal — the operator
+      // just hit Ctrl-C and the partial result they see IS the
+      // result of that — so it wins when both flags are set.
+      if (env.scrape_aborted) {
+        usageHint.textContent = 'scrape aborted by interrupt — partial result';
+      } else if (env.scrape_incomplete) {
+        usageHint.textContent = 'scrape incomplete — try a larger window';
+      } else {
+        usageHint.textContent = '';
+      }
       break;
     case 'cleared':
       if (env.hard) term.reset();
@@ -385,6 +424,14 @@ function applyMeta(env) {
       // tied to the original prompt id. The banner clears itself on the
       // next state transition (turn finishes) so it doesn't pile up if
       // several back-to-back rejections arrive.
+      //
+      // Cross-tab filter: only show the banner on the originating tab.
+      // HTTP / bg-task rejections have `by_connection_id: null` and
+      // surface on every tab.
+      if (myConnectionId && env.by_connection_id &&
+          env.by_connection_id !== myConnectionId) {
+        break;
+      }
       promptRejectedBanner.textContent =
         `prompt #${(env.id || '').slice(0, 8)} rejected: ${env.reason || 'agent is busy'}`;
       promptRejectedBanner.classList.add('visible');
