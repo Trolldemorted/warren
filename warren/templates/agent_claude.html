@@ -293,15 +293,18 @@ function setConnected(c) {
 }
 
 function setBadge(state) {
-  if (!connected) return;
+  // Always render, even when !connected: the actor may have died while
+  // the browser WS is still open, and the badge needs to reflect that.
+  // `setConnected` separately forces "disconnected" gray when the WS
+  // itself closes; that's a distinct case from "rabbit is gone."
   const labels = {
     starting: 'starting', idle: 'idle', running: 'running',
-    ended: 'ended', dead: 'dead'
+    ended: 'ended', dead: 'offline'
   };
   stateBadge.textContent = labels[state] || state;
   stateBadge.className = 'status badge bg-' + ({
     idle: 'success', running: 'warning', starting: 'info',
-    ended: 'dark', dead: 'danger'
+    ended: 'dark', dead: 'secondary'
   }[state] || 'secondary');
 }
 

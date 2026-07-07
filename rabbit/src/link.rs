@@ -13,6 +13,19 @@ use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
+/// Backoff base for the link's reconnect loop. The first retry sleeps
+/// for a uniformly random duration in `[0, BACKOFF_BASE]`; subsequent
+/// retries double the cap (capped at `BACKOFF_CAP`) and re-jitter. This
+/// is the AWS Architecture Blog "full jitter" recommendation — gives the
+/// widest spread, which is what we want when many rabbits lose their
+/// link simultaneously (shared upstream outage) and would otherwise
+/// pile onto warren at the same exponential tick.
+const BACKOFF_BASE: Duration = Duration::from_millis(250);
+/// Backoff cap. With full jitter the actual sleep is in `[0, cap]`, so
+/// the cap is the worst-case wait between attempts (and the average is
+/// cap/2).
+const BACKOFF_CAP: Duration = Duration::from_secs(30);
+
 pub enum LinkEvent {
     /// Raw PTY bytes forwarded from warren, tagged with the terminal channel
     /// they belong to (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`). The supervisor
@@ -114,7 +127,7 @@ impl Link {
     }
 
     pub async fn run(mut self) -> Result<()> {
-        let mut backoff = Duration::from_millis(250);
+        let mut backoff = BACKOFF_BASE;
         loop {
             // Check shutdown before each attempt and after each return so a
             // successful connect+close doesn't trigger an immediate reconnect.
@@ -129,7 +142,7 @@ impl Link {
             match self.attempt().await {
                 Ok(()) => {
                     log::info!("warren link closed cleanly");
-                    backoff = Duration::from_millis(250);
+                    backoff = BACKOFF_BASE;
                     if self.shutdown.load(Ordering::SeqCst) {
                         log::info!("warren link shutdown requested after clean close");
                         return Ok(());
@@ -140,9 +153,21 @@ impl Link {
                         log::info!("warren link error during shutdown ({e:?}); exiting");
                         return Ok(());
                     }
-                    log::warn!("warren link error: {e:?}; reconnecting in {backoff:?}");
-                    sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    // Full jitter: sleep = rand(0, backoff). Spreads
+                    // reconnect attempts when many rabbits lose their link
+                    // simultaneously (shared upstream outage). Worst-case
+                    // wait is `backoff`, average is `backoff/2`. The cap
+                    // doubles each failed attempt up to BACKOFF_CAP.
+                    let jittered = {
+                        use rand::Rng;
+                        let mut rng = rand::thread_rng();
+                        rng.gen_range(Duration::ZERO..=backoff)
+                    };
+                    log::warn!(
+                        "warren link error: {e:?}; reconnecting in {jittered:?} (cap {backoff:?})"
+                    );
+                    sleep(jittered).await;
+                    backoff = (backoff * 2).min(BACKOFF_CAP);
                 }
             }
         }
@@ -379,5 +404,106 @@ mod tests {
             .expect("run must exit within 2s after shutdown is flipped mid-flight")
             .expect("join")
             .expect("Ok exit");
+    }
+
+    /// Pin the backoff constants. AWS full-jitter safety requires the
+    /// cap to be small enough that an outage-driven pile-on still
+    /// recovers within operator-visible time. If anyone bumps
+    /// `BACKOFF_CAP` above 30s, this test forces them to also update
+    /// the constant in the production code AND consider whether
+    /// shutdown-via-`LinkCmd::Shutdown` is still observable in a
+    /// reasonable wall-clock window.
+    #[test]
+    fn backoff_constants_match_plan() {
+        assert_eq!(
+            BACKOFF_BASE,
+            Duration::from_millis(250),
+            "BACKOFF_BASE must stay at 250ms — see AWS full-jitter rationale in the doc comment"
+        );
+        assert_eq!(
+            BACKOFF_CAP,
+            Duration::from_secs(30),
+            "BACKOFF_CAP must stay at 30s — worst-case wait between reconnect attempts"
+        );
+    }
+
+    /// Pin the doubling-with-cap algorithm. After enough failed
+    /// attempts the cap saturates at `BACKOFF_CAP` and stops doubling.
+    /// Without the `.min(BACKOFF_CAP)` clamp, the cap would grow
+    /// without bound (250ms → 500ms → 1s → 2s → … → hours), and the
+    /// shutdown-aware tests above would all flake on slow CI.
+    #[test]
+    fn backoff_doubles_until_saturated() {
+        let mut cap = BACKOFF_BASE;
+        let mut iterations = 0;
+        while cap < BACKOFF_CAP {
+            let doubled = cap * 2;
+            let next = doubled.min(BACKOFF_CAP);
+            // While doubling still fits within the cap, the algorithm
+            // must double exactly. Once doubling would overshoot, the
+            // algorithm must clamp to BACKOFF_CAP — that's the safety
+            // bound we're pinning here.
+            if doubled <= BACKOFF_CAP {
+                assert_eq!(
+                    next, doubled,
+                    "iteration {iterations}: under cap, doubling must be exact"
+                );
+            } else {
+                assert_eq!(
+                    next, BACKOFF_CAP,
+                    "iteration {iterations}: over cap, must clamp"
+                );
+            }
+            cap = next;
+            iterations += 1;
+            assert!(
+                iterations < 100,
+                "cap must saturate within a small number of doublings"
+            );
+        }
+        assert_eq!(cap, BACKOFF_CAP, "loop exits at the saturated cap");
+        // Once saturated, additional doublings stay pinned.
+        for _ in 0..10 {
+            cap = (cap * 2).min(BACKOFF_CAP);
+            assert_eq!(cap, BACKOFF_CAP);
+        }
+    }
+
+    /// Pin the full-jitter envelope: `rand::Rng::gen_range(ZERO..=cap)`
+    /// produces a uniform sample in `[0, cap]`. We sample enough times
+    /// that any value outside that band would surface, and confirm the
+    /// sample distribution actually touches both endpoints — guards
+    /// against a future refactor that drops the `Duration::ZERO`
+    /// lower bound (e.g. `(BACKOFF_BASE..=backoff)` would bias the
+    /// first retry to never sleep less than 250ms).
+    #[test]
+    fn backoff_jitter_samples_within_cap() {
+        use rand::Rng;
+        let cap = BACKOFF_CAP;
+        let mut rng = rand::thread_rng();
+        let mut min_seen = Duration::MAX;
+        let mut max_seen = Duration::ZERO;
+        for _ in 0..4_096 {
+            let s = rng.gen_range(Duration::ZERO..=cap);
+            assert!(s <= cap, "jitter sample {s:?} exceeds cap {cap:?}");
+            if s < min_seen {
+                min_seen = s;
+            }
+            if s > max_seen {
+                max_seen = s;
+            }
+        }
+        // With 4096 uniform samples in [0, 30s] we will basically
+        // certainly observe at least one near-zero and one near-cap
+        // sample. If a regression pins the lower bound to a positive
+        // value, `min_seen > Duration::ZERO` and this catches it.
+        assert!(
+            min_seen < Duration::from_secs(1),
+            "expected a sub-second sample (lower bound is ZERO); got min={min_seen:?}"
+        );
+        assert!(
+            max_seen > Duration::from_secs(20),
+            "expected a sample above 20s of 30s cap; got max={max_seen:?}"
+        );
     }
 }

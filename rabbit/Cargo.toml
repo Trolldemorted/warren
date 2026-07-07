@@ -55,6 +55,7 @@ tokio-stream.workspace = true
 reqwest.workspace = true
 avt.workspace = true
 async-stream.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

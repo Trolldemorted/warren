@@ -3,7 +3,8 @@ use crate::server::handle::AgentStateSnapshot;
 use crate::server::transport::{TransportMsg, WsTransport};
 use crate::server::SessionStore;
 use crate::wire::{
-    Envelope, EnvelopeBody, HelloDown, TermFrame, TermSize, UsageSnapshot, PROTOCOL_VERSION,
+    AgentState, Envelope, EnvelopeBody, HelloDown, TermFrame, TermSize, UsageSnapshot,
+    PROTOCOL_VERSION,
 };
 use anyhow::Result;
 use bytes::Bytes;
@@ -191,11 +192,26 @@ async fn run_inner<T: WsTransport>(
     let mut last_ack_at: Instant = Instant::now();
     const ACK_BATCH: usize = 16;
     const ACK_INTERVAL: Duration = Duration::from_secs(2);
+    // §Connection-lost surfacing: server-initiated Ping. axum/tungstenite
+    // does NOT ship a default keepalive, so without this arm the rabbit
+    // WS dies silently at the first intermediary idle timeout (a NAT or
+    // load balancer can drop the flow without sending FIN/RST). An empty
+    // Ping is enough — the protocol allows arbitrary application data
+    // and the peer only needs the frame header to refresh the proxy's
+    // activity timer. Mirrors `BROWSER_WS_PING_INTERVAL` in
+    // `ws_browser.rs` so both surfaces drive heartbeats at the same
+    // cadence.
+    const RABBIT_WS_PING_INTERVAL: Duration = Duration::from_secs(20);
     let mut ack_ticker = tokio::time::interval(ACK_INTERVAL);
     ack_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // First tick fires immediately; we'd rather not ack-empty on tick 0
     // unless there's actually something to ack — check inside the loop.
     ack_ticker.tick().await;
+    let mut ping_ticker = tokio::time::interval(RABBIT_WS_PING_INTERVAL);
+    ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Drop the immediate first tick — see ack_ticker above for the
+    // same reasoning.
+    ping_ticker.tick().await;
     // Send the initial ack for everything already in the DB. seq - 1 here
     // is the highest seq the hello was persisted at (it was incremented
     // right after the persist above).
@@ -338,8 +354,37 @@ async fn run_inner<T: WsTransport>(
                     last_ack_at = Instant::now();
                 }
             }
+            _ = ping_ticker.tick() => {
+                // Server-initiated heartbeat — see RABBIT_WS_PING_INTERVAL
+                // above. If the send fails the rabbit WS is gone; break
+                // out so the actor publishes the offline state and the
+                // link task can reconnect with jittered backoff.
+                if sink.send(TransportMsg::Ping(Vec::new())).await.is_err() {
+                    log::debug!("rabbit ws ping send failed; breaking actor loop");
+                    break;
+                }
+            }
         }
     }
+
+    // §Connection-lost surfacing: the rabbit WS died (stream EOF, recv
+    // error, Close frame, ping send failure, or supervisor shutdown).
+    // Publish `AgentState::Dead` so subscribers (browser WS, SSE
+    // handlers, UI badge) flip to the offline affordance immediately.
+    // On the next reconnect the new actor reads a fresh Hello and
+    // overwrites this state with whatever the new Hello carries — so
+    // the offline window is bounded by the reconnect (with jittered
+    // backoff, see rabbit/src/link.rs).
+    handle.update_state(AgentStateSnapshot {
+        state: AgentState::Dead,
+        session_id: None,
+        claude_version: None,
+        last_usage: UsageSnapshot {
+            source: "transcript".to_string(),
+            ..Default::default()
+        },
+        term_size: None,
+    });
 }
 
 async fn send_ack<T: WsTransport>(
@@ -664,6 +709,218 @@ mod tests {
 
     use super::*;
     use crate::server::handle::AgentHandle;
+    use crate::server::transport::CloseReason;
+    use crate::server::{AgentEventRecord, SessionStore, StoreError};
+    use crate::wire::HelloUp;
+    use futures_util::{Sink, Stream};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    /// Minimal `SessionStore` for actor-level tests. Returns
+    /// `next_event_seq = 1` so the first event persists at seq=1, and
+    /// accepts every insert without trying to enforce uniqueness. The
+    /// actor treats `Duplicate` as "already persisted" via `.ok()` and
+    /// swallows other errors into log lines, so the test only needs the
+    /// success path.
+    struct StubStore;
+
+    #[async_trait::async_trait]
+    impl SessionStore for StubStore {
+        async fn next_event_seq(&self, _agent_id: Uuid) -> Result<i64, StoreError> {
+            Ok(1)
+        }
+        async fn insert_event(
+            &self,
+            _agent_id: Uuid,
+            _seq: i64,
+            _kind: &str,
+            _payload_json: &str,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn insert_event_value(
+            &self,
+            _agent_id: Uuid,
+            _seq: i64,
+            _kind: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn list_events_since(
+            &self,
+            _agent_id: Uuid,
+            _since: i64,
+            _limit: u64,
+        ) -> Result<Vec<AgentEventRecord>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// `WsTransport` backed by an `mpsc` channel so the test can drive
+    /// `run_inner` deterministically. Mirrors the in-module mock in
+    /// `transport::tests` but is local here because the actor's test
+    /// mod doesn't (and shouldn't) reach across module boundaries for
+    /// test fixtures.
+    struct MockWsTransport {
+        inbound: tokio::sync::mpsc::UnboundedReceiver<TransportMsg>,
+        outbound: Arc<Mutex<Vec<TransportMsg>>>,
+    }
+
+    impl Stream for MockWsTransport {
+        type Item = std::io::Result<TransportMsg>;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            std::pin::Pin::new(&mut self.inbound)
+                .poll_recv(cx)
+                .map(|opt| opt.map(Ok))
+        }
+    }
+
+    impl Sink<TransportMsg> for MockWsTransport {
+        type Error = std::io::Error;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn start_send(
+            self: std::pin::Pin<&mut Self>,
+            item: TransportMsg,
+        ) -> Result<(), Self::Error> {
+            self.outbound.lock().unwrap().push(item);
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl WsTransport for MockWsTransport {
+        fn close_reason(&self) -> Option<CloseReason> {
+            None
+        }
+    }
+
+    /// Drives `run_inner` through a complete `Hello → Close` cycle and
+    /// asserts the post-loop offline broadcast lands on a subscribed
+    /// `meta_rx` as `State { state: AgentState::Dead, .. }`. This is
+    /// the connection-lost surfacing behavior added in the recent
+    /// fix: before it, `run_inner` fell off the end of the function
+    /// with no broadcast and the UI kept showing whatever state the
+    /// last `Hello` carried (a stale green badge for hours).
+    #[tokio::test]
+    async fn run_inner_broadcasts_dead_state_on_socket_close() {
+        let agent_id = Uuid::new_v4();
+        let handle = AgentHandle::new(agent_id);
+        // Subscribe BEFORE the actor publishes, so we don't race
+        // broadcast's laggy-receiver semantics (subscribers attached
+        // after `send` miss the event).
+        let mut meta_rx = handle.subscribe_meta();
+
+        // The Hello envelope the actor expects on the first inbound
+        // text frame. `read_hello` parses this and the actor uses
+        // `hello.state` to seed the initial `update_state` broadcast.
+        let hello = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 1,
+            body: EnvelopeBody::Hello(HelloUp {
+                agent_id,
+                protocol_v: PROTOCOL_VERSION,
+                claude_version: "test-1.0".into(),
+                session_id: None,
+                state: AgentState::Idle,
+                term_size: TermSize { cols: 80, rows: 24 },
+            }),
+        };
+        let hello_json = serde_json::to_string(&hello).expect("serialize hello");
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TransportMsg>();
+        tx.send(TransportMsg::Text(hello_json))
+            .expect("preload hello");
+
+        let transport = MockWsTransport {
+            inbound: rx,
+            outbound: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let store: Arc<dyn SessionStore> = Arc::new(StubStore);
+        let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+
+        // Spawn `run_inner` and then drive the WS to a clean Close.
+        // `cmd_tx` is dropped immediately so the cmd_rx arm returns
+        // `None` too — both arms racing to break is fine; whichever
+        // fires first drops us out of the loop.
+        let join = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                run_inner(store, handle, agent_id, transport, cmd_rx).await;
+            }
+        });
+        drop(_cmd_tx);
+
+        // Wait for the initial Idle broadcast — proves `run_inner`
+        // reached the loop's select! and is alive.
+        let initial = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match meta_rx.recv().await {
+                    Ok(EnvelopeBody::State(s)) if s.state == AgentState::Idle => return s,
+                    Ok(_) => continue,
+                    Err(e) => panic!("meta channel closed unexpectedly: {e:?}"),
+                }
+            }
+        })
+        .await
+        .expect("initial Idle state within 2s");
+        assert_eq!(initial.state, AgentState::Idle);
+
+        // Drive the actor's `TransportMsg::Close` arm — main loop
+        // breaks, post-loop broadcast publishes State{Dead}.
+        tx.send(TransportMsg::Close(None))
+            .expect("send close to inbound");
+
+        // Drain meta_rx until we see the Dead state. Anything else
+        // (a trailing Idle from the initial subscribe, an Ack, etc.)
+        // is fine; we only assert Dead was published.
+        let offline = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match meta_rx.recv().await {
+                    Ok(EnvelopeBody::State(s)) if s.state == AgentState::Dead => return s,
+                    Ok(_) => continue,
+                    Err(e) => panic!("meta channel closed unexpectedly: {e:?}"),
+                }
+            }
+        })
+        .await
+        .expect("Dead state within 2s of Close");
+        assert_eq!(offline.state, AgentState::Dead);
+        assert!(
+            offline.session_id.is_none(),
+            "Dead broadcast clears session_id"
+        );
+        assert_eq!(
+            offline.reason, None,
+            "Dead broadcast carries no disconnect reason (warren cannot distinguish dead from backoff)"
+        );
+
+        // `run_inner` must return cleanly after the broadcast.
+        tokio::time::timeout(Duration::from_secs(2), join)
+            .await
+            .expect("run_inner joins within 2s")
+            .expect("join");
+    }
 
     #[tokio::test]
     async fn claim_leader_broadcasts_leader_changed_to_subscribers() {

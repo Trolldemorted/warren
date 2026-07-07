@@ -1953,6 +1953,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "rabbit-lib",
+ "rand 0.8.6",
  "reqwest",
  "rustls",
  "serde",
