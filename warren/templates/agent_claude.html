@@ -342,8 +342,13 @@ term.onData(data => {
   // operator to click Claim before typing. The server's `ClaimLeader`
   // overwrites the prior leader; `setLeaderUi` flips `isLeader` once
   // the `LeaderChanged` echo arrives.
+  //
+  // We do NOT gate the keystroke on `isLeader` here. The flag flips
+  // asynchronously on the `LeaderChanged` echo, so a synchronous check
+  // would drop the very first character the user types. The server
+  // is the authoritative gate; if a stale leader stole our claim
+  // it'll bounce the bytes back as an `input_rejected` envelope.
   ensureLeader();
-  if (!isLeader) return;
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
@@ -439,6 +444,18 @@ function applyMeta(env) {
       promptRejectedBanner.textContent =
         `prompt #${(env.id || '').slice(0, 8)} rejected: ${env.reason || 'agent is busy'}`;
       promptRejectedBanner.classList.add('visible');
+      break;
+    case 'input_rejected':
+      // §A.6 leader gate echo: when the actor drops a `SendKeys` from
+      // a non-leader connection it publishes this envelope so the user
+      // sees feedback instead of silent character loss. Cross-tab filter
+      // identical to `prompt_rejected` — only the originating tab shows
+      // the toast.
+      if (myConnectionId && env.by_connection_id &&
+          env.by_connection_id !== myConnectionId) {
+        break;
+      }
+      showActionToast(env.reason || 'input rejected', 'error');
       break;
     case 'screen_snapshot':
       // §A.7 / seq-numbered snapshot protocol — two-step apply:

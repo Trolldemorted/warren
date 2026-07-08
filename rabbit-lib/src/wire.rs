@@ -155,6 +155,20 @@ pub enum EnvelopeBody {
         cols: u16,
         rows: u16,
     },
+    /// Server-initiated rejection of an input envelope (`SendKeys`,
+    /// `Resize`) from a non-leader. Carries a human-readable `reason`
+    /// so the browser can surface a toast/banner without a separate
+    /// round-trip. Currently only fired for `SendKeys` drops; resize
+    /// drops stay silent (resizes are throttled by the rAF loop and a
+    /// non-leader's are spammy).
+    InputRejected {
+        reason: String,
+        /// Originating connection id so the browser can match its own
+        /// rejections and ignore others'. `None` is reserved for
+        /// non-browser producers (none today; placeholder for future).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_connection_id: Option<Uuid>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

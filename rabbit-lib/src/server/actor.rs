@@ -609,13 +609,21 @@ async fn dispatch<T: WsTransport>(
             connection_id,
         } => {
             // Defense-in-depth for the JS-side `isLeader` gate:
-            // a hostile client could still send binary frames.
+            // a hostile client could still send binary frames. Surface
+            // the drop to the originating connection via an
+            // `InputRejected` envelope so the browser can render a
+            // banner; without it, keystrokes vanish silently and the
+            // user has no idea why their input is being ignored.
             if let Some(cid) = connection_id {
                 if !handle.is_leader(cid) {
                     log::debug!(
                         "dropping non-leader SendKeys (chan={chan}, {} bytes, conn={cid})",
                         data.len()
                     );
+                    handle.publish_meta(EnvelopeBody::InputRejected {
+                        reason: "another tab holds the keyboard".into(),
+                        by_connection_id: Some(cid),
+                    });
                     return Ok(());
                 }
             }
@@ -768,6 +776,7 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::ClaimLeader { .. } => "claim_leader",
         EnvelopeBody::ReleaseLeader => "release_leader",
         EnvelopeBody::LeaderChanged { .. } => "leader_changed",
+        EnvelopeBody::InputRejected { .. } => "input_rejected",
     }
 }
 

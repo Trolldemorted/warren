@@ -15,7 +15,7 @@ portable-pty = "0.8"
 tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 notify = "6"
-futures-util = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
 parking_lot = "0.12"
 tokio-stream = "0.1"
 sea-orm = { version = "1.1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "chrono", "uuid"] }

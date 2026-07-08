@@ -369,10 +369,12 @@ async fn forward_browser_message(
         EnvelopeBody::ReleaseLeader => {
             send_cmd(handle, Command::ReleaseLeader { connection_id }).await;
         }
-        // ConnectionAssigned / LeaderChanged are output frames flowing
-        // server→browser; if a hostile client sends one back we silently
-        // ignore (no side-effects).
-        EnvelopeBody::ConnectionAssigned { .. } | EnvelopeBody::LeaderChanged { .. } => {}
+        // ConnectionAssigned / LeaderChanged / InputRejected are output
+        // frames flowing server→browser; if a hostile client sends one
+        // back we silently ignore (no side-effects).
+        EnvelopeBody::ConnectionAssigned { .. }
+        | EnvelopeBody::LeaderChanged { .. }
+        | EnvelopeBody::InputRejected { .. } => {}
         _ => {}
     }
     Ok(())
