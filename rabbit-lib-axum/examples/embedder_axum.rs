@@ -30,6 +30,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         auth,
         log_sink,
+        tui_size: None,
     });
 
     // The router takes `Arc<ServerState>` as its declared state. We

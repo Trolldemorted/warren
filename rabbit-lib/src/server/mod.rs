@@ -506,6 +506,11 @@ pub struct ServerState {
     pub store: Arc<dyn SessionStore>,
     pub auth: Arc<dyn AuthBackend>,
     pub log_sink: Arc<dyn LogSink>,
+    /// §Simplify TUI sizing: the static grid size warren advertises to
+    /// each rabbit on connect. `None` falls back to (120, 40) at the
+    /// actor. Embedders that want a different grid set this; most leave
+    /// it `None`.
+    pub tui_size: Option<(u16, u16)>,
 }
 
 #[doc(hidden)]

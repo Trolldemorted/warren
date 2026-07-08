@@ -439,6 +439,7 @@ mod tests {
             store: store.clone(),
             auth,
             log_sink,
+            tui_size: None,
         });
         (state, store)
     }

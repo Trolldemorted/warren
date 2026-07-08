@@ -923,6 +923,8 @@ async fn agent_claude_page(
                 flash: None,
                 agent,
                 connected,
+                tui_cols: state.config.tui_cols,
+                tui_rows: state.config.tui_rows,
             })
         }
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
@@ -946,6 +948,8 @@ async fn agent_shell_page(
                 flash: None,
                 agent,
                 connected,
+                tui_cols: state.config.tui_cols,
+                tui_rows: state.config.tui_rows,
             })
         }
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),

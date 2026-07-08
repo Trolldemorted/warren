@@ -66,13 +66,12 @@ pub enum Command {
     /// Raw bytes typed into a terminal pane, tagged with the channel they
     /// belong to (`TERM_CHAN_CLAUDE` for the claude pane, `TERM_CHAN_SHELL`
     /// for the `/shell` pane). The actor prepends `chan` on the wire so rabbit
-    /// routes them to the right PTY.
+    /// routes them to the right PTY. Not gated on per-tab leadership —
+    /// every browser can type, and the PTY writer actor serializes
+    /// concurrent bytes at the kernel FIFO.
     SendKeys {
         chan: u8,
         data: Bytes,
-        /// `Some(id)` triggers the leader-gate check on dispatch;
-        /// `None` skips it.
-        connection_id: Option<Uuid>,
     },
     /// §D Milestone 5 (Phase B): ask rabbit for a current `ScreenSnapshot`
     /// of the given channel. Sent by the browser WS right after flushing
@@ -80,40 +79,6 @@ pub enum Command {
     /// envelope that the browser applies verbatim.
     SnapshotRequest {
         chan: u8,
-    },
-    // §A.6 leader-based resize ------------------------------------------
-    /// Browser tab asks to claim leadership for `connection_id` at
-    /// `(cols, rows)`. Claims always succeed (transfers from a prior
-    /// leader if one is set). The actor broadcasts `LeaderChanged` to all
-    /// browsers and, if the claimed size differs from the current PTY size,
-    /// pushes a `Resize` envelope to rabbit.
-    ClaimLeader {
-        connection_id: Uuid,
-        cols: u16,
-        rows: u16,
-    },
-    /// Leader voluntarily releases control. No-op if a different
-    /// connection holds leadership. On success the actor broadcasts
-    /// `LeaderChanged { leader_id: None, ... }`.
-    ReleaseLeader {
-        connection_id: Uuid,
-    },
-    /// Browser tab asks to resize the kernel PTY to `(cols, rows)`. Only
-    /// forwarded to rabbit when `connection_id` matches the current leader
-    /// — non-leader resizes are dropped at the `ws_browser.rs` boundary
-    /// before they reach this command, but a defense-in-depth check is
-    /// worth keeping here too.
-    ResizeFromConnection {
-        connection_id: Uuid,
-        cols: u16,
-        rows: u16,
-    },
-    /// Browser WS closed (any reason — graceful close, network drop, or
-    /// server-side teardown). If the closing connection was the leader,
-    /// the actor clears leadership and broadcasts `LeaderChanged { None }`.
-    /// No auto-promotion: a new leader must explicitly claim.
-    ConnectionClosed {
-        connection_id: Uuid,
     },
 }
 
@@ -126,14 +91,28 @@ pub struct TurnOutcomeMsg {
     pub error: Option<String>,
 }
 
+/// §Simplify TUI sizing: `tui_cols` / `tui_rows` are the cols/rows the
+/// warren side wants the rabbit's PTY to use. Sent to rabbit in a
+/// `TuiConfig` envelope right after the hello, then cached in `handle`
+/// so future `Command::Resize` dispatches reflect the same value.
 pub async fn run(
     store: Arc<dyn SessionStore>,
     handle: AgentHandle,
     agent_id: Uuid,
     socket: impl WsTransport + 'static,
     cmd_rx: mpsc::Receiver<Command>,
+    tui_cols: u16,
+    tui_rows: u16,
 ) -> Result<()> {
-    let join = tokio::spawn(run_inner(store, handle, agent_id, socket, cmd_rx));
+    let join = tokio::spawn(run_inner(
+        store,
+        handle,
+        agent_id,
+        socket,
+        cmd_rx,
+        tui_cols,
+        tui_rows,
+    ));
     join.await.map_err(|e| anyhow::anyhow!("actor join: {e}"))?;
     Ok(())
 }
@@ -144,6 +123,8 @@ async fn run_inner<T: WsTransport>(
     agent_id: Uuid,
     socket: T,
     mut cmd_rx: mpsc::Receiver<Command>,
+    tui_cols: u16,
+    tui_rows: u16,
 ) {
     let (mut sink, mut stream) = socket.split();
 
@@ -190,13 +171,39 @@ async fn run_inner<T: WsTransport>(
             source: "transcript".to_string(),
             ..Default::default()
         },
-        // §A.6 leader-based resize: capture the boot-time PTY size from
-        // the Hello envelope. Refreshed later when a leader-driven Resize
-        // flows through; the broadcast `LeaderChanged { leader_id: None }`
-        // uses this as the (cols, rows) payload so followers always see
-        // a real grid (never 0×0).
-        term_size: Some(hello.term_size),
+        // §Simplify TUI sizing: seed the cached term_size with the
+        // warren-supplied cols/rows immediately. The rabbit link task
+        // reads `snapshot().term_size` to size the PTY before the
+        // first user-visible event, so this avoids a (0, 0) window
+        // where the PTY hasn't been told its size yet.
+        term_size: Some(TermSize {
+            cols: tui_cols,
+            rows: tui_rows,
+        }),
     });
+
+    // §Simplify TUI sizing: send the warren-supplied grid size to
+    // rabbit once, immediately after the hello. This is the single
+    // carrier for the size — rabbit no longer reads it from env.
+    // Inbound `TuiConfig` from rabbit is a no-op (the variant is
+    // server→rabbit only; if a rabbit ever sends one back, we
+    // silently ignore it the same way we do `ConnectionAssigned` /
+    // `LeaderChanged` outbound frames).
+    {
+        let env = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 0,
+            body: EnvelopeBody::TuiConfig {
+                cols: tui_cols,
+                rows: tui_rows,
+            },
+        };
+        if let Ok(s) = serde_json::to_string(&env) {
+            if sink.send(TransportMsg::Text(s)).await.is_err() {
+                log::debug!("actor: TuiConfig send failed (sink closed)");
+            }
+        }
+    }
 
     let mut pending: std::collections::VecDeque<(Uuid, oneshot::Sender<TurnOutcomeMsg>)> =
         std::collections::VecDeque::new();
@@ -603,30 +610,9 @@ async fn dispatch<T: WsTransport>(
             sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
-        Command::SendKeys {
-            chan,
-            data,
-            connection_id,
-        } => {
-            // Defense-in-depth for the JS-side `isLeader` gate:
-            // a hostile client could still send binary frames. Surface
-            // the drop to the originating connection via an
-            // `InputRejected` envelope so the browser can render a
-            // banner; without it, keystrokes vanish silently and the
-            // user has no idea why their input is being ignored.
-            if let Some(cid) = connection_id {
-                if !handle.is_leader(cid) {
-                    log::debug!(
-                        "dropping non-leader SendKeys (chan={chan}, {} bytes, conn={cid})",
-                        data.len()
-                    );
-                    handle.publish_meta(EnvelopeBody::InputRejected {
-                        reason: "another tab holds the keyboard".into(),
-                        by_connection_id: Some(cid),
-                    });
-                    return Ok(());
-                }
-            }
+        Command::SendKeys { chan, data } => {
+            // Bytes always reach the PTY — the kernel FIFO + writer actor
+            // serialize concurrent typers. No leader gate at this layer.
             let mut frame = vec![chan];
             frame.extend_from_slice(&data);
             sink.send(TransportMsg::Binary(frame)).await?;
@@ -639,109 +625,6 @@ async fn dispatch<T: WsTransport>(
             };
             sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
-        }
-        // §A.6 leader-based resize — see `handle_leader_command` for the
-        // full rationale. Each arm mutates `handle` (leader state, term_size
-        // cache) and may push a `Resize` envelope to rabbit when the
-        // claimed/dropped size differs from the current PTY size. The
-        // browser-side `LeaderChanged` broadcast fires on every state
-        // change (claim, release, disconnect) so followers can resize
-        // their xterm grids accordingly.
-        Command::ClaimLeader {
-            connection_id,
-            cols,
-            rows,
-        } => {
-            // Read the *prior* term_size *before* mutating, so the
-            // inherit-then-resize comparison is correct. After
-            // `update_state` below the snapshot would already equal the
-            // new size and the conditional below would never fire — that
-            // bug would silently swallow every leader-driven Resize.
-            let prior = handle
-                .snapshot()
-                .term_size
-                .unwrap_or(TermSize { cols: 0, rows: 0 });
-            // Claims always succeed — transfers from a prior leader if one
-            // is connected. The bool return is informational; the broadcast
-            // fires regardless.
-            let _was_prior = handle.claim_leader(connection_id, cols, rows);
-            // Refresh the cached term_size so the broadcast carries the
-            // claimed size (the snapshot's pre-claim value would otherwise
-            // persist).
-            handle.update_state(AgentStateSnapshot {
-                term_size: Some(TermSize { cols, rows }),
-                ..AgentStateSnapshot::default()
-            });
-            handle.publish_meta(EnvelopeBody::LeaderChanged {
-                leader_id: Some(connection_id),
-                cols,
-                rows,
-            });
-            // Inherit-then-resize: if the claimed size differs from the
-            // pre-claim PTY size, push a Resize to rabbit so the kernel
-            // winsize follows the new leader. On the first claim the
-            // prior size is (0, 0) and we always push — desirable, since
-            // the PTY needs its winsize set anyway.
-            if prior.cols != cols || prior.rows != rows {
-                let env = Envelope {
-                    v: PROTOCOL_VERSION,
-                    seq: 0,
-                    body: EnvelopeBody::Resize { cols, rows },
-                };
-                sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
-                    .await?;
-            }
-        }
-        Command::ReleaseLeader { connection_id } => {
-            if handle.release_leader(connection_id) {
-                let cur = handle
-                    .snapshot()
-                    .term_size
-                    .unwrap_or(TermSize { cols: 0, rows: 0 });
-                handle.publish_meta(EnvelopeBody::LeaderChanged {
-                    leader_id: None,
-                    cols: cur.cols,
-                    rows: cur.rows,
-                });
-            }
-        }
-        Command::ResizeFromConnection {
-            connection_id,
-            cols,
-            rows,
-        } => {
-            // Defense in depth — non-leader resizes should already be
-            // dropped at the ws_browser.rs boundary.
-            if !handle.is_leader(connection_id) {
-                log::debug!("actor dropped ResizeFromConnection from non-leader {connection_id}");
-                return Ok(());
-            }
-            // Refresh the cached size and forward to rabbit (no broadcast
-            // — the leader's own browser already knows its own size).
-            handle.update_state(AgentStateSnapshot {
-                term_size: Some(TermSize { cols, rows }),
-                ..AgentStateSnapshot::default()
-            });
-            let env = Envelope {
-                v: PROTOCOL_VERSION,
-                seq: 0,
-                body: EnvelopeBody::Resize { cols, rows },
-            };
-            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
-                .await?;
-        }
-        Command::ConnectionClosed { connection_id } => {
-            if handle.clear_leader_if(connection_id) {
-                let cur = handle
-                    .snapshot()
-                    .term_size
-                    .unwrap_or(TermSize { cols: 0, rows: 0 });
-                handle.publish_meta(EnvelopeBody::LeaderChanged {
-                    leader_id: None,
-                    cols: cur.cols,
-                    rows: cur.rows,
-                });
-            }
         }
     }
     Ok(())
@@ -772,11 +655,7 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::PromptRejected { .. } => "prompt_rejected",
         EnvelopeBody::ScreenSnapshot { .. } => "screen_snapshot",
         EnvelopeBody::SnapshotRequest { .. } => "snapshot_request",
-        EnvelopeBody::ConnectionAssigned { .. } => "connection_assigned",
-        EnvelopeBody::ClaimLeader { .. } => "claim_leader",
-        EnvelopeBody::ReleaseLeader => "release_leader",
-        EnvelopeBody::LeaderChanged { .. } => "leader_changed",
-        EnvelopeBody::InputRejected { .. } => "input_rejected",
+        EnvelopeBody::TuiConfig { .. } => "tui_config",
     }
 }
 
@@ -807,23 +686,15 @@ async fn persist_event(
 
 #[cfg(test)]
 mod tests {
-    //! §A.6 leader-based resize: actor-level dispatch tests.
-    //!
     //! The `dispatch` function takes a generic
     //! `SplitSink<T: WsTransport, TransportMsg>`. End-to-end tests
     //! that exercise dispatch against a fake transport live in
     //! `transport::tests` (the `dyn_ws_transport_round_trips_every_variant`
-    //! and `split_works_on_dyn_ws_transport` cases); the leader-state
-    //! side-effects (claim/release/clear, the `LeaderChanged`
-    //! broadcast) are fully covered here.
+    //! and `split_works_on_dyn_ws_transport` cases).
     //!
-    //! The leader-state side-effects (claim/release/clear, the
-    //! `LeaderChanged` broadcast) are fully covered by `handle.rs::tests`
-    //! and the meta-broadcast assertions below. The remaining gap —
-    //! asserting that a `Resize` envelope is sent to rabbit only when the
-    //! claimed size differs — is pinned down at the handle level
-    //! (`is_leader`, `update_leader_size`) and at the ws_browser level
-    //! (the `Resize` drop-rule tests).
+    //! The remaining tests here pin the actor's loop-level invariants
+    //! (offline-broadcast on socket close, post-hello `TuiConfig` send,
+    //! the per-Ack bookkeeping, etc.) against a stub transport.
 
     use super::*;
     use crate::server::handle::AgentHandle;
@@ -984,7 +855,7 @@ mod tests {
         let join = tokio::spawn({
             let handle = handle.clone();
             async move {
-                run_inner(store, handle, agent_id, transport, cmd_rx).await;
+                run_inner(store, handle, agent_id, transport, cmd_rx, 120, 40).await;
             }
         });
         drop(_cmd_tx);
@@ -1039,154 +910,5 @@ mod tests {
             .expect("run_inner joins within 2s")
             .expect("join");
     }
-
-    #[tokio::test]
-    async fn claim_leader_broadcasts_leader_changed_to_subscribers() {
-        let handle = AgentHandle::new(Uuid::nil());
-        let mut meta_rx = handle.subscribe_meta();
-        let id = Uuid::from_bytes([1; 16]);
-
-        // Mimic the dispatch arm: claim + update_state + publish_meta.
-        handle.claim_leader(id, 120, 40);
-        handle.update_state(AgentStateSnapshot {
-            term_size: Some(TermSize {
-                cols: 120,
-                rows: 40,
-            }),
-            ..AgentStateSnapshot::default()
-        });
-        handle.publish_meta(EnvelopeBody::LeaderChanged {
-            leader_id: Some(id),
-            cols: 120,
-            rows: 40,
-        });
-
-        let mut saw_changed = false;
-        for _ in 0..8 {
-            match meta_rx.recv().await {
-                Ok(EnvelopeBody::LeaderChanged {
-                    leader_id,
-                    cols,
-                    rows,
-                }) => {
-                    assert_eq!(leader_id, Some(id));
-                    assert_eq!(cols, 120);
-                    assert_eq!(rows, 40);
-                    saw_changed = true;
-                    break;
-                }
-                Ok(_) => continue,
-                Err(_) => break,
-            }
-        }
-        assert!(saw_changed, "LeaderChanged must have been broadcast");
-    }
-
-    #[tokio::test]
-    async fn release_leader_broadcasts_with_none_id() {
-        let handle = AgentHandle::new(Uuid::nil());
-        let id = Uuid::from_bytes([2; 16]);
-        handle.claim_leader(id, 100, 30);
-        handle.update_state(AgentStateSnapshot {
-            term_size: Some(TermSize {
-                cols: 100,
-                rows: 30,
-            }),
-            ..AgentStateSnapshot::default()
-        });
-        let mut meta_rx = handle.subscribe_meta();
-        // Clear the prior broadcasts so we can observe the release cleanly.
-        while meta_rx.try_recv().is_ok() {}
-
-        // Mimic the dispatch arm: release + publish_meta.
-        assert!(handle.release_leader(id));
-        let cur = handle
-            .snapshot()
-            .term_size
-            .unwrap_or(TermSize { cols: 0, rows: 0 });
-        handle.publish_meta(EnvelopeBody::LeaderChanged {
-            leader_id: None,
-            cols: cur.cols,
-            rows: cur.rows,
-        });
-
-        let got = meta_rx.recv().await.unwrap();
-        match got {
-            EnvelopeBody::LeaderChanged {
-                leader_id,
-                cols,
-                rows,
-            } => {
-                assert_eq!(leader_id, None);
-                assert_eq!(cols, 100);
-                assert_eq!(rows, 30);
-            }
-            other => panic!("expected LeaderChanged, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn connection_closed_clears_leader_when_caller_was_leader() {
-        let handle = AgentHandle::new(Uuid::nil());
-        let id = Uuid::from_bytes([3; 16]);
-        handle.claim_leader(id, 100, 30);
-        assert_eq!(handle.current_leader(), Some((id, 100, 30)));
-        // Mimic the dispatch arm for ConnectionClosed.
-        let cleared = handle.clear_leader_if(id);
-        assert!(cleared, "ConnectionClosed from leader must clear");
-        assert_eq!(handle.current_leader(), None);
-    }
-
-    #[tokio::test]
-    async fn connection_closed_no_op_when_caller_was_not_leader() {
-        let handle = AgentHandle::new(Uuid::nil());
-        let leader_id = Uuid::from_bytes([4; 16]);
-        let other_id = Uuid::from_bytes([5; 16]);
-        handle.claim_leader(leader_id, 100, 30);
-        let cleared = handle.clear_leader_if(other_id);
-        assert!(!cleared, "non-leader's ConnectionClosed must not clear");
-        assert_eq!(handle.current_leader(), Some((leader_id, 100, 30)));
-    }
-
-    #[tokio::test]
-    async fn resize_from_non_leader_dropped_at_handle_level() {
-        // The actor's `Command::ResizeFromConnection` arm double-checks
-        // `is_leader` before forwarding to rabbit. Mirror that gate here.
-        let handle = AgentHandle::new(Uuid::nil());
-        let leader_id = Uuid::from_bytes([6; 16]);
-        let other_id = Uuid::from_bytes([7; 16]);
-        handle.claim_leader(leader_id, 120, 40);
-        assert!(handle.is_leader(leader_id));
-        assert!(
-            !handle.is_leader(other_id),
-            "non-leader's resize would be dropped at the dispatch boundary"
-        );
-    }
-
-    #[tokio::test]
-    async fn send_keys_leader_gate_passes_for_leader() {
-        let handle = AgentHandle::new(Uuid::nil());
-        let leader_id = Uuid::from_bytes([10; 16]);
-        handle.claim_leader(leader_id, 80, 24);
-        let cid = leader_id;
-        assert!(handle.is_leader(cid), "leader's SendKeys must reach rabbit");
-    }
-
-    #[tokio::test]
-    async fn send_keys_leader_gate_drops_for_non_leader() {
-        let handle = AgentHandle::new(Uuid::nil());
-        let leader_id = Uuid::from_bytes([11; 16]);
-        let follower_id = Uuid::from_bytes([12; 16]);
-        handle.claim_leader(leader_id, 80, 24);
-        assert!(
-            !handle.is_leader(follower_id),
-            "follower's SendKeys must be dropped at the dispatch boundary"
-        );
-    }
-
-    #[tokio::test]
-    async fn send_keys_leader_gate_bypassed_when_connection_id_is_none() {
-        let handle = AgentHandle::new(Uuid::nil());
-        assert_eq!(handle.current_leader(), None);
-    }
 }
+

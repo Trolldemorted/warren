@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const TERM_CHAN_CLAUDE: u8 = 0x01;
@@ -129,45 +128,15 @@ pub enum EnvelopeBody {
     SnapshotRequest {
         chan: u8,
     },
-    /// §A.6 leader-based resize: server sends each browser a unique
-    /// `connection_id` on WS open so the browser can identify itself in
-    /// subsequent `ClaimLeader` / `ReleaseLeader` / `Resize` envelopes.
-    /// Per-connection (sent directly on the WS, not broadcast).
-    ConnectionAssigned {
-        connection_id: Uuid,
-    },
-    /// §A.6 leader-based resize: browser requests leadership for its
-    /// connection_id. Server replies via `LeaderChanged`. The browser
-    /// reports its current xterm grid so the server can adopt that size
-    /// for the kernel PTY (or skip if it matches the current size).
-    ClaimLeader {
+    /// §Simplify TUI sizing: warren is the source of truth for the
+    /// terminal grid. After the rabbit's hello, warren sends this once
+    /// with the cols/rows it wants the rabbit's PTY to use. The same
+    /// value is what the xterm.js template renders, so the kernel
+    /// winsize and the browser grid always match. Inbound `TuiConfig`
+    /// on the warren side is a no-op (server→rabbit only).
+    TuiConfig {
         cols: u16,
         rows: u16,
-    },
-    /// §A.6 leader-based resize: leader releases control voluntarily.
-    /// Other browsers receive `LeaderChanged { leader_id: None }`.
-    ReleaseLeader,
-    /// §A.6 leader-based resize: broadcast to every connected browser on
-    /// every leader transition (initial claim, transfer, release, leader
-    /// disconnect). `leader_id = None` means "no leader right now."
-    LeaderChanged {
-        leader_id: Option<Uuid>,
-        cols: u16,
-        rows: u16,
-    },
-    /// Server-initiated rejection of an input envelope (`SendKeys`,
-    /// `Resize`) from a non-leader. Carries a human-readable `reason`
-    /// so the browser can surface a toast/banner without a separate
-    /// round-trip. Currently only fired for `SendKeys` drops; resize
-    /// drops stay silent (resizes are throttled by the rAF loop and a
-    /// non-leader's are spammy).
-    InputRejected {
-        reason: String,
-        /// Originating connection id so the browser can match its own
-        /// rejections and ignore others'. `None` is reserved for
-        /// non-browser producers (none today; placeholder for future).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        by_connection_id: Option<Uuid>,
     },
 }
 
@@ -425,6 +394,37 @@ mod tests {
         let body: ScreenSnapshotBody = serde_json::from_value(v1_json)
             .expect("v1 envelope must deserialize under a v2 struct");
         assert_eq!(body.after_seq, 0);
+    }
+
+    /// §Simplify TUI sizing: the `TuiConfig` envelope carries the warren-
+    /// supplied grid size. The wire shape is `{"t":"tui_config","cols":
+    /// <u16>,"rows":<u16>}` — flat keys, snake_case `t` discriminator,
+    /// matching the rest of the protocol. Pin the round-trip so a future
+    /// rename (e.g. nested `{"t":"tui_config","size":{"cols":..,"rows":..}}`)
+    /// is intentional.
+    #[test]
+    fn tui_config_envelope_round_trips_through_wire_shape() {
+        let env = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 0,
+            body: EnvelopeBody::TuiConfig {
+                cols: 200,
+                rows: 50,
+            },
+        };
+        let v = serde_json::to_value(&env).expect("serialize");
+        assert_eq!(v["t"], "tui_config", "wire tag must match `tui_config`");
+        assert_eq!(v["cols"], 200);
+        assert_eq!(v["rows"], 50);
+
+        let back: Envelope = serde_json::from_value(v).expect("deserialize");
+        match back.body {
+            EnvelopeBody::TuiConfig { cols, rows } => {
+                assert_eq!(cols, 200);
+                assert_eq!(rows, 50);
+            }
+            other => panic!("expected TuiConfig, got {other:?}"),
+        }
     }
 
     #[test]

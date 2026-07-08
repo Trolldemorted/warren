@@ -85,8 +85,9 @@ async fn ws_rabbit_handler(
         let store = state.store.clone();
         let registry = state.registry.clone();
         let transport = axum_ws_transport(socket);
+        let tui_size = state.tui_size;
         if let Err(e) =
-            rabbit_lib::server::ws_rabbit::handle_session(store, registry, transport, agent_id)
+            rabbit_lib::server::ws_rabbit::handle_session(store, registry, transport, agent_id, tui_size)
                 .await
         {
             log::debug!("rabbit ws closed for agent {}: {e:?}", agent_id);

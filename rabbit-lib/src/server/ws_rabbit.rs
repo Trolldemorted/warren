@@ -12,14 +12,19 @@ use crate::server::WsTransport;
 use std::sync::Arc;
 
 /// Framework-agnostic supervisor-side session loop. The
-/// `rabbit-lib-axum` adapter calls this after wrapping an axum
-/// `WebSocket` as a `DynWsTransport`; FFI / hyper / tokio-tungstenite
+/// `rabbit-lib-axum` adapter calls this after wrapping an axum `WebSocket`
+/// as a `DynWsTransport`; FFI / hyper / tokio-tungstenite
 /// embedders can call it directly.
+///
+/// `tui_size` is the static grid size advertised to the rabbit after
+/// the hello. `None` falls back to (120, 40) — the same default warren
+/// uses when `TUI_WIDTH` / `TUI_HEIGHT` env vars are unset.
 pub async fn handle_session(
     store: Arc<dyn SessionStore>,
     registry: AgentRegistry,
     transport: impl WsTransport + 'static,
     agent_id: uuid::Uuid,
+    tui_size: Option<(u16, u16)>,
 ) -> anyhow::Result<()> {
     let initial = registry.register(agent_id);
     log::info!("rabbit ws connected: agent={}", agent_id);
@@ -30,5 +35,15 @@ pub async fn handle_session(
         entry.value_mut().install_cmd_tx(cmd_tx.clone());
     }
 
-    actor::run(store, handle_for_actor, agent_id, transport, cmd_rx).await
+    let (tui_cols, tui_rows) = tui_size.unwrap_or((120, 40));
+    actor::run(
+        store,
+        handle_for_actor,
+        agent_id,
+        transport,
+        cmd_rx,
+        tui_cols,
+        tui_rows,
+    )
+    .await
 }

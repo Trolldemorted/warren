@@ -118,7 +118,7 @@ async fn run_server() -> anyhow::Result<()> {
     let state = AppState {
         db: db.clone(),
         config: cfg.clone(),
-        live: rabbit_adapter::build_server_state(db),
+        live: rabbit_adapter::build_server_state(db, cfg.tui_cols, cfg.tui_rows),
     };
     let app = build_router(state);
 

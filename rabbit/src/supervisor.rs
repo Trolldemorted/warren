@@ -65,7 +65,7 @@ pub async fn run(config: Config) -> Result<()> {
     let claude_version = detect_claude_version(&config).await;
 
     // §A.7: the replay buffer holds per-frame triples (chan, seq, data)
-    // so each binary message sent on link reconnect preserves the seq the
+    // so each binary message sent on warren_link reconnect preserves the seq the
     // blocking PTY thread assigned at read time. The browser pins its
     // high-water-mark against `seq` (a late-arriving
     // `ScreenSnapshot::after_seq` tells it which buffered frames are
@@ -84,25 +84,27 @@ pub async fn run(config: Config) -> Result<()> {
 
     let meta_ring = Arc::new(MetaRing::new(config.meta_ring_bytes));
 
-    let link = Link::new(
+    let warren_link = Link::new(
         config.warren_url.clone(),
         config.agent_token.clone(),
         agent_id,
         claude_version.clone(),
-        TermSize {
-            cols: config.term_cols,
-            rows: config.term_rows,
-        },
         cmd_rx,
         event_tx,
         replay_snap,
         meta_ring,
         shutdown.clone(),
     );
+    // §Simplify TUI sizing: capture the initial grid once *before* the
+    // link task is spawned so the shell PTY can size itself without
+    // fighting for `&warren_link`. The link's `term_size` slot gets
+    // refreshed once warren ships the `TuiConfig` envelope, but the
+    // shell only ever spawns here — so the initial read is enough.
+    let initial_tui = warren_link.term_size();
     {
         tokio::spawn(async move {
-            if let Err(e) = link.run().await {
-                log::error!("link exited: {e:?}");
+            if let Err(e) = warren_link.run().await {
+                log::error!("warren_link exited: {e:?}");
             }
         });
     }
@@ -121,7 +123,7 @@ pub async fn run(config: Config) -> Result<()> {
             config.shell_bin,
             config.shell_args
         );
-        Some(shell::spawn(&config, cmd_tx.clone(), shutdown.clone()))
+        Some(shell::spawn(&config, &initial_tui, cmd_tx.clone(), shutdown.clone()))
     } else {
         None
     };
@@ -209,6 +211,7 @@ pub async fn run(config: Config) -> Result<()> {
                 replay_buf.clone(),
                 cmd_tx.clone(),
                 shutdown.clone(),
+                initial_tui,
             ) {
                 Ok(sess) => {
                     let OutcomeChannels {
@@ -243,9 +246,9 @@ pub async fn run(config: Config) -> Result<()> {
 
         if shutdown.load(Ordering::SeqCst) && active.is_none() {
             // Politely close the WS so warren sees the agent go away before
-            // we exit. The link also polls `shutdown` itself, so this is
+            // we exit. The warren_link also polls `shutdown` itself, so this is
             // best-effort — if the send fails (channel full / closed), the
-            // flag will still break the link's reconnect loop.
+            // flag will still break the warren_link's reconnect loop.
             crate::dispatch::send_or_warn("LinkCmd::Shutdown", &cmd_tx, LinkCmd::Shutdown).await;
         }
 
@@ -406,8 +409,8 @@ pub async fn run(config: Config) -> Result<()> {
                                 &env,
                                 active_writer.as_ref(),
                                 tx,
-                                config.term_cols,
-                                config.term_rows,
+                                initial_tui.cols,
+                                initial_tui.rows,
                             )
                             .await;
                         }
@@ -427,7 +430,7 @@ pub async fn run(config: Config) -> Result<()> {
                             // Logs every binary frame arriving on the
                             // Claude channel so we can confirm the byte
                             // (e.g. 0x7f for Backspace) reaches this
-                            // layer from the link. Compare with the
+                            // layer from the warren_link. Compare with the
                             // browser-side `?debug_typing=1` console log
                             // to pinpoint any byte mutation.
                             log::debug!(
@@ -458,7 +461,7 @@ pub async fn run(config: Config) -> Result<()> {
                             write_claude_terminal_bytes(&data, active.as_ref()).await;
                         } else {
                             // Unknown channel — be lenient and drop
-                            // (matches `link.rs`'s filter against the
+                            // (matches `warren_link.rs`'s filter against the
                             // known terminal channels).
                             log::debug!(
                                 "ignoring binary frame on unknown chan {chan} ({} bytes)",
@@ -467,7 +470,7 @@ pub async fn run(config: Config) -> Result<()> {
                         }
                     }
                     None => {
-                        log::warn!("link event channel closed");
+                        log::warn!("warren_link event channel closed");
                     }
                 }
             }
@@ -710,6 +713,7 @@ fn spawn_run_one(
     replay_buf: Arc<Mutex<VecDeque<TermFrame>>>,
     cmd_tx: mpsc::Sender<LinkCmd>,
     shutdown: Arc<AtomicBool>,
+    initial_tui: TermSize,
 ) -> Result<SpawnResult> {
     let (pty_tx, mut pty_rx) = mpsc::channel::<PtyCmd>(128);
     let (pty_evt_tx, pty_evt_rx) = mpsc::channel::<PtyEvt>(128);
@@ -728,8 +732,8 @@ fn spawn_run_one(
     let replay_cap = config.replay_bytes;
     let bin = config.claude_bin.clone();
     let workdir = config.workdir.clone();
-    let cols = config.term_cols;
-    let rows = config.term_rows;
+    let cols = initial_tui.cols;
+    let rows = initial_tui.rows;
     let replay = config.replay_bytes;
     let shutdown_for_blocking = shutdown.clone();
     let grace_period = Duration::from_millis(config.shutdown_grace_ms);

@@ -6,7 +6,7 @@ use rabbit_lib::wire::{
     TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
 };
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -25,6 +25,10 @@ const BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// the cap is the worst-case wait between attempts (and the average is
 /// cap/2).
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// Default grid if warren never sends a `TuiConfig` envelope. Matches
+/// warren's own `TUI_WIDTH` / `TUI_HEIGHT` defaults.
+const DEFAULT_TUI_COLS: u16 = 120;
+const DEFAULT_TUI_ROWS: u16 = 40;
 
 pub enum LinkEvent {
     /// Raw PTY bytes forwarded from warren, tagged with the terminal channel
@@ -66,7 +70,13 @@ pub struct Link {
     agent_id: uuid::Uuid,
     claude_version: String,
     seq: Arc<AtomicI64>,
-    term_size: TermSize,
+    /// §Simplify TUI sizing: warren advertises the grid once after the
+    /// rabbit hello via a `TuiConfig` envelope; the link stores it here
+    /// so the supervisor can read it before spawning the PTY. `None`
+    /// until the first `TuiConfig` arrives — `term_size()` blocks on
+    /// the slot with a bounded timeout, falling back to the static
+    /// default if the WS dies first.
+    term_size: Arc<Mutex<Option<TermSize>>>,
     cmd_rx: mpsc::Receiver<LinkCmd>,
     event_tx: mpsc::Sender<LinkEvent>,
     /// Called at the start of each WS attempt to fetch the latest screen
@@ -100,7 +110,6 @@ impl Link {
         agent_token: String,
         agent_id: uuid::Uuid,
         claude_version: String,
-        term_size: TermSize,
         cmd_rx: mpsc::Receiver<LinkCmd>,
         event_tx: mpsc::Sender<LinkEvent>,
         replay_snap: ReplaySnapFn,
@@ -113,7 +122,7 @@ impl Link {
             agent_id,
             claude_version,
             seq: Arc::new(AtomicI64::new(1)),
-            term_size,
+            term_size: Arc::new(Mutex::new(None)),
             cmd_rx,
             event_tx,
             replay_snap,
@@ -125,6 +134,21 @@ impl Link {
     #[allow(dead_code)]
     pub fn seq_handle(&self) -> Arc<AtomicI64> {
         self.seq.clone()
+    }
+
+    /// Returns the current grid size, falling back to (120, 40) if
+    /// warren hasn't shipped a `TuiConfig` yet. The supervisor calls
+    /// this once before spawning the PTY; if the WS is alive and the
+    /// envelope already arrived, the slot is populated and this returns
+    /// immediately. Otherwise the supervisor falls back to the default.
+    pub fn term_size(&self) -> TermSize {
+        self.term_size
+            .lock()
+            .expect("term_size poisoned")
+            .unwrap_or(TermSize {
+                cols: DEFAULT_TUI_COLS,
+                rows: DEFAULT_TUI_ROWS,
+            })
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -203,6 +227,9 @@ impl Link {
         log::info!("warren link up: {}", self.warren_url);
 
         let hello_seq = self.next_seq();
+        // §Simplify TUI sizing: the hello no longer carries a term_size
+        // — warren is the source of truth and ships a `TuiConfig`
+        // envelope back to us right after it accepts this hello.
         let hello = Envelope {
             v: PROTOCOL_VERSION,
             seq: hello_seq,
@@ -212,7 +239,7 @@ impl Link {
                 claude_version: self.claude_version.clone(),
                 session_id: None,
                 state: AgentState::Starting,
-                term_size: self.term_size,
+                term_size: self.term_size(),
             }),
         };
         let hello_json = serde_json::to_string(&hello)?;
@@ -288,6 +315,22 @@ impl Link {
                     match msg? {
                         Message::Text(t) => {
                             if let Ok(env) = serde_json::from_str::<Envelope>(&t) {
+                                // §Simplify TUI sizing: warren advertises
+                                // the grid right after the hello via this
+                                // envelope. We capture it into the slot
+                                // and forward everything else (Ack /
+                                // state / usage / etc.) through the
+                                // normal event channel. TuiConfig is a
+                                // server→rabbit frame, so we never send
+                                // it outbound — it's purely a sink.
+                                if let EnvelopeBody::TuiConfig { cols, rows } = env.body {
+                                    *self.term_size.lock().expect("term_size poisoned") =
+                                        Some(TermSize { cols, rows });
+                                    log::info!(
+                                        "warren advertised tui grid: {cols}×{rows}"
+                                    );
+                                    continue;
+                                }
                                 if let EnvelopeBody::Ack { ack_seq } = env.body {
                                     let freed = self.meta_ring.trim_through(ack_seq);
                                     if freed > 0 {
@@ -360,7 +403,6 @@ mod tests {
             "test-token".into(),
             uuid::Uuid::nil(),
             "test-1.0".into(),
-            TermSize { cols: 80, rows: 24 },
             cmd_rx,
             event_tx,
             replay_snap,
@@ -405,6 +447,35 @@ mod tests {
             .expect("run must exit within 2s after shutdown is flipped mid-flight")
             .expect("join")
             .expect("Ok exit");
+    }
+
+    /// §Simplify TUI sizing: with no `TuiConfig` ever shipped (e.g. a
+    /// server pre-dating the new envelope), `term_size()` returns the
+    /// (120, 40) default — matches warren's own `TUI_WIDTH`/`TUI_HEIGHT`
+    /// defaults so the PTY is born at the right size even if the WS
+    /// upgrade race goes the wrong way.
+    #[test]
+    fn term_size_defaults_to_120_40_before_tui_config() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<LinkCmd>(1);
+        let (event_tx, _event_rx) = mpsc::channel::<LinkEvent>(1);
+        let ring = Arc::new(MetaRing::new(262_144));
+        let replay_snap: ReplaySnapFn = Arc::new(Vec::new);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let link = Link::new(
+            "http://127.0.0.1:1".into(),
+            "t".into(),
+            uuid::Uuid::nil(),
+            "test-1.0".into(),
+            cmd_rx,
+            event_tx,
+            replay_snap,
+            ring,
+            shutdown,
+        );
+        assert_eq!(
+            link.term_size(),
+            TermSize { cols: 120, rows: 40 }
+        );
     }
 
     /// Pin the backoff constants. AWS full-jitter safety requires the

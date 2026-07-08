@@ -190,7 +190,11 @@ impl AuthBackend for WarAuthBackend {
 
 /// Sugar for the construction site in `main.rs` — keeps the call to
 /// one line and centralises the `Arc::new` dance.
-pub fn build_server_state(db: Db) -> Arc<rabbit_lib::server::ServerState> {
+pub fn build_server_state(
+    db: Db,
+    tui_cols: u16,
+    tui_rows: u16,
+) -> Arc<rabbit_lib::server::ServerState> {
     let store: Arc<dyn SessionStore> = Arc::new(SeaOrmSessionStore::new(db.clone()));
     let auth: Arc<dyn AuthBackend> = Arc::new(WarAuthBackend::new(db.clone()));
     let log_sink: Arc<dyn rabbit_lib::server::LogSink> = Arc::new(rabbit_lib::server::StdLogSink);
@@ -199,5 +203,6 @@ pub fn build_server_state(db: Db) -> Arc<rabbit_lib::server::ServerState> {
         store,
         auth,
         log_sink,
+        tui_size: Some((tui_cols, tui_rows)),
     })
 }

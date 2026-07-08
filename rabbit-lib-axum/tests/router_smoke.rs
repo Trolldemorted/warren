@@ -74,6 +74,7 @@ async fn state_endpoint_returns_200_for_unknown_agent() {
         store,
         auth,
         log_sink,
+        tui_size: None,
     });
 
     // Listen on a random port.

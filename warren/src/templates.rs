@@ -91,6 +91,8 @@ pub struct AgentClaudeTemplate {
     pub flash: Option<Flash>,
     pub agent: crate::entity::agent::Model,
     pub connected: bool,
+    pub tui_cols: u16,
+    pub tui_rows: u16,
 }
 
 #[derive(Template)]
@@ -103,6 +105,8 @@ pub struct AgentShellTemplate {
     pub flash: Option<Flash>,
     pub agent: crate::entity::agent::Model,
     pub connected: bool,
+    pub tui_cols: u16,
+    pub tui_rows: u16,
 }
 
 #[derive(Template)]

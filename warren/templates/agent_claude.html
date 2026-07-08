@@ -72,15 +72,13 @@ body.viewer-mode #term { pointer-events: none; }
 }
 body.viewer-mode #viewer-mode-banner { display: block; }
 
-/* §A.6 leader-based resize. The Claim/Release buttons and the leader
-   badge are children of `aside` (which viewer-mode CSS already hides),
-   so a viewer never sees them; the WS server also drops inbound
-   ClaimLeader/ReleaseLeader frames for viewers as a defense. */
-#leader-badge {
-  font-family: ui-monospace, monospace;
-  margin-top: .25rem;
-}
-#claim-leader-btn[hidden], #release-leader-btn[hidden] { display: none !important; }
+/* TUI grid sizing: the xterm canvas is set to a fixed `cols × rows` from
+   the template-injected TUI_WIDTH/TUI_HEIGHT. Browsers smaller than that
+   get scrollbars (overflow: auto) on `.term-wrap`; larger windows just
+   show extra empty space, since the PTY is the source of truth for the
+   grid and the kernel winsize is fixed. */
+.claude-grid .term-wrap { overflow: auto; }
+.claude-grid #term { display: block; }
 
 /* Action-button toast: bottom-right, fades in on `.visible`, auto-dismisses.
    See `showActionToast` for the JS that emits one on every action-button
@@ -159,20 +157,9 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     <button class="btn btn-outline-secondary action" data-action="compact">Compact</button>
     <button class="btn btn-outline-info action" data-action="usage_check">Usage</button>
     <button class="btn btn-outline-danger action" data-action="restart">Restart</button>
-    {# §A.6 leader-based resize. Visibility is JS-driven from
-       `ConnectionAssigned` (button show) and `LeaderChanged` (toggle).
-       Hidden until the WS assigns us an id — see `myConnectionId`. #}
-    <button id="claim-leader-btn"
-            class="btn btn-outline-primary mt-2"
-            hidden>Claim control</button>
-    <button id="release-leader-btn"
-            class="btn btn-outline-warning mt-2"
-            hidden>Release control</button>
-    <div id="leader-badge" class="badge bg-secondary mt-1">no leader</div>
   </aside>
 </div>
 <script src="/static/vendor/xterm/xterm.js"></script>
-<script src="/static/vendor/xterm/xterm-addon-fit.js"></script>
 <script>
 const agentId = "{{ agent.id }}";
 const grid = document.getElementById('claude-grid');
@@ -203,10 +190,13 @@ const promptRejectedBanner = document.getElementById('prompt-rejected-banner');
 const viewerMode = new URLSearchParams(location.search).get('viewer') === 'true';
 if (viewerMode) document.body.classList.add('viewer-mode');
 
-// Fixed size per rabbit.md §A.6 — per-client resize would require a leader
-// concept that doesn't exist yet.
-const TERM_COLS = 120;
-const TERM_ROWS = 40;
+// Static TUI grid size. Set from warren config (TUI_WIDTH/TUI_HEIGHT
+// env vars, default 120 × 40) and rendered into the template by Askama.
+// The same size is sent to rabbit over the WS as a TuiConfig envelope
+// so the PTY winsize matches what the browser renders. See §Simplify
+// TUI sizing in the plan.
+const TERM_COLS = {{ tui_cols }};
+const TERM_ROWS = {{ tui_rows }};
 
 const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
@@ -241,10 +231,7 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   // respond to clicks (acceptable — the War UI is keyboard-driven).
   mouseEvents: false,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
-const fit = new FitAddon.FitAddon();
-term.loadAddon(fit);
 term.open(document.getElementById('term'));
-fit.fit();
 term.focus();
 
 // §A.7 / seq-numbered snapshot protocol — buffer that holds live binary
@@ -330,25 +317,15 @@ function setBadge(state) {
 
 // Local keystroke forwarding: typed bytes go to the browser WS so they reach
 // claude's PTY through warren. Server-side handler strips the channel byte
-// and ships them to rabbit, which feeds the pty master.
+// and ships them to rabbit, which feeds the pty master. All admin tabs
+// can type concurrently — the PTY writer actor and kernel FIFO serialize
+// bytes so multi-tab typing just interleaves at the PTY.
 term.onData(data => {
   if (!connected || !ws) return;
   // §D read-only viewer mode: don't even *send* typed bytes to the WS.
   // The server drops them, but skipping the send saves a round trip and
   // means a misconfigured proxy can't log viewer keystrokes.
   if (viewerMode) return;
-  // Auto-claim on first keystroke from a non-leader tab. Single-tab
-  // use (the dominant case) should "just work" without forcing the
-  // operator to click Claim before typing. The server's `ClaimLeader`
-  // overwrites the prior leader; `setLeaderUi` flips `isLeader` once
-  // the `LeaderChanged` echo arrives.
-  //
-  // We do NOT gate the keystroke on `isLeader` here. The flag flips
-  // asynchronously on the `LeaderChanged` echo, so a synchronous check
-  // would drop the very first character the user types. The server
-  // is the authoritative gate; if a stale leader stole our claim
-  // it'll bounce the bytes back as an `input_rejected` envelope.
-  ensureLeader();
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
@@ -445,18 +422,6 @@ function applyMeta(env) {
         `prompt #${(env.id || '').slice(0, 8)} rejected: ${env.reason || 'agent is busy'}`;
       promptRejectedBanner.classList.add('visible');
       break;
-    case 'input_rejected':
-      // §A.6 leader gate echo: when the actor drops a `SendKeys` from
-      // a non-leader connection it publishes this envelope so the user
-      // sees feedback instead of silent character loss. Cross-tab filter
-      // identical to `prompt_rejected` — only the originating tab shows
-      // the toast.
-      if (myConnectionId && env.by_connection_id &&
-          env.by_connection_id !== myConnectionId) {
-        break;
-      }
-      showActionToast(env.reason || 'input rejected', 'error');
-      break;
     case 'screen_snapshot':
       // §A.7 / seq-numbered snapshot protocol — two-step apply:
       //   1. trim any buffered live binary frames whose seq ≤
@@ -525,21 +490,6 @@ function applyMeta(env) {
       for (const f of keep) {
         term.write(bytesToUtf8(f.data));
       }
-      break;
-    // §A.6 leader-based resize — see `connection_assigned` /
-    // `leader_changed` cases below. Server-sent on WS open and on every
-    // leader transition (initial claim, transfer, release, disconnect).
-    case 'connection_assigned':
-      myConnectionId = env.connection_id || null;
-      // Reveal the Claim button once we have an id; if a leader is
-      // already active the server's first `LeaderChanged` will hide it
-      // again via `setLeaderUi`.
-      if (myConnectionId && !viewerMode && !isLeader) {
-        claimBtn.hidden = false;
-      }
-      break;
-    case 'leader_changed':
-      setLeaderUi(env.leader_id || null, env.cols || term.cols, env.rows || term.rows);
       break;
   }
 }
@@ -708,124 +658,15 @@ function showActionToast(msg, kind = 'info') {
   }, 3500);
 }
 
-// §A.6 leader-based resize -------------------------------------------------
+// §Simplify TUI sizing ------------------------------------------------------
 //
-// `myConnectionId` arrives in the `ConnectionAssigned` envelope that the
-// server sends on WS open. Until then we have no id to compare against,
-// so the Claim button stays hidden.
-//
-// `isLeader` is set from `LeaderChanged` broadcasts. When `false`, this
-// tab is a follower: `term.resize(env.cols, env.rows)` snaps our grid to
-// the leader's grid, and `term.onResize` MUST NOT echo a Resize frame
-// back to the server (we'd be a ghost-leader). When `true`, our `term`
-// is the source of truth and the rAF-throttled `window.resize` listener
-// below forwards the new grid.
-let myConnectionId = null;
-let isLeader = false;
-const claimBtn = document.getElementById('claim-leader-btn');
-const releaseBtn = document.getElementById('release-leader-btn');
-const leaderBadge = document.getElementById('leader-badge');
-
-function setLeaderUi(leaderId, cols, rows) {
-  isLeader = (leaderId !== null && leaderId === myConnectionId);
-  if (isLeader) {
-    claimBtn.hidden = true;
-    releaseBtn.hidden = false;
-    leaderBadge.textContent = `leader (you): ${cols}×${rows}`;
-    leaderBadge.className = 'badge bg-success mt-1';
-  } else if (leaderId) {
-    claimBtn.hidden = false;
-    releaseBtn.hidden = true;
-    leaderBadge.textContent = `leader ${leaderId.slice(0, 8)}: ${cols}×${rows}`;
-    leaderBadge.className = 'badge bg-info mt-1';
-    // Follower: snap our grid to the leader's grid. xterm rejects very
-    // small or very large sizes; clamp to a sane range so the broadcast
-    // `cols` from a misbehaving leader doesn't brick our pane.
-    const safeCols = Math.max(20, Math.min(500, cols | 0));
-    const safeRows = Math.max(5, Math.min(200, rows | 0));
-    if (term.cols !== safeCols || term.rows !== safeRows) {
-      term.resize(safeCols, safeRows);
-    }
-  } else {
-    claimBtn.hidden = (myConnectionId == null) || viewerMode;
-    releaseBtn.hidden = true;
-    leaderBadge.textContent = 'no leader';
-    leaderBadge.className = 'badge bg-secondary mt-1';
-  }
-}
-
-claimBtn.addEventListener('click', () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  // Re-fit before reporting: if the user dragged their window before
-  // claiming, the DOM is wider than `term.cols` reports (xterm only
-  // updates its reported cols/rows via `term.resize()` or `fit.fit()`).
-  // Without this we'd inherit the old 120×40 even on a 200-wide pane.
-  fit.fit();
-  // The claiming browser's CURRENT xterm grid becomes the new PTY grid.
-  // On the first claim this is the fit-to-pane size; on a re-claim the
-  // grid tracks the previous leader's last known size.
-  ws.send(JSON.stringify({ t: 'claim_leader', cols: term.cols, rows: term.rows }));
-});
-
-releaseBtn.addEventListener('click', () => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ t: 'release_leader' }));
-});
-
-// Auto-claim leadership on first typed byte / resize from a non-leader
-// tab. The Claim button is still visible for users who want to claim
-// before typing (so followers can see the active grid dimensions before
-// driving it), but typing itself is the dominant entry point in
-// single-tab use. Server's `ClaimLeader` overwrites the prior leader —
-// the typing tab takes ownership; the prior leader's next keystroke or
-// resize becomes a no-op until they reclaim.
-function ensureLeader() {
-  if (isLeader) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  fit.fit();
-  ws.send(JSON.stringify({ t: 'claim_leader', cols: term.cols, rows: term.rows }));
-}
-
-// Re-fit on window resize and forward the new grid to rabbit — but only
-// when *we* are the leader. Followers have their grid locked to the
-// leader's via `term.resize()` in `setLeaderUi`, so they must not echo
-// a Resize frame back to the server.
-//
-// `requestAnimationFrame` coalesces a flurry of resize events (window
-// drag, devtools toggling, mobile rotation) to one Resize per paint
-// frame. The server-side actor's `is_leader` double-check is the final
-// guard: even if we somehow lose leadership mid-frame, the actor drops
-// a stale Resize from a non-leader.
-let resizeRaf = null;
-function scheduleLeaderResize() {
-  if (resizeRaf != null) return;
-  ensureLeader();
-  if (!isLeader) return;  // claim didn't take (race / disconnect); skip
-  resizeRaf = requestAnimationFrame(() => {
-    resizeRaf = null;
-    if (!isLeader) return;  // leadership may have changed mid-frame
-    fit.fit();
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
-  });
-}
-window.addEventListener('resize', scheduleLeaderResize);
-// `term.onResize` fires for *every* grid change — including the
-// follower's `term.resize()` triggered by `setLeaderUi` above. Gate it
-// on `isLeader` (re-checked inside the closure each tick) so followers
-// never echo their syncd grid back as a Resize. Auto-claim happens
-// from `scheduleLeaderResize` (window drag) instead — `term.onResize`
-// alone can't tell a user-driven resize from a follower-sync.
-term.onResize(() => {
-  if (!isLeader || viewerMode) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
-});
-
-// On reconnect, the server fires a fresh `LeaderChanged` for whatever
-// leadership state exists. Until that arrives, the badge correctly
-// shows "no leader" and the Claim button stays hidden (myConnectionId
-// is null until the new `ConnectionAssigned` lands).
+// The TUI grid is fixed at template-render time from warren's
+// TUI_WIDTH/TUI_HEIGHT env vars. Every browser renders the same grid
+// regardless of window size; smaller windows get scrollbars (CSS
+// `overflow: auto` on `.term-wrap`). The PTY's winsize is set to match
+// by the `TuiConfig` envelope warren sends to rabbit on connect.
+// There is no per-tab resize, no leader, and no `Resize` frame
+// originating from the browser.
 
 connectWs();
 </script>

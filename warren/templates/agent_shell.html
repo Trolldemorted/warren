@@ -68,8 +68,11 @@ const grid = document.getElementById('shell-grid');
 const viewerMode = new URLSearchParams(location.search).get('viewer') === 'true';
 if (viewerMode) document.body.classList.add('viewer-mode');
 
-const TERM_COLS = 120;
-const TERM_ROWS = 40;
+// Static TUI grid size. Set from warren config (TUI_WIDTH/TUI_HEIGHT
+// env vars, default 120 × 40) and rendered into the template by Askama.
+// Same value flows to rabbit via the WS `TuiConfig` envelope.
+const TERM_COLS = {{ tui_cols }};
+const TERM_ROWS = {{ tui_rows }};
 
 const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   fontFamily: 'ui-monospace, monospace',

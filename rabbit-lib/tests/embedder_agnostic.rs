@@ -31,6 +31,7 @@ async fn hello_round_trip_over_tokio_tungstenite() {
         store: store.clone(),
         auth: auth.clone(),
         log_sink: Arc::new(rabbit_lib::server::StdLogSink),
+        tui_size: Some((80, 24)),
     });
 
     let server_state = state.clone();
@@ -48,7 +49,8 @@ async fn hello_round_trip_over_tokio_tungstenite() {
         let agent_id = uuid::Uuid::new_v4();
         let store: Arc<dyn SessionStore> = server_state.store.clone();
         let registry = server_state.registry.clone();
-        let _ = handle_session(store, registry, transport, agent_id).await;
+        let tui_size = server_state.tui_size;
+        let _ = handle_session(store, registry, transport, agent_id, tui_size).await;
     });
 
     // Client side: connect, send Hello, expect Hello back.
@@ -76,25 +78,29 @@ async fn hello_round_trip_over_tokio_tungstenite() {
         .await
         .unwrap();
 
-    // Read the server's Hello reply.
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
-        .await
-        .expect("reply within 2s")
-        .expect("reply not None")
-        .expect("reply ok");
-    let text = match reply {
-        tokio_tungstenite::tungstenite::Message::Text(t) => t,
-        other => panic!("expected Text, got {other:?}"),
-    };
-    let env: Envelope = serde_json::from_str(&text).expect("parse envelope");
-    match env.body {
-        EnvelopeBody::Ack { ack_seq } => {
-            // The actor's contract: after receiving Hello, send an
-            // Ack carrying the seq we just published (1).
-            assert_eq!(ack_seq, 1);
+    // Read envelopes until we see the Ack for our hello. The actor sends
+    // `TuiConfig` first (right after the hello is persisted), then the
+    // initial Ack for everything already in the DB (which carries
+    // seq=1 — the hello's own seq).
+    let mut saw_ack = false;
+    for _ in 0..8 {
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(2), client.next())
+            .await
+            .expect("reply within 2s")
+            .expect("reply not None")
+            .expect("reply ok");
+        let text = match reply {
+            tokio_tungstenite::tungstenite::Message::Text(t) => t,
+            other => panic!("expected Text, got {other:?}"),
+        };
+        let env: Envelope = serde_json::from_str(&text).expect("parse envelope");
+        if let EnvelopeBody::Ack { ack_seq } = env.body {
+            assert_eq!(ack_seq, 1, "hello persisted at seq=1");
+            saw_ack = true;
+            break;
         }
-        other => panic!("expected Ack, got {other:?}"),
     }
+    assert!(saw_ack, "actor must send an Ack within the first 8 envelopes");
 
     client.close(None).await.ok();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), server_task).await;

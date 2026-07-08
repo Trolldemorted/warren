@@ -19,6 +19,7 @@
 
 use crate::config::Config;
 use crate::link::LinkCmd;
+use rabbit_lib::wire::TermSize;
 use crate::pty::Pty;
 use rabbit_lib::wire::TERM_CHAN_SHELL;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +53,7 @@ const RESPAWN_DELAY: Duration = Duration::from_millis(250);
 /// bytes/resizes; output is pushed to `cmd_tx` tagged with `TERM_CHAN_SHELL`.
 pub fn spawn(
     config: &Config,
+    initial_tui: &TermSize,
     cmd_tx: mpsc::Sender<LinkCmd>,
     shutdown: Arc<AtomicBool>,
 ) -> ShellHandle {
@@ -59,8 +61,8 @@ pub fn spawn(
     let bin = config.shell_bin.clone();
     let args = config.shell_args.clone();
     let workdir = config.workdir.clone();
-    let cols = config.term_cols;
-    let rows = config.term_rows;
+    let cols = initial_tui.cols;
+    let rows = initial_tui.rows;
     tokio::spawn(manage(bin, args, workdir, cols, rows, cmd_tx, rx, shutdown));
     ShellHandle { tx }
 }

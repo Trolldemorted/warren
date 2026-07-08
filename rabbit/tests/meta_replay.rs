@@ -26,7 +26,7 @@ use uuid::Uuid;
 use rabbit::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
 use rabbit::meta_ring::MetaRing;
 use rabbit::wire::{
-    Envelope, EnvelopeBody, LogLine, StateFrame, TermSize, UsageSnapshot, PROTOCOL_VERSION,
+    Envelope, EnvelopeBody, LogLine, StateFrame, UsageSnapshot, PROTOCOL_VERSION,
 };
 
 type Ws = WebSocketStream<TcpStream>;
@@ -111,7 +111,6 @@ fn spawn_link(
         "test-token".into(),
         Uuid::nil(),
         "test-1.0".into(),
-        TermSize { cols: 80, rows: 24 },
         cmd_rx,
         event_tx,
         replay_snap,

@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         auth,
         log_sink,
+        tui_size: None,
     });
 
     loop {
@@ -66,7 +67,8 @@ async fn main() -> anyhow::Result<()> {
             let agent_id = uuid::Uuid::new_v4();
             let store = state.store.clone();
             let registry = state.registry.clone();
-            if let Err(e) = handle_session(store, registry, transport, agent_id).await {
+            let tui_size = state.tui_size;
+            if let Err(e) = handle_session(store, registry, transport, agent_id, tui_size).await {
                 eprintln!("handle_session ended: {e:?}");
             }
         });

@@ -43,20 +43,6 @@ pub struct AgentHandle {
     /// disconnected (no-receiver) mpsc, and every action button click
     /// on that tab would 500 until the tab reconnected.
     cmd_tx: Arc<Mutex<mpsc::Sender<Command>>>,
-    /// §A.6 leader-based resize: identity of the browser tab whose size
-    /// drives the kernel PTY. None = no leader (every browser is a follower;
-    /// no one's resize reaches rabbit). Stored in a separate mutex so the
-    /// hot path on `Resize` from a browser doesn't take the full state lock.
-    leader: Arc<Mutex<Option<LeaderInfo>>>,
-}
-
-/// §A.6 leader-based resize: per-tab identity of the leader + the size they
-/// claimed. Cheap to clone (Uuid + 2 × u16).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LeaderInfo {
-    connection_id: Uuid,
-    cols: u16,
-    rows: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -65,14 +51,10 @@ pub struct AgentStateSnapshot {
     pub session_id: Option<String>,
     pub claude_version: Option<String>,
     pub last_usage: UsageSnapshot,
-    /// §A.6 leader-based resize: most recent PTY size advertised by rabbit
-    /// (config-time at startup, then refreshed via subsequent leader-driven
-    /// `Resize` envelopes through the rabbit link). None until the first
-    /// Hello arrives; updated whenever the actor sees a new size. The
-    /// release-leader / disconnect-leader broadcast uses this as the
-    /// `(cols, rows)` to attach to `LeaderChanged { leader_id: None }` so
-    /// followers don't see "no leader + 0×0" when the field hasn't been
-    /// populated yet.
+    /// §Simplify TUI sizing: most recent PTY size, populated from the
+    /// `TuiConfig` envelope warren sends after the rabbit hello, and
+    /// refreshed on subsequent `Command::Resize` dispatches. None until
+    /// the first `TuiConfig` arrives.
     pub term_size: Option<TermSize>,
 }
 
@@ -103,7 +85,6 @@ impl AgentHandle {
             term_ring: Arc::new(Mutex::new(VecDeque::with_capacity(TERM_RING_MAX_CHUNKS))),
             meta_tx,
             cmd_tx: Arc::new(Mutex::new(cmd_tx)),
-            leader: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -117,7 +98,6 @@ impl AgentHandle {
             term_ring: Arc::new(Mutex::new(VecDeque::with_capacity(TERM_RING_MAX_CHUNKS))),
             meta_tx,
             cmd_tx: Arc::new(Mutex::new(cmd_tx)),
-            leader: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -183,9 +163,9 @@ impl AgentHandle {
             if has_usage {
                 g.last_usage = usage;
             }
-            // §A.6 leader-based resize: refresh term_size whenever the
-            // snapshot carries one. Sticky when omitted — a state change
-            // without a fresh term_size shouldn't blank the cached size.
+            // Refresh term_size whenever the snapshot carries one. Sticky when
+            // omitted — a state change without a fresh term_size shouldn't
+            // blank the cached size.
             if term_size.is_some() {
                 g.term_size = term_size;
             }
@@ -195,89 +175,6 @@ impl AgentHandle {
             session_id,
             reason: None,
         }));
-    }
-
-    // §A.6 leader-based resize -------------------------------------------
-    //
-    // The handle exposes the leader state as plain accessors. The actor
-    // wraps them with the broadcast / rabbit-resize side-effects. All
-    // operations take a single short mutex lock; nothing here blocks on I/O.
-
-    /// Claims leadership for `connection_id` at `(cols, rows)`. **Always
-    /// succeeds** — if a leader is already set (and not disconnected), this
-    /// overwrites it (transfers leadership). Returns `true` iff there was a
-    /// prior leader (i.e. this is a transfer), `false` on initial claim.
-    /// The bool is informational only; the actor still broadcasts
-    /// `LeaderChanged` in both cases. There is no "claim rejected" path —
-    /// the spec design is "manual claim always wins."
-    pub fn claim_leader(&self, connection_id: Uuid, cols: u16, rows: u16) -> bool {
-        let mut g = self.leader.lock().expect("leader poisoned");
-        let was_prior = g.is_some();
-        *g = Some(LeaderInfo {
-            connection_id,
-            cols,
-            rows,
-        });
-        was_prior
-    }
-
-    /// Releases leadership if `connection_id` is the current leader. No-op
-    /// if a different connection (or no one) holds leadership. Returns
-    /// `true` iff the leader was actually cleared (so the actor can decide
-    /// whether to broadcast `LeaderChanged { None }`).
-    pub fn release_leader(&self, connection_id: Uuid) -> bool {
-        let mut g = self.leader.lock().expect("leader poisoned");
-        match *g {
-            Some(info) if info.connection_id == connection_id => {
-                *g = None;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Clears leadership if `connection_id` is the current leader. Called on
-    /// browser WS teardown. Returns `true` iff a clear happened (mirrors
-    /// `release_leader`'s contract).
-    pub fn clear_leader_if(&self, connection_id: Uuid) -> bool {
-        self.release_leader(connection_id)
-    }
-
-    /// Current leader as `(connection_id, cols, rows)`, or `None`.
-    /// Used by the actor to populate the broadcast `LeaderChanged` envelope.
-    pub fn current_leader(&self) -> Option<(Uuid, u16, u16)> {
-        self.leader
-            .lock()
-            .expect("leader poisoned")
-            .map(|i| (i.connection_id, i.cols, i.rows))
-    }
-
-    /// True iff `connection_id` is the current leader. The actor's resize
-    /// filter uses this to drop non-leader `Resize` frames at the command
-    /// boundary.
-    pub fn is_leader(&self, connection_id: Uuid) -> bool {
-        self.leader
-            .lock()
-            .expect("leader poisoned")
-            .map(|i| i.connection_id == connection_id)
-            .unwrap_or(false)
-    }
-
-    /// Update the leader's `(cols, rows)` in-place without changing the
-    /// `connection_id`. Used when a leader's own Resize envelope reports a
-    /// new size — the actor must refresh the cached size so subsequent
-    /// `LeaderChanged` broadcasts reflect the current grid, not the
-    /// claim-time grid.
-    pub fn update_leader_size(&self, connection_id: Uuid, cols: u16, rows: u16) -> bool {
-        let mut g = self.leader.lock().expect("leader poisoned");
-        if let Some(info) = g.as_mut() {
-            if info.connection_id == connection_id {
-                info.cols = cols;
-                info.rows = rows;
-                return true;
-            }
-        }
-        false
     }
 
     pub fn publish_term(&self, frame: TermFrame) {
@@ -429,22 +326,13 @@ impl AgentHandle {
     }
 
     /// Send raw terminal bytes toward rabbit on the given channel
-    /// (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`).
-    ///
-    /// `Some(connection_id)` enables the actor's leader-gate on the
-    /// typed bytes; `None` skips it.
-    pub async fn send_terminal_bytes(
-        &self,
-        chan: u8,
-        bytes: Bytes,
-        connection_id: Option<Uuid>,
-    ) -> AnyResult<()> {
+    /// (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`). Bytes are not gated
+    /// on per-tab leadership — every browser and any future bg-task
+    /// scheduler pushes into the same FIFO-ordered writer actor, so
+    /// concurrent typers interleave at the PTY rather than racing.
+    pub async fn send_terminal_bytes(&self, chan: u8, bytes: Bytes) -> AnyResult<()> {
         self.cmd_tx()
-            .send(Command::SendKeys {
-                chan,
-                data: bytes,
-                connection_id,
-            })
+            .send(Command::SendKeys { chan, data: bytes })
             .await
             .map_err(|_| anyhow::anyhow!("actor not running"))?;
         Ok(())
@@ -474,11 +362,11 @@ impl AgentHandle {
         Ok(())
     }
 
-    /// Route a browser-driven terminal resize through rabbit over the wire
-    /// (`EnvelopeBody::Resize` → `PtyCmd::Resize` → `ioctl(TIOCSWINSZ)` +
-    /// SIGWINCH), instead of typing a private xterm escape sequence into
-    /// claude's PTY. The actor's `Command::Resize { cols, rows }` variant
-    /// already exists from the late-join jiggle flow.
+    /// Route a programmatic resize through rabbit over the wire
+    /// (`EnvelopeBody::Resize` → `PtyCmd::Resize` → `ioctl(TIOCSWINSZ)`
+    /// + SIGWINCH). With the per-leader resize model gone, the only
+    /// caller is the warren actor's startup path when warren ships
+    /// a `TuiConfig` to rabbit.
     pub async fn resize(&self, cols: u16, rows: u16) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Resize { cols, rows })
@@ -490,26 +378,11 @@ impl AgentHandle {
 
 #[cfg(test)]
 mod tests {
-    //! §A.6 leader-based resize: state machine for the `leader` field.
-    //!
-    //! Each accessor is exercised across every meaningful transition. The
-    //! most important assertion is the "transfer while connected" case —
-    //! claim must succeed even when a prior leader is still around (the
-    //! common path: a second tab takes control from the first).
     use super::*;
-    // §A.7 wire-shape pins: the new `TermFrame` and `ScreenSnapshotBody`
-    // constructors live in `wire.rs`; bring the constants and types the
-    // §6.3 tests need into scope explicitly rather than chasing every
-    // rename back through `super`.
     use crate::wire::{ScreenSnapshotBody, TERM_CHAN_CLAUDE};
 
     fn h() -> AgentHandle {
         AgentHandle::new(Uuid::nil())
-    }
-
-    fn cid(byte: u8) -> Uuid {
-        // Stable, distinct ids per test byte.
-        Uuid::from_bytes([byte; 16])
     }
 
     /// Regression: `install_cmd_tx` must propagate the new sender to *every*
@@ -609,183 +482,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn initial_state_has_no_leader() {
-        let handle = h();
-        assert_eq!(handle.current_leader(), None);
-        assert!(!handle.is_leader(cid(1)));
-    }
-
-    #[test]
-    fn update_state_term_size_sticky_when_omitted() {
-        // §A.6 leader-based resize: a state update from rabbit that omits
-        // term_size must not blank the cached size. The release-leader /
-        // disconnect-leader broadcast reads from the cached term_size, so
-        // blanking it would emit `LeaderChanged { leader_id: None, 0, 0 }`
-        // — visibly wrong.
-        let handle = h();
-        let initial = TermSize {
-            cols: 120,
-            rows: 40,
-        };
-        handle.update_state(AgentStateSnapshot {
-            term_size: Some(initial),
-            ..AgentStateSnapshot::default()
-        });
-        assert_eq!(handle.snapshot().term_size, Some(initial));
-
-        // Refresh without term_size — should keep the prior value.
-        handle.update_state(AgentStateSnapshot {
-            state: crate::wire::AgentState::Idle,
-            ..AgentStateSnapshot::default()
-        });
-        assert_eq!(
-            handle.snapshot().term_size,
-            Some(initial),
-            "term_size must be sticky when omitted from a snapshot"
-        );
-    }
-
-    #[test]
-    fn update_state_term_size_refreshed_when_provided() {
-        let handle = h();
-        handle.update_state(AgentStateSnapshot {
-            term_size: Some(TermSize {
-                cols: 120,
-                rows: 40,
-            }),
-            ..AgentStateSnapshot::default()
-        });
-        handle.update_state(AgentStateSnapshot {
-            term_size: Some(TermSize { cols: 80, rows: 24 }),
-            ..AgentStateSnapshot::default()
-        });
-        assert_eq!(
-            handle.snapshot().term_size,
-            Some(TermSize { cols: 80, rows: 24 }),
-            "term_size must update when a fresh value is provided"
-        );
-    }
-
-    #[test]
-    fn claim_leader_with_no_prior_leader_sets_it_and_returns_false() {
-        let handle = h();
-        let was_prior = handle.claim_leader(cid(1), 120, 40);
-        assert!(!was_prior, "first claim must report no prior");
-        assert_eq!(handle.current_leader(), Some((cid(1), 120, 40)));
-        assert!(handle.is_leader(cid(1)));
-        assert!(!handle.is_leader(cid(2)));
-    }
-
-    #[test]
-    fn second_claim_transfers_leadership_even_when_first_leader_is_connected() {
-        // The "operator opens a second tab to take control" path. Prior
-        // leader is NOT disconnected; claim still succeeds and returns
-        // true (was_prior = true).
-        let handle = h();
-        let _ = handle.claim_leader(cid(1), 120, 40);
-        let was_prior = handle.claim_leader(cid(2), 80, 24);
-        assert!(was_prior, "second claim while connected must report prior");
-        assert_eq!(handle.current_leader(), Some((cid(2), 80, 24)));
-        assert!(!handle.is_leader(cid(1)));
-        assert!(handle.is_leader(cid(2)));
-    }
-
-    #[test]
-    fn release_leader_clears_when_caller_is_leader() {
-        let handle = h();
-        handle.claim_leader(cid(1), 120, 40);
-        assert!(handle.release_leader(cid(1)));
-        assert_eq!(handle.current_leader(), None);
-    }
-
-    #[test]
-    fn release_leader_no_op_when_caller_is_not_leader() {
-        let handle = h();
-        handle.claim_leader(cid(1), 120, 40);
-        // cid(2) is not the leader; their release must be a no-op.
-        assert!(!handle.release_leader(cid(2)));
-        // Leader must still be cid(1).
-        assert_eq!(handle.current_leader(), Some((cid(1), 120, 40)));
-    }
-
-    #[test]
-    fn release_leader_no_op_when_no_leader() {
-        let handle = h();
-        assert!(!handle.release_leader(cid(1)));
-    }
-
-    #[test]
-    fn clear_leader_if_only_clears_for_matching_id() {
-        let handle = h();
-        handle.claim_leader(cid(1), 120, 40);
-        assert!(handle.clear_leader_if(cid(1)));
-        assert_eq!(handle.current_leader(), None);
-
-        // Re-claim and clear with the wrong id — should not affect state.
-        handle.claim_leader(cid(1), 120, 40);
-        assert!(!handle.clear_leader_if(cid(2)));
-        assert_eq!(handle.current_leader(), Some((cid(1), 120, 40)));
-    }
-
-    #[test]
-    fn update_leader_size_only_updates_when_caller_is_leader() {
-        let handle = h();
-        handle.claim_leader(cid(1), 120, 40);
-        // Leader updates their own size — works.
-        assert!(handle.update_leader_size(cid(1), 100, 30));
-        assert_eq!(handle.current_leader(), Some((cid(1), 100, 30)));
-        // Non-leader's update — no-op, leader untouched.
-        assert!(!handle.update_leader_size(cid(2), 50, 20));
-        assert_eq!(handle.current_leader(), Some((cid(1), 100, 30)));
-    }
-
-    #[test]
-    fn full_state_machine_walk() {
-        // Exhaustive table-driven walk of every meaningful transition.
-        let handle = h();
-        let a = cid(1);
-        let b = cid(2);
-
-        // 1. Initial → no leader
-        assert_eq!(handle.current_leader(), None);
-        assert!(!handle.is_leader(a));
-        assert!(!handle.is_leader(b));
-
-        // 2. A claims (initial)
-        assert!(!handle.claim_leader(a, 120, 40));
-        assert!(handle.is_leader(a));
-        assert!(!handle.is_leader(b));
-
-        // 3. B's release is a no-op
-        assert!(!handle.release_leader(b));
-        assert!(handle.is_leader(a));
-
-        // 4. A updates size
-        assert!(handle.update_leader_size(a, 100, 30));
-        assert_eq!(handle.current_leader(), Some((a, 100, 30)));
-
-        // 5. B claims — transfer
-        assert!(handle.claim_leader(b, 80, 24));
-        assert!(!handle.is_leader(a));
-        assert!(handle.is_leader(b));
-        assert_eq!(handle.current_leader(), Some((b, 80, 24)));
-
-        // 6. A's release is a no-op now
-        assert!(!handle.release_leader(a));
-        assert!(handle.is_leader(b));
-
-        // 7. A's clear is a no-op
-        assert!(!handle.clear_leader_if(a));
-        assert!(handle.is_leader(b));
-
-        // 8. B disconnects (clear_leader_if with B's id)
-        assert!(handle.clear_leader_if(b));
-        assert_eq!(handle.current_leader(), None);
-
-        // 9. A's release post-disconnect is a no-op
-        assert!(!handle.release_leader(a));
-    }
 
     // -----------------------------------------------------------------
     // §A.7 / seq-numbered snapshot protocol — `publish_term` /
@@ -797,8 +493,7 @@ mod tests {
     //
     // The two tests below pin that contract; a future "optimization"
     // that strips the seq (e.g. treating the broadcast payload as
-    // pure bytes) would silently break two-step-apply on the browser
-    // and re-introduce the §A.6 flicker.
+    // pure bytes) would silently break two-step-apply on the browser.
     // -----------------------------------------------------------------
 
     /// Push a sequence of `TermFrame`s through `publish_term` and

@@ -1,11 +1,8 @@
-use crate::server::actor::Command;
 use crate::server::handle::AgentHandle;
 use crate::server::registry::AgentRegistry;
 use crate::server::transport::TransportMsg;
 use crate::server::WsTransport;
-use crate::wire::{
-    Envelope, EnvelopeBody, TermFrame, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
-};
+use crate::wire::{Envelope, EnvelopeBody, TermFrame, PROTOCOL_VERSION, TERM_CHAN_CLAUDE};
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -25,8 +22,7 @@ const BROWSER_WS_PING_INTERVAL: Duration = Duration::from_secs(20);
 /// Framework-agnostic browser-side session loop. Public so the
 /// `rabbit-lib-axum` adapter can call it after wrapping an axum
 /// `WebSocket` as a `DynWsTransport`. Kept in `rabbit-lib` because the
-/// logic (term/meta replay, leader gating, viewer-mode drop) is
-/// framework-free.
+/// logic (term/meta replay, viewer-mode drop) is framework-free.
 pub async fn handle(
     transport: impl WsTransport,
     registry: AgentRegistry,
@@ -71,29 +67,6 @@ pub async fn handle(
     };
     let mut term_rx = handle.subscribe_term();
     let mut meta_rx = handle.subscribe_meta();
-
-    // §A.6 leader-based resize: every browser tab gets a stable
-    // `connection_id` so it can identify itself in subsequent
-    // `ClaimLeader` / `ReleaseLeader` / `Resize` frames. Generated once
-    // per WS upgrade; sent to this tab verbatim in `ConnectionAssigned`.
-    let connection_id: Uuid = Uuid::new_v4();
-
-    // §A.6: send `ConnectionAssigned` directly on this WS rather than via
-    // `meta_tx` — only *this* tab needs to learn its own id. The browser
-    // JS uses it to populate `myConnectionId`, which drives the
-    // `Claim control` button visibility and the `window.resize` gate.
-    let assigned_env = Envelope {
-        v: PROTOCOL_VERSION,
-        seq: 0,
-        body: EnvelopeBody::ConnectionAssigned { connection_id },
-    };
-    if let Ok(s) = serde_json::to_string(&assigned_env) {
-        if sink.send(TransportMsg::Text(s)).await.is_err() {
-            // Peer went away before we even told it its id; nothing more
-            // to do.
-            return Ok(());
-        }
-    }
 
     for TermFrame { chan, seq, data } in handle.replay_term() {
         // §A.7: replay re-emits each frame verbatim with the seq that
@@ -198,7 +171,6 @@ pub async fn handle(
                                 &handle,
                                 env,
                                 viewer_mode,
-                                connection_id,
                             ).await {
                                 log::debug!("forward failed: {e:?}");
                             }
@@ -222,7 +194,6 @@ pub async fn handle(
                                 handle.send_terminal_bytes(
                                     TERM_CHAN_CLAUDE,
                                     Bytes::from(b),
-                                    Some(connection_id),
                                 ).await
                             {
                                 log::debug!("send_terminal_bytes failed: {e:?}");
@@ -252,38 +223,7 @@ pub async fn handle(
             }
         }
     }
-    // Clear leadership directly on the handle — the leader field
-    // doesn't need actor mediation. The actor's `ConnectionClosed`
-    // arm is a no-op backstop (it sees `false` from the second
-    // `clear_leader_if`).
-    if handle.clear_leader_if(connection_id) {
-        let cur = handle
-            .snapshot()
-            .term_size
-            .unwrap_or(TermSize { cols: 0, rows: 0 });
-        handle.publish_meta(EnvelopeBody::LeaderChanged {
-            leader_id: None,
-            cols: cur.cols,
-            rows: cur.rows,
-        });
-    }
     Ok(())
-}
-
-/// §A.6: per-tab leader state. Extracted so the routing logic in
-/// `forward_browser_message` can be unit-tested without a real WS — the
-/// caller passes a `connection_id` (whatever the WS assigned via
-/// `ConnectionAssigned`) and the handle's current leadership state.
-///
-/// `claimed_activate` and `claimed_release` are fire-and-forget
-/// commands: they don't await a reply because the actor broadcasts the
-/// `LeaderChanged` envelope on its own. If the actor's command channel
-/// is full we drop the command with a debug log — a stale leader claim
-/// is much better than blocking the WS.
-async fn send_cmd(handle: &AgentHandle, cmd: Command) {
-    if let Err(e) = handle.cmd_tx().send(cmd).await {
-        log::debug!("leader cmd send failed: {e:?}");
-    }
 }
 
 /// True iff `body` is an *input* envelope that should be dropped when the
@@ -299,8 +239,6 @@ fn should_drop_for_viewer(body: &EnvelopeBody) -> bool {
             | EnvelopeBody::Resize { .. }
             | EnvelopeBody::Repaint
             | EnvelopeBody::Restart { .. }
-            | EnvelopeBody::ClaimLeader { .. }
-            | EnvelopeBody::ReleaseLeader
     )
 }
 
@@ -308,7 +246,6 @@ async fn forward_browser_message(
     handle: &AgentHandle,
     env: Envelope,
     viewer_mode: bool,
-    connection_id: Uuid,
 ) -> anyhow::Result<()> {
     // §D read-only viewer mode: drop input frames unconditionally when
     // viewer_mode is on. Even though the JS template hides the input
@@ -323,58 +260,26 @@ async fn forward_browser_message(
             by_connection_id,
             ..
         } => {
-            // Fall back to this tab's id if older browsers didn't stamp
-            // `by_connection_id` on the inbound prompt.
-            let origin = by_connection_id.unwrap_or(connection_id);
-            handle.prompt_with_origin(&text, false, origin).await?;
+            // Browser tabs no longer carry their own connection id; the
+            // server treats every prompt as "everyone's". The
+            // `by_connection_id` field stays on the wire for protocol
+            // symmetry with the prompt-rejection echo (and for future
+            // HTTP / bg-task callers who might still want to stamp one).
+            let _ = by_connection_id;
+            handle.prompt(&text, false).await?;
         }
         EnvelopeBody::Interrupt => handle.interrupt().await?,
         EnvelopeBody::Clear { hard } => handle.clear(hard).await?,
         EnvelopeBody::Resize { cols, rows } => {
-            // §A.6: a non-leader's resize is dropped at this boundary.
-            // The actor's `Command::ResizeFromConnection` arm
-            // double-checks `is_leader` too as defense in depth.
-            if !handle.is_leader(connection_id) {
-                log::debug!("dropping Resize from non-leader {connection_id}");
-                return Ok(());
-            }
-            send_cmd(
-                handle,
-                Command::ResizeFromConnection {
-                    connection_id,
-                    cols,
-                    rows,
-                },
-            )
-            .await;
+            handle.resize(cols, rows).await?;
         }
         EnvelopeBody::Repaint => {
-            send_cmd(handle, Command::Repaint).await;
+            handle.repaint().await?;
         }
         EnvelopeBody::Restart { fresh } => handle.restart(fresh).await?,
-        EnvelopeBody::ClaimLeader { cols, rows } => {
-            // §A.6: claims always succeed. The actor overwrites the prior
-            // leader (even if still connected) and broadcasts the new
-            // identity to every browser.
-            send_cmd(
-                handle,
-                Command::ClaimLeader {
-                    connection_id,
-                    cols,
-                    rows,
-                },
-            )
-            .await;
-        }
-        EnvelopeBody::ReleaseLeader => {
-            send_cmd(handle, Command::ReleaseLeader { connection_id }).await;
-        }
-        // ConnectionAssigned / LeaderChanged / InputRejected are output
-        // frames flowing server→browser; if a hostile client sends one
-        // back we silently ignore (no side-effects).
-        EnvelopeBody::ConnectionAssigned { .. }
-        | EnvelopeBody::LeaderChanged { .. }
-        | EnvelopeBody::InputRejected { .. } => {}
+        // Everything else is either output flowing server→browser (and
+        // a browser shouldn't send it back), or a frame that has no
+        // browser-side actor (e.g. `TuiConfig` is server→rabbit only).
         _ => {}
     }
     Ok(())
@@ -408,8 +313,6 @@ mod tests {
             EnvelopeBody::Resize { cols: 80, rows: 24 },
             EnvelopeBody::Repaint,
             EnvelopeBody::Restart { fresh: false },
-            EnvelopeBody::ClaimLeader { cols: 80, rows: 24 },
-            EnvelopeBody::ReleaseLeader,
         ] {
             assert!(
                 should_drop_for_viewer(&body),
@@ -443,178 +346,5 @@ mod tests {
                 "output frame {body:?} must not be matched by viewer drop-list"
             );
         }
-    }
-
-    /// Compose an `Envelope` for testing only — uses the wire-side
-    /// `Envelope` shape so the tests mirror what the browser sends.
-    fn make_env(body: EnvelopeBody) -> Envelope {
-        Envelope {
-            v: PROTOCOL_VERSION,
-            seq: 0,
-            body,
-        }
-    }
-
-    // §A.6: leader-aware routing. We drive `forward_browser_message`
-    // against a real `AgentHandle` whose cmd_tx is plumbed into a fresh
-    // mpsc::Receiver, and assert that the right `Command` arrives. The
-    // ws_sink / ws_stream half of the WS doesn't matter here — only the
-    // routing decision does.
-
-    use crate::server::handle::AgentHandle;
-
-    /// Build an `AgentHandle` whose cmd_tx we can introspect: every
-    /// command the actor-side helper would have received shows up on
-    /// `rx`.
-    fn handle_with_cmd_rx() -> (AgentHandle, tokio::sync::mpsc::Receiver<Command>) {
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let handle = AgentHandle::with_cmd_tx(Uuid::nil(), tx);
-        (handle, rx)
-    }
-
-    #[tokio::test]
-    async fn claim_leader_text_envelope_routes_to_command() {
-        let (handle, mut rx) = handle_with_cmd_rx();
-        let me = Uuid::from_bytes([1; 16]);
-        let env = make_env(EnvelopeBody::ClaimLeader {
-            cols: 120,
-            rows: 40,
-        });
-        forward_browser_message(&handle, env, false, me)
-            .await
-            .expect("forward");
-        let got = rx.recv().await.expect("a command must arrive");
-        match got {
-            Command::ClaimLeader {
-                connection_id,
-                cols,
-                rows,
-            } => {
-                assert_eq!(connection_id, me);
-                assert_eq!(cols, 120);
-                assert_eq!(rows, 40);
-            }
-            other => panic!("expected ClaimLeader, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn release_leader_text_envelope_routes_to_command() {
-        let (handle, mut rx) = handle_with_cmd_rx();
-        let me = Uuid::from_bytes([2; 16]);
-        let env = make_env(EnvelopeBody::ReleaseLeader);
-        forward_browser_message(&handle, env, false, me)
-            .await
-            .expect("forward");
-        let got = rx.recv().await.expect("a command must arrive");
-        match got {
-            Command::ReleaseLeader { connection_id } => {
-                assert_eq!(connection_id, me);
-            }
-            other => panic!("expected ReleaseLeader, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn leader_resize_accepted() {
-        let (handle, mut rx) = handle_with_cmd_rx();
-        let me = Uuid::from_bytes([3; 16]);
-        handle.claim_leader(me, 120, 40);
-        let env = make_env(EnvelopeBody::Resize {
-            cols: 132,
-            rows: 50,
-        });
-        forward_browser_message(&handle, env, false, me)
-            .await
-            .expect("forward");
-        let got = rx.recv().await.expect("a command must arrive");
-        match got {
-            Command::ResizeFromConnection {
-                connection_id,
-                cols,
-                rows,
-            } => {
-                assert_eq!(connection_id, me);
-                assert_eq!(cols, 132);
-                assert_eq!(rows, 50);
-            }
-            other => panic!("expected ResizeFromConnection, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn non_leader_resize_dropped_at_input() {
-        let (handle, mut rx) = handle_with_cmd_rx();
-        let leader = Uuid::from_bytes([4; 16]);
-        let me = Uuid::from_bytes([5; 16]);
-        handle.claim_leader(leader, 120, 40);
-        assert!(!handle.is_leader(me));
-        let env = make_env(EnvelopeBody::Resize {
-            cols: 100,
-            rows: 30,
-        });
-        forward_browser_message(&handle, env, false, me)
-            .await
-            .expect("forward");
-        // No command should have arrived — the resize was dropped at the
-        // ws_browser boundary. `try_recv` returns Err(Empty) when the
-        // channel is empty (no blocking).
-        let next = rx.try_recv();
-        assert!(
-            matches!(next, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
-            "non-leader resize must not produce a command; got {next:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn viewer_drops_claim_and_release_frames() {
-        // Even in viewer mode, the claim/release flows go through the
-        // viewer-mode drop gate — a viewer must not be able to
-        // manipulate leadership either.
-        let (handle, mut rx) = handle_with_cmd_rx();
-        let me = Uuid::from_bytes([6; 16]);
-        for env in [
-            make_env(EnvelopeBody::ClaimLeader {
-                cols: 120,
-                rows: 40,
-            }),
-            make_env(EnvelopeBody::ReleaseLeader),
-        ] {
-            forward_browser_message(&handle, env, true, me)
-                .await
-                .expect("forward");
-        }
-        let next = rx.try_recv();
-        assert!(
-            matches!(next, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
-            "viewer_mode must drop claim/release; got {next:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn connection_assigned_and_leader_changed_inbound_silently_ignored() {
-        // These are server-→-browser output frames. A hostile client
-        // sending them inbound must not produce a command.
-        let (handle, mut rx) = handle_with_cmd_rx();
-        let me = Uuid::from_bytes([7; 16]);
-        for env in [
-            make_env(EnvelopeBody::ConnectionAssigned {
-                connection_id: Uuid::from_bytes([8; 16]),
-            }),
-            make_env(EnvelopeBody::LeaderChanged {
-                leader_id: Some(Uuid::from_bytes([9; 16])),
-                cols: 80,
-                rows: 24,
-            }),
-        ] {
-            forward_browser_message(&handle, env, false, me)
-                .await
-                .expect("forward");
-        }
-        let next = rx.try_recv();
-        assert!(
-            matches!(next, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
-            "inbound ConnectionAssigned/LeaderChanged must be silently ignored; got {next:?}"
-        );
     }
 }

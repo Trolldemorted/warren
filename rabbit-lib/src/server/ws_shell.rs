@@ -120,7 +120,6 @@ pub async fn handle(
                             handle.send_terminal_bytes(
                                 crate::wire::TERM_CHAN_SHELL,
                                 Bytes::from(b),
-                                None,
                             ).await
                         {
                             log::debug!("shell send_terminal_bytes failed: {e:?}");

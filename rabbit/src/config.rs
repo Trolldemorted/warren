@@ -20,8 +20,6 @@ pub struct Config {
     pub claude_bin: String,
     pub claude_args: Vec<String>,
     pub model: Option<String>,
-    pub term_cols: u16,
-    pub term_rows: u16,
     pub replay_bytes: usize,
     #[allow(dead_code)]
     pub observer_port: u16,
@@ -64,14 +62,6 @@ impl Config {
             .map(String::from)
             .collect();
         let model = env::var("MODEL").ok().filter(|s| !s.is_empty());
-        let term_cols = env::var("TERM_COLS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(120);
-        let term_rows = env::var("TERM_ROWS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(40);
         let replay_bytes = env::var("REPLAY_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -122,8 +112,6 @@ impl Config {
             claude_bin,
             claude_args,
             model,
-            term_cols,
-            term_rows,
             replay_bytes,
             observer_port,
             health_port,

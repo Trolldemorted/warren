@@ -28,7 +28,7 @@ use uuid::Uuid;
 use rabbit::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
 use rabbit::meta_ring::MetaRing;
 use rabbit::wire::{
-    Envelope, EnvelopeBody, ScreenSnapshotBody, TermSize, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
+    Envelope, EnvelopeBody, ScreenSnapshotBody, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
     TERM_CHAN_SHELL,
 };
 
@@ -82,7 +82,6 @@ fn spawn_link(port: u16) -> (mpsc::Sender<LinkCmd>, mpsc::Receiver<LinkEvent>) {
         "test-token".into(),
         Uuid::nil(),
         "test-1.0".into(),
-        TermSize { cols: 80, rows: 24 },
         cmd_rx,
         event_tx,
         replay_snap,
