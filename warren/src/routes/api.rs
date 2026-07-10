@@ -271,6 +271,7 @@ async fn api_create_request(
     if new.target_class.trim().is_empty() {
         return Err(AppError::BadRequest("target_class required".into()));
     }
+    validate_request_new(&new)?;
     if let AuthContext::Agent(a) = &ctx {
         let channel_id = new
             .channel_id
@@ -361,6 +362,7 @@ async fn api_respond_request(
     Json(body): Json<RequestRespond>,
 ) -> AppResult<Json<request::Model>> {
     let agent = ctx.require_agent()?;
+    validate_request_respond(&body)?;
     let r = run_or_classify_missing(&state.db, agent, id, async {
         crate::db_ops::respond_to_request(&state.db, id, agent.0.id, &body.response).await
     })
@@ -558,4 +560,111 @@ fn validate_channel_new(n: &ChannelNew) -> AppResult<()> {
         return Err(AppError::BadRequest("description required".into()));
     }
     Ok(())
+}
+
+/// §Reject empty payloads: a `RequestNew` whose `payload` is empty (or
+/// whitespace-only) is rejected at the API boundary. Empty payloads
+/// produce meaningless inbox rows (the receiving agent has no
+/// instructions to act on) and historically surfaced as confusing
+/// "agent claimed an empty request" log entries. Returns
+/// `AppError::BadRequest("payload required")` so the CLI can surface a
+/// helpful message instead of a 500.
+fn validate_request_new(n: &RequestNew) -> AppResult<()> {
+    if n.payload.trim().is_empty() {
+        return Err(AppError::BadRequest("payload required".into()));
+    }
+    Ok(())
+}
+
+/// §Reject empty payloads: same rationale as `validate_request_new`, but
+/// for agent responses to claimed requests. An empty response leaves the
+/// request stuck in `AWAITING_AGENT_RESPONSE` forever — the original
+/// claimer has nothing to ship back to the admin reviewer, and the
+/// request effectively times out in the inbox.
+fn validate_request_respond(r: &RequestRespond) -> AppResult<()> {
+    if r.response.trim().is_empty() {
+        return Err(AppError::BadRequest("response required".into()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{RequestNew, RequestRespond};
+
+    fn assert_bad_request_contains(err: AppError, needle: &str) {
+        match err {
+            AppError::BadRequest(msg) => assert!(
+                msg.contains(needle),
+                "expected BadRequest('{needle}'), got BadRequest('{msg}')"
+            ),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_new_rejects_empty_payload() {
+        let r = RequestNew {
+            target_class: "claude".into(),
+            target_type: None,
+            payload: "".into(),
+            channel_id: None,
+        };
+        assert_bad_request_contains(validate_request_new(&r).unwrap_err(), "payload required");
+    }
+
+    #[test]
+    fn request_new_rejects_whitespace_only_payload() {
+        // Whitespace-only payloads carry no useful instruction either;
+        // they round-trip through the DB as a non-empty string and look
+        // legitimate until the agent tries to act on them.
+        for ws in ["   ", "\n", "\t\t", " \n \t "] {
+            let r = RequestNew {
+                target_class: "claude".into(),
+                target_type: None,
+                payload: ws.into(),
+                channel_id: None,
+            };
+            assert_bad_request_contains(validate_request_new(&r).unwrap_err(), "payload required");
+        }
+    }
+
+    #[test]
+    fn request_new_accepts_non_empty_payload() {
+        let r = RequestNew {
+            target_class: "claude".into(),
+            target_type: None,
+            payload: "please refactor the loader".into(),
+            channel_id: None,
+        };
+        validate_request_new(&r).expect("non-empty payload must validate");
+    }
+
+    #[test]
+    fn request_respond_rejects_empty_response() {
+        let r = RequestRespond {
+            response: "".into(),
+        };
+        assert_bad_request_contains(validate_request_respond(&r).unwrap_err(), "response required");
+    }
+
+    #[test]
+    fn request_respond_rejects_whitespace_only_response() {
+        let r = RequestRespond {
+            response: "  \n  ".into(),
+        };
+        assert_bad_request_contains(
+            validate_request_respond(&r).unwrap_err(),
+            "response required",
+        );
+    }
+
+    #[test]
+    fn request_respond_accepts_non_empty_response() {
+        let r = RequestRespond {
+            response: "refactor landed in abc123".into(),
+        };
+        validate_request_respond(&r).expect("non-empty response must validate");
+    }
 }

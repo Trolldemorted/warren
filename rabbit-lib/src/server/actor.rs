@@ -468,6 +468,27 @@ async fn dispatch<T: WsTransport>(
             reply,
             by_connection_id,
         } => {
+            // Defense-in-depth: reject empty prompts at the actor's
+            // dispatch arm too. The HTTP `http_prompt` handler already
+            // guards this with `text required`, and `ws_browser` drops
+            // empty browser prompts at its inbound boundary — this
+            // arm catches any future caller (background task, tests,
+            // new transport adapter) that forgets to validate.
+            if text.trim().is_empty() {
+                if wait {
+                    if let Some(tx) = reply {
+                        let now = Utc::now();
+                        let _ = tx.send(TurnOutcomeMsg {
+                            prompt_id: id,
+                            started_at: now,
+                            ended_at: now,
+                            usage: None,
+                            error: Some("text required".to_string()),
+                        });
+                    }
+                }
+                return Ok(());
+            }
             // Single-funnel gate: every prompt surface (HTTP, WS,
             // future bg-task schedulers) lands here.
             let snap = handle.snapshot();

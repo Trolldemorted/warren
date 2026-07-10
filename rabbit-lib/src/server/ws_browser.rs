@@ -260,6 +260,19 @@ async fn forward_browser_message(
             by_connection_id,
             ..
         } => {
+            // Reject empty prompts at this boundary so they never reach
+            // the actor's busy-gate or get injected into the PTY. A
+            // browser keystroke like a stray Enter produces an empty
+            // string today; without this guard the busy-gate would
+            // busy-loop on the same empty text and the operator would
+            // see repeated `PromptEcho` round-trips. Drop silently —
+            // there's no envelope to reply to (the busy-gate echo is
+            // reserved for stateful rejections, and an empty prompt
+            // isn't a state change).
+            if text.trim().is_empty() {
+                log::debug!("dropping empty browser prompt");
+                return Ok(());
+            }
             // Browser tabs no longer carry their own connection id; the
             // server treats every prompt as "everyone's". The
             // `by_connection_id` field stays on the wire for protocol
@@ -346,5 +359,43 @@ mod tests {
                 "output frame {body:?} must not be matched by viewer drop-list"
             );
         }
+    }
+
+    /// §Reject empty payloads: the browser inbound boundary drops
+    /// empty / whitespace-only `Prompt.text` envelopes before they reach
+    /// the actor. Without this guard, a stray Enter keystroke (or a
+    /// buggy client) would push an empty prompt into the busy-gate,
+    /// which would busy-loop on the same empty text and spam the
+    /// operator with `PromptEcho` round-trips.
+    #[tokio::test]
+    async fn empty_prompt_text_is_dropped_at_browser_boundary() {
+        use crate::server::actor::Command;
+        use crate::server::handle::AgentHandle;
+        let (cmd_tx, mut rx) = tokio::sync::mpsc::channel::<Command>(8);
+        let handle = AgentHandle::with_cmd_tx(Uuid::nil(), cmd_tx);
+
+        for empty_text in ["", "   ", "\n\t  \n"] {
+            let env = Envelope {
+                v: PROTOCOL_VERSION,
+                seq: 0,
+                body: EnvelopeBody::Prompt {
+                    id: Uuid::new_v4(),
+                    text: empty_text.into(),
+                    by: "browser".into(),
+                    by_connection_id: None,
+                },
+            };
+            forward_browser_message(&handle, env, false)
+                .await
+                .expect("drop is Ok");
+        }
+        // No command must have arrived — every empty prompt was
+        // short-circuited at the boundary. `try_recv` is non-blocking
+        // and returns Empty when the channel has nothing pending.
+        let next = rx.try_recv();
+        assert!(
+            matches!(next, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "empty prompts must not produce a Command; got {next:?}"
+        );
     }
 }

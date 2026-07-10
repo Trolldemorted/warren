@@ -363,10 +363,16 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
                 http_get(agent, &url, &token, &path)
             }
             Some(("create", sc)) => {
-                let payload = read_payload(
+                let payload = match read_payload(
                     sc.get_one::<String>("file"),
                     sc.get_one::<String>("payload"),
-                );
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return Err(e.to_string());
+                    }
+                };
                 let body = serde_json::json!({
                     "target_class": sc.get_one::<String>("class").unwrap(),
                     "target_type": sc.get_one::<String>("kind").map(String::as_str),
@@ -432,10 +438,16 @@ fn run(cli: &ArgMatches, agent: &ureq::Agent) -> Result<String, String> {
             }
             Some(("respond", sc)) => {
                 let id = sc.get_one::<String>("id").unwrap();
-                let payload = read_payload(
+                let payload = match read_payload(
                     sc.get_one::<String>("file"),
                     sc.get_one::<String>("payload"),
-                );
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return Err(e.to_string());
+                    }
+                };
                 let body = serde_json::json!({ "response": payload }).to_string();
                 http_post(
                     agent,
@@ -617,18 +629,27 @@ fn format_pending(body: &str, accepted: &[&str], include_response: bool) -> Resu
     Ok(out)
 }
 
-fn read_payload(file: Option<&String>, payload: Option<&String>) -> String {
-    match (file, payload) {
-        (Some(p), _) => match fs::read_to_string(p) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("read {p}: {e}");
-                String::new()
-            }
-        },
+/// Read the payload from `--file` or `--payload`. Refuses to return an
+/// empty string — call sites that pass the result into a request body
+/// should treat `Err` as a hard failure (no payload is a programming
+/// error, not a recoverable condition).
+fn read_payload(file: Option<&String>, payload: Option<&String>) -> anyhow::Result<String> {
+    let s = match (file, payload) {
+        (Some(p), _) => fs::read_to_string(p)
+            .map_err(|e| anyhow::anyhow!("read {p}: {e}"))?,
         (None, Some(s)) => s.clone(),
-        (None, None) => String::new(),
+        (None, None) => {
+            return Err(anyhow::anyhow!(
+                "payload required: pass --payload \"...\" or --file <path>"
+            ));
+        }
+    };
+    if s.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "payload is empty: provide text via --payload or --file"
+        ));
     }
+    Ok(s)
 }
 
 fn strip_authtoken(body: &str) -> String {
@@ -704,4 +725,58 @@ fn http_delete(agent: &ureq::Agent, base: &str, token: &str, path: &str) -> Resu
         .call()
         .map_err(|e| format!("{e}"))
         .and_then(|r| r.into_string().map_err(|e| format!("read body: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    //! §Reject empty payloads: `read_payload` refuses to return an
+    //! empty / whitespace-only / missing body. The server side already
+    //! guards `RequestNew.payload` and `RequestRespond.response` with
+    //! 400 responses, but pushing the check to the CLI turns a
+    //! silent-fail into a fast-fail with a useful error message and
+    //! saves the round-trip.
+
+    use super::read_payload;
+
+    #[test]
+    fn read_payload_rejects_missing_flags() {
+        let err = read_payload(None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("payload required"),
+            "missing-flag error must mention `payload required`; got {err}"
+        );
+    }
+
+    #[test]
+    fn read_payload_rejects_empty_string() {
+        let err = read_payload(None, Some(&String::new())).unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "empty-string error must mention `empty`; got {err}"
+        );
+    }
+
+    #[test]
+    fn read_payload_rejects_whitespace_only() {
+        let err = read_payload(None, Some(&"   \n\t  ".to_string())).unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "whitespace-only error must mention `empty`; got {err}"
+        );
+    }
+
+    #[test]
+    fn read_payload_accepts_real_text() {
+        let s = read_payload(None, Some(&"hello".to_string())).unwrap();
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn read_payload_accepts_text_from_file() {
+        let path = std::env::temp_dir().join("warren_cli_read_payload_test.txt");
+        std::fs::write(&path, "from-file\n").unwrap();
+        let s = read_payload(Some(&path.to_string_lossy().into_owned()), None).unwrap();
+        assert_eq!(s, "from-file\n");
+        let _ = std::fs::remove_file(path);
+    }
 }
