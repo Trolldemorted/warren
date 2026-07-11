@@ -110,6 +110,13 @@ pub struct AgentClaudeTemplate {
     pub flash: Option<Flash>,
     pub agent: crate::entity::agent::Model,
     pub connected: bool,
+    /// Latest `AgentState` from the live registry, used to render the
+    /// initial status badge before the WebSocket delivers its first
+    /// `state` envelope. `None` when no rabbit is registered, which
+    /// the template renders as "offline". Mirrors the per-row
+    /// `AgentRow::status` used on the agents index page so the two
+    /// surfaces can't disagree on the same agent.
+    pub initial_state: Option<rabbit_lib::wire::AgentState>,
     pub tui_cols: u16,
     pub tui_rows: u16,
 }

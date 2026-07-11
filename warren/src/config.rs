@@ -109,11 +109,21 @@ mod tests {
     /// pulling in the rest of the env (DATABASE_URL, WARREN_ADMIN_PSK).
     /// Used by the unit tests for the env-var path.
     fn parse_tui_width() -> u16 {
-        clamp_tui(env::var("TUI_WIDTH").ok().as_deref(), 120, TUI_COLS_MIN, TUI_COLS_MAX)
+        clamp_tui(
+            env::var("TUI_WIDTH").ok().as_deref(),
+            120,
+            TUI_COLS_MIN,
+            TUI_COLS_MAX,
+        )
     }
 
     fn parse_tui_height() -> u16 {
-        clamp_tui(env::var("TUI_HEIGHT").ok().as_deref(), 40, TUI_ROWS_MIN, TUI_ROWS_MAX)
+        clamp_tui(
+            env::var("TUI_HEIGHT").ok().as_deref(),
+            40,
+            TUI_ROWS_MIN,
+            TUI_ROWS_MAX,
+        )
     }
 
     #[test]
@@ -130,8 +140,12 @@ mod tests {
         env::remove_var("TUI_HEIGHT");
         assert_eq!(parse_tui_width(), 120);
         assert_eq!(parse_tui_height(), 40);
-        if let Some(v) = saved_w { env::set_var("TUI_WIDTH", v); }
-        if let Some(v) = saved_h { env::set_var("TUI_HEIGHT", v); }
+        if let Some(v) = saved_w {
+            env::set_var("TUI_WIDTH", v);
+        }
+        if let Some(v) = saved_h {
+            env::set_var("TUI_HEIGHT", v);
+        }
     }
 
     #[test]
@@ -175,7 +189,10 @@ mod tests {
 
     #[test]
     fn clamp_tui_garbage_falls_back_to_default() {
-        assert_eq!(clamp_tui(Some("not a number"), 120, TUI_COLS_MIN, TUI_COLS_MAX), 120);
+        assert_eq!(
+            clamp_tui(Some("not a number"), 120, TUI_COLS_MIN, TUI_COLS_MAX),
+            120
+        );
         assert_eq!(clamp_tui(Some(""), 40, TUI_ROWS_MIN, TUI_ROWS_MAX), 40);
         assert_eq!(clamp_tui(Some("-1"), 120, TUI_COLS_MIN, TUI_COLS_MAX), 120);
     }

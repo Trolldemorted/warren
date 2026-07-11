@@ -646,7 +646,10 @@ mod tests {
         let r = RequestRespond {
             response: "".into(),
         };
-        assert_bad_request_contains(validate_request_respond(&r).unwrap_err(), "response required");
+        assert_bad_request_contains(
+            validate_request_respond(&r).unwrap_err(),
+            "response required",
+        );
     }
 
     #[test]

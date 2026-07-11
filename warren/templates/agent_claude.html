@@ -115,7 +115,30 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>
-  <span id="state-badge" class="status badge bg-{% if connected %}success{% else %}secondary{% endif %}">{% if connected %}idle{% else %}disconnected{% endif %}</span>
+  {# Initial badge mirrors the live state from the registry so the page
+     renders the right color/label on first paint instead of hardcoding
+     "idle". The JS `setBadge` keeps it in sync once WS envelopes land.
+     `connected` covers the rabbit-registered-but-no-state case (the WS
+     snap hasn't propagated yet): we default to idle there, matching the
+     pre-fix behavior. #}
+  {% match initial_state %}
+    {% when Some with (s) %}
+      {% if s.as_str() == "idle" %}
+        <span id="state-badge" class="status badge bg-success">idle</span>
+      {% else if s.as_str() == "running" %}
+        <span id="state-badge" class="status badge bg-warning">running</span>
+      {% else if s.as_str() == "starting" %}
+        <span id="state-badge" class="status badge bg-info">starting</span>
+      {% else if s.as_str() == "ended" %}
+        <span id="state-badge" class="status badge bg-dark">ended</span>
+      {% else if s.as_str() == "dead" %}
+        <span id="state-badge" class="status badge bg-secondary">offline</span>
+      {% else %}
+        <span id="state-badge" class="status badge bg-secondary">{{ s.as_str() }}</span>
+      {% endif %}
+    {% when None %}
+      <span id="state-badge" class="status badge bg-secondary">offline</span>
+  {% endmatch %}
 </div>
 <div class="claude-grid {% if !connected %}disconnected{% endif %}" id="claude-grid">
   <div class="term-wrap">

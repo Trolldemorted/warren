@@ -210,11 +210,7 @@ async fn agents_page(State(state): State<AppState>, headers: HeaderMap) -> Respo
             // single registry snapshot.
             let mut rows = Vec::with_capacity(agents.len());
             for a in agents {
-                let status = state
-                    .live
-                    .registry
-                    .get(&a.id)
-                    .map(|h| h.snapshot().state);
+                let status = state.live.registry.get(&a.id).map(|h| h.snapshot().state);
                 let action_items = crate::db_ops::list_inbox_for_agent(
                     &state.db,
                     a.id,
@@ -953,11 +949,13 @@ async fn agent_claude_page(
     match crate::db_ops::get_agent(&state.db, id).await {
         Ok(Some(agent)) => {
             let connected = state.live.registry.contains_key(&id);
+            let initial_state = state.live.registry.get(&id).map(|h| h.snapshot().state);
             render(AgentClaudeTemplate {
                 nav: Some("agents"),
                 flash: None,
                 agent,
                 connected,
+                initial_state,
                 tui_cols: state.config.tui_cols,
                 tui_rows: state.config.tui_rows,
             })
