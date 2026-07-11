@@ -8,7 +8,7 @@ use crate::models::{
 use sea_orm::sea_query::{Expr, IntoCondition, Order, Query};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, FromQueryResult,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -882,7 +882,17 @@ pub async fn update_scheduled_prompt(
 }
 
 pub async fn delete_scheduled_prompt(db: &Db, id: Uuid) -> AppResult<()> {
-    let res = scheduled_prompt::Entity::delete_by_id(id).exec(db).await?;
+    // The runs are reachable only via their parent prompt (every
+    // consumer filters by `scheduled_prompt_id`), so once the prompt is
+    // gone the runs have no UI/API surface to read them. Cascade at
+    // the application layer so the FK doesn't block the delete.
+    let txn = db.begin().await?;
+    scheduled_prompt_run::Entity::delete_many()
+        .filter(scheduled_prompt_run::Column::ScheduledPromptId.eq(id))
+        .exec(&txn)
+        .await?;
+    let res = scheduled_prompt::Entity::delete_by_id(id).exec(&txn).await?;
+    txn.commit().await?;
     if res.rows_affected == 0 {
         return Err(AppError::NotFound);
     }
