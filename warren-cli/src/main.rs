@@ -39,7 +39,7 @@ fn build_requests_cmd(admin: bool) -> Command {
             Command::new("create")
                 .about("Create a request")
                 .arg(Arg::new("class").long("class").num_args(1).required(true))
-                .arg(Arg::new("kind").long("type").num_args(1).value_name("KIND"))
+                .arg(Arg::new("kind").long("kind").num_args(1).value_name("KIND"))
                 .arg(
                     Arg::new("file")
                         .short('f')
