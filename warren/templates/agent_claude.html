@@ -141,6 +141,10 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   {% endmatch %}
 </div>
 <div class="claude-grid {% if !connected %}disconnected{% endif %}" id="claude-grid">
+  <div class="mb-2">
+    <button class="btn btn-sm btn-outline-secondary" id="copy-btn" type="button">Copy</button>
+    <button class="btn btn-sm btn-outline-secondary" id="copy-selection-btn" type="button" disabled title="Copy selected text — Shift+drag to select">Copy selection</button>
+  </div>
   <div class="term-wrap">
     <div id="term"></div>
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its terminal</div>
@@ -315,6 +319,20 @@ function emitBackspace() {
 }
 term.attachCustomKeyEventHandler(e => {
   if (e.type !== 'keydown' && e.type !== 'keypress') return true;
+  // §Copy affordance: xterm renders to a <canvas>, so the browser can't
+  // natively select text and Ctrl+C is wired to ETX (interrupts the
+  // agent). Ctrl/Cmd+Shift+C copies the full scrollback. Only keydown
+  // — keypress would double-fire for the same combo and clip the
+  // Backspace path below (the keypress branch fires after keydown for
+  // printable chars). `e.code === 'KeyC'` is the physical key, so
+  // non-US layouts and IME states still trigger.
+  if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.shiftKey &&
+      e.code === 'KeyC') {
+    e.preventDefault();
+    e.stopPropagation();
+    copyAll();
+    return false;
+  }
   if (!isBackspaceEvent(e)) return true;
   e.preventDefault();
   e.stopPropagation();
@@ -324,6 +342,77 @@ term.attachCustomKeyEventHandler(e => {
   lastBackspaceSentAt = now;
   emitBackspace();
   return false;
+});
+
+// §Copy affordance: full-scrollback copy via the Clipboard API with a
+// document.execCommand fallback for non-secure contexts. Status surfaces
+// through the existing showActionToast helper, so the operator sees
+// "copied N chars" / "copy failed" the same way they see action-button
+// outcomes. Stays enabled in viewer mode — a viewer is the exact case
+// that needs to copy agent output (and `pointer-events: none` on #term
+// in viewer mode would otherwise block Shift+drag selection too).
+async function copyAll() {
+  term.selectAll();
+  const text = term.getSelection();
+  term.clearSelection();
+  if (!text) {
+    showActionToast('nothing to copy');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showActionToast(`copied ${text.length.toLocaleString()} chars`);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    document.body.removeChild(ta);
+    showActionToast(ok ? `copied ${text.length.toLocaleString()} chars` : 'copy failed');
+  }
+}
+
+document.getElementById('copy-btn').addEventListener('click', copyAll);
+const copySelectionBtn = document.getElementById('copy-selection-btn');
+
+// §Copy selection: xterm canvas selection requires Shift+drag, which is
+// undiscoverable, so the button is disabled until there's a selection and
+// the tooltip teaches the gesture. `onSelectionChange` (xterm 5.5+) fires
+// on every selection change including empty-after-clear, so we refresh
+// the disabled state there rather than polling.
+async function copySelection() {
+  if (!term.hasSelection()) {
+    showActionToast('no selection — Shift+drag to select');
+    return;
+  }
+  const text = term.getSelection();
+  if (!text) {
+    showActionToast('no selection — Shift+drag to select');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    showActionToast(`copied ${text.length.toLocaleString()} chars`);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    document.body.removeChild(ta);
+    showActionToast(ok ? `copied ${text.length.toLocaleString()} chars` : 'copy failed');
+  }
+}
+copySelectionBtn.addEventListener('click', copySelection);
+term.onSelectionChange(() => {
+  copySelectionBtn.disabled = !term.hasSelection();
 });
 
 let ws = null;
