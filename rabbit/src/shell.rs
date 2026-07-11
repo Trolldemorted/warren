@@ -19,8 +19,8 @@
 
 use crate::config::Config;
 use crate::link::LinkCmd;
-use rabbit_lib::wire::TermSize;
 use crate::pty::Pty;
+use rabbit_lib::wire::TermSize;
 use rabbit_lib::wire::TERM_CHAN_SHELL;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;

@@ -123,7 +123,12 @@ pub async fn run(config: Config) -> Result<()> {
             config.shell_bin,
             config.shell_args
         );
-        Some(shell::spawn(&config, &initial_tui, cmd_tx.clone(), shutdown.clone()))
+        Some(shell::spawn(
+            &config,
+            &initial_tui,
+            cmd_tx.clone(),
+            shutdown.clone(),
+        ))
     } else {
         None
     };
@@ -192,14 +197,25 @@ pub async fn run(config: Config) -> Result<()> {
     loop {
         // Spawn a new claude generation if we have nothing running and aren't dead.
         if active.is_none() && !dead && !shutdown.load(Ordering::SeqCst) {
+            // Capture `was_some` BEFORE `take()` so the effective_args
+            // decision knows whether this spawn is a cold start (no
+            // operator Restart in flight) or an operator-issued Restart.
+            // On cold start we skip --continue so a brand-new rabbit
+            // process doesn't slam into `No conversation found to
+            // continue` and crash-loop the supervisor before the first
+            // SessionStart hook fires.
+            let was_some = restart_pending.is_some();
             let fresh = restart_pending.take().unwrap_or(false);
+            let cold_start = !was_some;
             let session_id = observer.latest_session();
-            let args = respawn::effective_args(&base_args, session_id.as_deref(), fresh);
+            let args =
+                respawn::effective_args(&base_args, session_id.as_deref(), fresh, cold_start);
             log::info!(
-                "spawning pty: bin={} args={:?} fresh={}",
+                "spawning pty: bin={} args={:?} fresh={} cold_start={}",
                 config.claude_bin,
                 args,
-                fresh
+                fresh,
+                cold_start
             );
             match spawn_run_one(
                 &config,

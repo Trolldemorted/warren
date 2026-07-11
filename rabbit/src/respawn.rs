@@ -7,14 +7,27 @@ use std::time::{Duration, Instant};
 /// - `fresh=true` → no resume flag. Brand-new session; the operator asked for
 ///   it (warren's `restart{fresh:true}`), or we are crash-looping past the
 ///   threshold and want a clean slate.
-/// - `fresh=false`, known `session_id` → `--resume <id>`. The
+/// - `cold_start=true` → no resume flag. The rabbit process just started;
+///   no operator-issued Restart is in flight, so trying to `--continue`
+///   against an empty `~/.claude/projects/<encoded-cwd>/` would only print
+///   "No conversation found to continue" and crash-loop the supervisor.
+/// - `cold_start=false`, known `session_id` → `--resume <id>`. The
 ///   `SessionStart` hook gave us the id; continue the same conversation.
-/// - `fresh=false`, no `session_id` yet → `--continue`. claude resumes its
-///   most recent conversation (the §1 stable flag, useful when the hook
-///   hasn't fired yet — e.g. very early restarts, or after `~/.claude` was
-///   wiped but the encoded-cwd dir survived on disk).
-pub fn effective_args(base: &[String], session_id: Option<&str>, fresh: bool) -> Vec<String> {
+/// - `cold_start=false`, no `session_id` yet → `--continue`. Operator asked
+///   for a Restart but the hook hasn't fired yet (e.g. very early restart
+///   window); `claude --continue` reaches into the encoded-cwd dir and
+///   picks the most recent conversation. This is the only place the flag
+///   remains — cold-start deliberately skips it.
+pub fn effective_args(
+    base: &[String],
+    session_id: Option<&str>,
+    fresh: bool,
+    cold_start: bool,
+) -> Vec<String> {
     if fresh {
+        return base.to_vec();
+    }
+    if cold_start {
         return base.to_vec();
     }
     match session_id {
@@ -73,17 +86,19 @@ impl CrashWindow {
 mod tests {
     use super::*;
 
+    fn base() -> Vec<String> {
+        vec!["--dangerously-skip-permissions".to_string()]
+    }
+
     #[test]
     fn effective_args_fresh_true_ignores_session() {
-        let base = vec!["--dangerously-skip-permissions".to_string()];
-        let out = effective_args(&base, Some("sess-abc"), true);
-        assert_eq!(out, base);
+        let out = effective_args(&base(), Some("sess-abc"), true, false);
+        assert_eq!(out, base());
     }
 
     #[test]
     fn effective_args_appends_resume_when_session_and_not_fresh() {
-        let base = vec!["--dangerously-skip-permissions".to_string()];
-        let out = effective_args(&base, Some("sess-abc"), false);
+        let out = effective_args(&base(), Some("sess-abc"), false, false);
         assert_eq!(
             out,
             vec![
@@ -96,16 +111,15 @@ mod tests {
 
     #[test]
     fn effective_args_passthrough_when_no_session() {
-        let base = vec!["--dangerously-skip-permissions".to_string()];
         assert_eq!(
-            effective_args(&base, None, false),
+            effective_args(&base(), None, false, false),
             vec![
                 "--dangerously-skip-permissions".to_string(),
                 "--continue".to_string(),
             ]
         );
         assert_eq!(
-            effective_args(&base, Some(""), false),
+            effective_args(&base(), Some(""), false, false),
             vec![
                 "--dangerously-skip-permissions".to_string(),
                 "--continue".to_string(),
@@ -115,10 +129,10 @@ mod tests {
 
     #[test]
     fn effective_args_continue_when_session_unknown_fresh_false() {
-        // Without a session_id, fresh=false should fall back to --continue,
-        // not start a fresh session — the operator did not ask for one.
-        let base = vec!["--dangerously-skip-permissions".to_string()];
-        let out = effective_args(&base, None, false);
+        // Operator-issued Restart with no SessionStart fired yet: the
+        // encoded-cwd dir may still have a most-recent conversation
+        // --continue can pick up. `--continue` is appropriate here.
+        let out = effective_args(&base(), None, false, false);
         assert_eq!(
             out,
             vec![
@@ -129,13 +143,47 @@ mod tests {
     }
 
     #[test]
+    fn effective_args_cold_start_skips_continue() {
+        // Cold start (rabbit process just started, no operator Restart in
+        // flight) with no known session_id: do NOT pass --continue. The
+        // encoded-cwd conversation store is almost certainly empty, so
+        // claude would print "No conversation found to continue" and exit
+        // non-zero, putting the supervisor into a --continue/-exit crash
+        // loop. Just spawn claude fresh; the SessionStart hook will then
+        // populate `latest_session` for the next restart.
+        let out = effective_args(&base(), None, false, true);
+        assert_eq!(
+            out,
+            base(),
+            "cold start with no session must not pass --continue"
+        );
+
+        let out = effective_args(&base(), Some(""), false, true);
+        assert_eq!(
+            out,
+            base(),
+            "empty session id on cold start must not pass --continue"
+        );
+    }
+
+    #[test]
+    fn effective_args_cold_start_with_stale_session_still_skips() {
+        // Edge case: session_id is somehow populated at cold start
+        // (e.g. persisted via a future enhancement). Don't trust it —
+        // that conversation was tied to a previous rabbit process and
+        // may not exist on this run's filesystem. Cold-start clean.
+        let out = effective_args(&base(), Some("stale-id"), false, true);
+        assert_eq!(out, base());
+    }
+
+    #[test]
     fn effective_args_preserves_base_order() {
-        let base = vec![
+        let base_args = vec![
             "--model".to_string(),
             "opus".to_string(),
             "--dangerously-skip-permissions".to_string(),
         ];
-        let out = effective_args(&base, Some("sess-abc"), false);
+        let out = effective_args(&base_args, Some("sess-abc"), false, false);
         assert_eq!(
             out,
             vec![

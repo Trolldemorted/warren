@@ -28,8 +28,7 @@ use uuid::Uuid;
 use rabbit::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
 use rabbit::meta_ring::MetaRing;
 use rabbit::wire::{
-    Envelope, EnvelopeBody, ScreenSnapshotBody, PROTOCOL_VERSION, TERM_CHAN_CLAUDE,
-    TERM_CHAN_SHELL,
+    Envelope, EnvelopeBody, ScreenSnapshotBody, PROTOCOL_VERSION, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
 };
 
 type Ws = WebSocketStream<TcpStream>;

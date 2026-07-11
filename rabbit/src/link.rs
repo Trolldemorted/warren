@@ -474,7 +474,10 @@ mod tests {
         );
         assert_eq!(
             link.term_size(),
-            TermSize { cols: 120, rows: 40 }
+            TermSize {
+                cols: 120,
+                rows: 40
+            }
         );
     }
 
