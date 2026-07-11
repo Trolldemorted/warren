@@ -57,10 +57,8 @@ fn entity_schema_matches_migrations() {
     let target_url = format!("postgres://postgres@127.0.0.1:5432/{db}?sslmode=disable");
     let dev_url = format!("postgres://postgres@127.0.0.1:5432/{db}_dev?sslmode=disable");
 
-    psql_exec(&admin_url(), &format!("CREATE DATABASE \"{db}\""))
-        .expect("create test db");
-    psql_exec(&admin_url(), &format!("CREATE DATABASE \"{db}_dev\""))
-        .expect("create dev db");
+    psql_exec(&admin_url(), &format!("CREATE DATABASE \"{db}\"")).expect("create test db");
+    psql_exec(&admin_url(), &format!("CREATE DATABASE \"{db}_dev\"")).expect("create dev db");
 
     let result = (|| -> Result<(), String> {
         let apply = Command::new("atlas")
@@ -134,7 +132,10 @@ fn entity_schema_matches_migrations() {
     })();
 
     let _ = psql_exec(&admin_url(), &format!("DROP DATABASE IF EXISTS \"{db}\""));
-    let _ = psql_exec(&admin_url(), &format!("DROP DATABASE IF EXISTS \"{db}_dev\""));
+    let _ = psql_exec(
+        &admin_url(),
+        &format!("DROP DATABASE IF EXISTS \"{db}_dev\""),
+    );
 
     if let Err(e) = result {
         panic!("{e}");

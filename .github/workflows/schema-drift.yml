@@ -1,0 +1,46 @@
+name: Schema drift
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  entity-matches-migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Atlas
+        uses: ariga/setup-atlas@v0
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Build warren binary
+        run: cargo build -p warren --bin warren
+
+      - name: Run schema-drift test
+        env:
+          PATH: ${{ github.workspace }}/target/debug:$PATH
+        run: cargo test -p warren --test schema_drift -- --ignored --nocapture
