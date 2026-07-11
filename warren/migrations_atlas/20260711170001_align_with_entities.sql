@@ -1,0 +1,8 @@
+-- Drop index "scheduled_prompts_next_fire_idx" from table: "scheduled_prompts"
+DROP INDEX "public"."scheduled_prompts_next_fire_idx";
+-- Modify "scheduled_prompts" table
+ALTER TABLE "public"."scheduled_prompts" ALTER COLUMN "id" SET DEFAULT gen_random_uuid(), ALTER COLUMN "name" TYPE character varying, ALTER COLUMN "prompt_text" TYPE character varying, ALTER COLUMN "enabled" DROP DEFAULT, ALTER COLUMN "ignore_inbox_state" DROP DEFAULT, ALTER COLUMN "weekly_safety_buffer_pct" DROP DEFAULT, ALTER COLUMN "session_safety_buffer_pct" DROP DEFAULT, ALTER COLUMN "target_class" TYPE character varying, ALTER COLUMN "target_kind" TYPE character varying;
+-- Create index "scheduled_prompts_next_fire_idx" to table: "scheduled_prompts"
+CREATE INDEX "scheduled_prompts_next_fire_idx" ON "public"."scheduled_prompts" ("next_fire_at");
+-- Modify "scheduled_prompt_runs" table
+ALTER TABLE "public"."scheduled_prompt_runs" DROP CONSTRAINT "fk-scheduled_prompt_runs-agent_id", DROP CONSTRAINT "fk-scheduled_prompt_runs-scheduled_prompt_id", ALTER COLUMN "outcome" TYPE character varying, ALTER COLUMN "skip_reason" TYPE character varying, ALTER COLUMN "outcome_error" TYPE character varying, ALTER COLUMN "usage_weekly_pct" TYPE integer, ALTER COLUMN "usage_session_pct" TYPE integer, ADD CONSTRAINT "fk-scheduled_prompt_runs-agent_id" FOREIGN KEY ("agent_id") REFERENCES "public"."agents" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION, ADD CONSTRAINT "fk-scheduled_prompt_runs-scheduled_prompt_id" FOREIGN KEY ("scheduled_prompt_id") REFERENCES "public"."scheduled_prompts" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION;
