@@ -128,7 +128,9 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScheduledPromptNew {
-    pub agent_id: Uuid,
+    pub target_class: String,
+    #[serde(default)]
+    pub target_kind: Option<String>,
     pub name: String,
     pub prompt_text: String,
     pub interval_seconds: i64,

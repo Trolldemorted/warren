@@ -578,6 +578,9 @@ fn validate_channel_new(n: &ChannelNew) -> AppResult<()> {
 }
 
 fn validate_scheduled_prompt_new(n: &ScheduledPromptNew) -> AppResult<()> {
+    if n.target_class.trim().is_empty() {
+        return Err(AppError::BadRequest("target_class required".into()));
+    }
     if n.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
     }
@@ -668,19 +671,22 @@ async fn api_get_scheduled_prompt(
 async fn api_create_scheduled_prompt(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Json(new): Json<ScheduledPromptNew>,
+    Json(mut new): Json<ScheduledPromptNew>,
 ) -> AppResult<Json<scheduled_prompt::Model>> {
     ctx.require_admin()?;
-    validate_scheduled_prompt_new(&new)?;
-    if crate::db_ops::get_agent(&state.db, new.agent_id)
-        .await?
-        .is_none()
-    {
-        return Err(AppError::BadRequest(format!(
-            "agent {} not found",
-            new.agent_id
-        )));
+    if new.target_class.trim().is_empty() {
+        return Err(AppError::BadRequest("target_class required".into()));
     }
+    new.target_class = new.target_class.trim().to_string();
+    if let Some(k) = &new.target_kind {
+        let t = k.trim();
+        new.target_kind = if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        };
+    }
+    validate_scheduled_prompt_new(&new)?;
     let prompt = crate::db_ops::create_scheduled_prompt(&state.db, &new).await?;
     Ok(Json(prompt))
 }

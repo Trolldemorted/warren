@@ -268,7 +268,6 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        agent_id: { type: string, format: uuid }
         name: { type: string }
         prompt_text: { type: string }
         interval_seconds: { type: integer, format: int64 }
@@ -289,11 +288,14 @@ components:
         next_fire_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-      required: [id, agent_id, name, prompt_text, interval_seconds, enabled, ignore_inbox_state, weekly_safety_buffer_pct, session_safety_buffer_pct, created_at, updated_at]
+        target_class: { type: string }
+        target_kind: { type: string, nullable: true }
+      required: [id, name, prompt_text, interval_seconds, enabled, ignore_inbox_state, weekly_safety_buffer_pct, session_safety_buffer_pct, created_at, updated_at, target_class]
     ScheduledPromptNew:
       type: object
       properties:
-        agent_id: { type: string, format: uuid }
+        target_class: { type: string }
+        target_kind: { type: string, nullable: true }
         name: { type: string }
         prompt_text: { type: string }
         interval_seconds: { type: integer, format: int64, minimum: 1 }
@@ -301,7 +303,7 @@ components:
         ignore_inbox_state: { type: boolean, default: false }
         weekly_safety_buffer_pct: { type: integer, format: int32, default: 0, minimum: 0, maximum: 100 }
         session_safety_buffer_pct: { type: integer, format: int32, default: 0, minimum: 0, maximum: 100 }
-      required: [agent_id, name, prompt_text, interval_seconds]
+      required: [target_class, name, prompt_text, interval_seconds]
     ScheduledPromptPatch:
       type: object
       properties:
@@ -317,7 +319,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         scheduled_prompt_id: { type: string, format: uuid }
-        agent_id: { type: string, format: uuid }
+        agent_id: { type: string, format: uuid, nullable: true }
         fired_at: { type: string, format: date-time }
         finished_at: { type: string, format: date-time, nullable: true }
         outcome:
@@ -330,8 +332,8 @@ components:
             - warren_restart
             - rabbit_offline
             - failed
-            - skipped_offline
-            - skipped_no_idle
+            - skipped_no_matching_agent
+            - skipped_no_idle_agent
             - skipped_no_inbox
             - skipped_unsafe_scrape
             - skipped_weekly_budget

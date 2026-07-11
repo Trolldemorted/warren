@@ -11,7 +11,6 @@ pub struct Model {
         default_expr = "Expr::cust(\"gen_random_uuid()\")"
     )]
     pub id: Uuid,
-    pub agent_id: Uuid,
     pub name: String,
     pub prompt_text: String,
     pub interval_seconds: i64,
@@ -30,24 +29,17 @@ pub struct Model {
     pub created_at: ChronoDateTimeUtc,
     #[sea_orm(default_expr = "Expr::cust(\"now()\")")]
     pub updated_at: ChronoDateTimeUtc,
+    /// Worker pool address: at fire time the scheduler picks any
+    /// connected idle agent with `class = target_class` and
+    /// `kind IS NOT DISTINCT FROM target_kind`.
+    pub target_class: String,
+    pub target_kind: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::agent::Entity",
-        from = "Column::AgentId",
-        to = "super::agent::Column::Id"
-    )]
-    Agent,
     #[sea_orm(has_many = "super::scheduled_prompt_run::Entity")]
     Runs,
-}
-
-impl Related<super::agent::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Agent.def()
-    }
 }
 
 impl Related<super::scheduled_prompt_run::Entity> for Entity {
@@ -66,9 +58,10 @@ pub fn extra_indexes() -> Vec<IndexCreateStatement> {
             .col(Column::NextFireAt)
             .to_owned(),
         Index::create()
-            .name("scheduled_prompts_agent_idx")
+            .name("scheduled_prompts_target_idx")
             .table(Entity)
-            .col(Column::AgentId)
+            .col(Column::TargetClass)
+            .col(Column::TargetKind)
             .to_owned(),
     ]
 }

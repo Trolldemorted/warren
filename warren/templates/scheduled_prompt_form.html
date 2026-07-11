@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% block body %}
 <h1 class="h3 mb-3">{% if let Some(p) = prompt %}Edit schedule{% else %}New schedule{% endif %}</h1>
-{% if agents.is_empty() %}
+{% if classes.is_empty() %}
   <div class="alert alert-warning">
-    No agents registered. Create at least one agent before defining schedules.
+    No agent classes defined. Create at least one agent before defining schedules.
   </div>
 {% else %}
 <form method="post" action="{{ form_action }}" class="col-md-8">
@@ -11,20 +11,22 @@
     <label class="form-label">Name</label>
     <input class="form-control" name="name" required value="{{ name }}">
   </div>
-  <div class="mb-3">
-    <label class="form-label">Agent</label>
-    {% if let Some(p) = prompt %}
-      <select class="form-select" name="agent_id" disabled>
-        {% for a in agents %}<option value="{{ a.id }}" {% if selected_agent_id_str == a.id.to_string() %}selected{% endif %}>{{ a.name }} ({{ a.class }})</option>{% endfor %}
+  <div class="row">
+    <div class="col-md-6 mb-3">
+      <label class="form-label">Target class</label>
+      <select class="form-select" name="target_class" required>
+        <option value="" disabled {% if target_class.is_empty() %}selected{% endif %}>Select…</option>
+        {% for c in classes %}<option value="{{ c }}" {% if target_class == c.as_str() %}selected{% endif %}>{{ c }}</option>{% endfor %}
       </select>
-      <input type="hidden" name="agent_id" value="{{ selected_agent_id_str }}">
-      <small class="text-muted">Agent cannot be changed after creation.</small>
-    {% else %}
-      <select class="form-select" name="agent_id" required>
-        <option value="" disabled {% if selected_agent_id.is_none() %}selected{% endif %}>Select…</option>
-        {% for a in agents %}<option value="{{ a.id }}" {% if let Some(sel) = selected_agent_id %}{% if sel.to_string() == a.id.to_string() %}selected{% endif %}{% endif %}>{{ a.name }} ({{ a.class }})</option>{% endfor %}
+    </div>
+    <div class="col-md-6 mb-3">
+      <label class="form-label">Target kind</label>
+      <select class="form-select" name="target_kind">
+        <option value="" {% if target_kind.is_empty() %}selected{% endif %}>any</option>
+        {% for k in kinds %}<option value="{{ k }}" {% if target_kind == k.as_str() %}selected{% endif %}>{{ k }}</option>{% endfor %}
       </select>
-    {% endif %}
+      <small class="text-muted">Optional. <code>any</code> matches agents with NULL kind.</small>
+    </div>
   </div>
   <div class="mb-3">
     <label class="form-label">Prompt text</label>

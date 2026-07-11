@@ -1015,7 +1015,8 @@ async fn agent_shell_page(
 
 #[derive(Deserialize)]
 struct ScheduledPromptForm {
-    agent_id: String,
+    target_class: String,
+    target_kind: String,
     name: String,
     prompt_text: String,
     interval_seconds: String,
@@ -1032,14 +1033,15 @@ fn scheduled_prompt_form_checkbox(s: Option<String>) -> bool {
 fn parse_scheduled_prompt_form(
     form: ScheduledPromptForm,
 ) -> Result<ScheduledPromptFormParsed, AppError> {
+    if form.target_class.trim().is_empty() {
+        return Err(AppError::BadRequest("target_class required".into()));
+    }
     if form.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
     }
     if form.prompt_text.trim().is_empty() {
         return Err(AppError::BadRequest("prompt_text required".into()));
     }
-    let agent_id = Uuid::parse_str(form.agent_id.trim())
-        .map_err(|_| AppError::BadRequest("invalid agent_id".into()))?;
     let interval_seconds = form
         .interval_seconds
         .trim()
@@ -1069,7 +1071,15 @@ fn parse_scheduled_prompt_form(
         ));
     }
     Ok(ScheduledPromptFormParsed {
-        agent_id,
+        target_class: form.target_class.trim().to_string(),
+        target_kind: {
+            let t = form.target_kind.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        },
         name: form.name.trim().to_string(),
         prompt_text: form.prompt_text,
         interval_seconds,
@@ -1081,7 +1091,8 @@ fn parse_scheduled_prompt_form(
 }
 
 struct ScheduledPromptFormParsed {
-    agent_id: Uuid,
+    target_class: String,
+    target_kind: Option<String>,
     name: String,
     prompt_text: String,
     interval_seconds: i64,
@@ -1089,10 +1100,6 @@ struct ScheduledPromptFormParsed {
     ignore_inbox_state: bool,
     weekly_safety_buffer_pct: i32,
     session_safety_buffer_pct: i32,
-}
-
-async fn load_agents(db: &crate::db::Db) -> AppResult<Vec<crate::entity::agent::Model>> {
-    crate::db_ops::list_agents(db).await
 }
 
 async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1103,19 +1110,9 @@ async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMa
         Ok(v) => v,
         Err(e) => return err_page(e),
     };
-    let agents = match load_agents(&state.db).await {
-        Ok(v) => v,
-        Err(e) => return err_page(e),
-    };
-    let agent_map: std::collections::HashMap<Uuid, &crate::entity::agent::Model> =
-        agents.iter().map(|a| (a.id, a)).collect();
 
     let mut rows: Vec<ScheduledPromptRow> = Vec::with_capacity(prompts.len());
     for p in prompts {
-        let agent_name = agent_map
-            .get(&p.agent_id)
-            .map(|a| a.name.clone())
-            .unwrap_or_else(|| "(deleted)".to_string());
         let interval_display = format_interval(p.interval_seconds);
         let last_outcome =
             match crate::db_ops::list_runs_for_scheduled_prompt(&state.db, p.id, 1).await {
@@ -1124,8 +1121,9 @@ async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMa
             };
         let last_outcome_badge = last_outcome.as_deref().map(outcome_badge);
         rows.push(ScheduledPromptRow {
+            target_class: p.target_class.clone(),
+            target_kind_display: p.target_kind.clone().unwrap_or_else(|| "any".to_string()),
             prompt: p,
-            agent_name,
             interval_display,
             last_outcome,
             last_outcome_badge: last_outcome_badge.map(str::to_string),
@@ -1143,7 +1141,7 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let agents = match load_agents(&state.db).await {
+    let (classes, kinds) = match load_class_kinds(&state.db).await {
         Ok(v) => v,
         Err(e) => return err_page(e),
     };
@@ -1153,9 +1151,10 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
         flash: None,
         prompt: None,
         form_action: "/admin/scheduled-prompts".into(),
-        agents,
-        selected_agent_id: None,
-        selected_agent_id_str: String::new(),
+        classes,
+        kinds,
+        target_class: String::new(),
+        target_kind: String::new(),
         name: String::new(),
         prompt_text: String::new(),
         interval_seconds: 3600,
@@ -1179,19 +1178,9 @@ async fn scheduled_prompt_create(
         Ok(p) => p,
         Err(e) => return err_page(e),
     };
-    if crate::db_ops::get_agent(&state.db, parsed.agent_id)
-        .await
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        return err_page(AppError::BadRequest(format!(
-            "agent {} not found",
-            parsed.agent_id
-        )));
-    }
     let new = crate::models::ScheduledPromptNew {
-        agent_id: parsed.agent_id,
+        target_class: parsed.target_class,
+        target_kind: parsed.target_kind,
         name: parsed.name,
         prompt_text: parsed.prompt_text,
         interval_seconds: parsed.interval_seconds,
@@ -1214,7 +1203,7 @@ async fn scheduled_prompt_edit_page(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let agents = match load_agents(&state.db).await {
+    let (classes, kinds) = match load_class_kinds(&state.db).await {
         Ok(v) => v,
         Err(e) => return err_page(e),
     };
@@ -1237,9 +1226,10 @@ async fn scheduled_prompt_edit_page(
                 flash: None,
                 prompt: Some(p.clone()),
                 form_action: format!("/admin/scheduled-prompts/{id}"),
-                agents,
-                selected_agent_id: Some(p.agent_id),
-                selected_agent_id_str: p.agent_id.to_string(),
+                classes,
+                kinds,
+                target_class: p.target_class.clone(),
+                target_kind: p.target_kind.clone().unwrap_or_default(),
                 name: p.name,
                 prompt_text: p.prompt_text,
                 interval_seconds: p.interval_seconds,

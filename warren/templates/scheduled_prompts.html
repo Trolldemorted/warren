@@ -5,9 +5,10 @@
   <a href="/admin/scheduled-prompts/new" class="btn btn-primary">New schedule</a>
 </div>
 <p class="text-muted">
-  Schedules periodically fire a prompt against an agent when the agent is connected and idle,
-  has actionable inbox items (unless <em>ignore inbox state</em> is set), and is within
-  budget safety buffers. Skipped runs still consume their slot.
+  Schedules periodically fire a prompt against any connected idle agent matching
+  <code>(target_class, target_kind)</code> that has actionable inbox items (unless
+  <em>ignore inbox state</em> is set) and is within budget safety buffers.
+  Skipped runs still consume their slot.
 </p>
 {% if rows.is_empty() %}
   <p class="text-muted">No scheduled prompts yet.</p>
@@ -16,7 +17,7 @@
   <thead>
     <tr>
       <th>Name</th>
-      <th>Agent</th>
+      <th>Target</th>
       <th>Interval</th>
       <th>Enabled</th>
       <th>Last outcome</th>
@@ -30,7 +31,7 @@
     {% for r in rows %}
     <tr>
       <td>{{ r.prompt.name }}</td>
-      <td><a href="/agent/{{ r.prompt.agent_id }}/claude">{{ r.agent_name }}</a></td>
+      <td><code>{{ r.target_class }}:{{ r.target_kind_display }}</code></td>
       <td><code>{{ r.interval_display }}</code></td>
       <td>
         {% if r.prompt.enabled %}

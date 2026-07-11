@@ -184,14 +184,15 @@ pub struct ScheduledPromptsTemplate {
 }
 
 /// One row of the scheduled-prompts index, bundling the model with
-/// the agent name (resolved by the handler so the template doesn't
-/// need a `HashMap` lookup), a display-formatted interval string,
-/// and a precomputed Bootstrap badge class for the most-recent
-/// run's `outcome` (Askama can't call free functions, so we
-/// compute the class once in the handler).
+/// a `target_class:target_kind` display string (e.g. `"claude:opus"`
+/// or `"claude:any"`), a display-formatted interval string, and a
+/// precomputed Bootstrap badge class for the most-recent run's
+/// `outcome` (Askama can't call free functions, so we compute the
+/// class once in the handler).
 pub struct ScheduledPromptRow {
     pub prompt: crate::entity::scheduled_prompt::Model,
-    pub agent_name: String,
+    pub target_class: String,
+    pub target_kind_display: String,
     pub interval_display: String,
     pub last_outcome: Option<String>,
     pub last_outcome_badge: Option<String>,
@@ -205,12 +206,12 @@ pub struct ScheduledPromptFormTemplate {
     pub flash: Option<Flash>,
     pub prompt: Option<crate::entity::scheduled_prompt::Model>,
     pub form_action: String,
-    pub agents: Vec<crate::entity::agent::Model>,
-    pub selected_agent_id: Option<uuid::Uuid>,
-    /// Pre-rendered string for the hidden input that round-trips
-    /// `agent_id` on edit. Askama can't render `Option<Uuid>`'s
-    /// deref-then-stringify cleanly, so we hand the string in.
-    pub selected_agent_id_str: String,
+    pub classes: Vec<String>,
+    pub kinds: Vec<String>,
+    /// Pre-rendered strings so Askama doesn't have to deref or compare
+    /// `Option<String>` values against the option lists.
+    pub target_class: String,
+    pub target_kind: String,
     pub name: String,
     pub prompt_text: String,
     pub interval_seconds: i64,
@@ -273,6 +274,7 @@ pub fn outcome_badge(outcome: &str) -> &'static str {
         "skipped_offline" | "skipped_no_idle" | "skipped_no_inbox" | "skipped_unsafe_scrape" => {
             "bg-info text-dark"
         }
+        "skipped_no_matching_agent" | "skipped_no_idle_agent" => "bg-info text-dark",
         "skipped_weekly_budget" | "skipped_session_budget" => "bg-info text-dark",
         other if other.starts_with("skipped_") => "bg-info text-dark",
         _ => "bg-secondary",

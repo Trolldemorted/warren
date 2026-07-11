@@ -8,7 +8,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
     pub scheduled_prompt_id: Uuid,
-    pub agent_id: Uuid,
+    pub agent_id: Option<Uuid>,
     #[sea_orm(default_expr = "Expr::cust(\"now()\")")]
     pub fired_at: ChronoDateTimeUtc,
     pub finished_at: Option<ChronoDateTimeUtc>,

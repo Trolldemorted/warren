@@ -102,32 +102,49 @@ pub async fn fire_prompt(
     prompt: scheduled_prompt::Model,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
-    let agent_id = prompt.agent_id;
 
-    let handle = match state.live.registry.get(&agent_id) {
-        Some(h) => h.clone(),
-        None => {
-            skip(&state, &prompt, "skipped_offline", None, None, None, now).await?;
-            return Ok(());
-        }
-    };
+    // (1) Pick a free agent. The schedule targets a class+kind pool,
+    // not a specific agent, so we walk candidate rows from the DB and
+    // check the live registry for an idle handle. No LRU / round-robin
+    // — "any free agent" is the contract; oldest-first ordering gives
+    // a deterministic choice for tests.
+    let chosen =
+        match pick_free_agent(&state, &prompt.target_class, prompt.target_kind.as_deref()).await? {
+            Some(c) => c,
+            None => {
+                let outcome = if db_ops::list_agents_by_class_kind(
+                    &state.db,
+                    &prompt.target_class,
+                    prompt.target_kind.as_deref(),
+                )
+                .await?
+                .is_empty()
+                {
+                    "skipped_no_matching_agent"
+                } else {
+                    "skipped_no_idle_agent"
+                };
+                skip(&state, &prompt, outcome, None, None, None, now).await?;
+                return Ok(());
+            }
+        };
+    let (agent_id, handle) = chosen;
 
-    if handle.snapshot().state != AgentState::Idle {
-        skip(&state, &prompt, "skipped_no_idle", None, None, None, now).await?;
-        return Ok(());
-    }
-
+    // (2) Inbox check on the schedule's address, not the chosen agent.
     if !prompt.ignore_inbox_state {
-        let agent_model = db_ops::get_agent(&state.db, agent_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
-        let n = db_ops::count_inbox_for_agent(&state.db, &agent_model).await?;
+        let n = db_ops::count_inbox_by_target(
+            &state.db,
+            &prompt.target_class,
+            prompt.target_kind.as_deref(),
+        )
+        .await?;
         if n == 0 {
             skip(&state, &prompt, "skipped_no_inbox", None, None, None, now).await?;
             return Ok(());
         }
     }
 
+    // (3) Fresh usage scrape via the chosen handle.
     let (weekly_pct, session_pct) = match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT).await {
         Some(t) => t,
         None => {
@@ -144,7 +161,6 @@ pub async fn fire_prompt(
             return Ok(());
         }
     };
-
     let weekly_i = weekly_pct.map(|x| x.round() as i32);
     let session_i = session_pct.map(|x| x.round() as i32);
 
@@ -179,6 +195,7 @@ pub async fn fire_prompt(
         }
     }
 
+    // (4) Submit to the chosen handle.
     let prompt_id = Uuid::new_v4();
     let submit_result = handle
         .prompt_with_origin(&prompt.prompt_text, false, Uuid::nil())
@@ -188,7 +205,7 @@ pub async fn fire_prompt(
         let run = db_ops::insert_run_started(
             &state.db,
             prompt.id,
-            agent_id,
+            Some(agent_id),
             "failed",
             Some(prompt_id),
             weekly_i,
@@ -209,7 +226,7 @@ pub async fn fire_prompt(
     let run = db_ops::insert_run_started(
         &state.db,
         prompt.id,
-        agent_id,
+        Some(agent_id),
         "fired",
         Some(prompt_id),
         weekly_i,
@@ -231,6 +248,27 @@ pub async fn fire_prompt(
     Ok(())
 }
 
+/// Pick the first connected idle agent matching the given
+/// `(class, kind)`. Returns `Ok(None)` when no candidate matches OR
+/// when every match is offline / non-Idle. Caller distinguishes the
+/// two cases via `list_agents_by_class_kind` if it needs to log the
+/// distinction.
+async fn pick_free_agent(
+    state: &Arc<AppState>,
+    class: &str,
+    kind: Option<&str>,
+) -> anyhow::Result<Option<(Uuid, AgentHandle)>> {
+    let candidates = db_ops::list_agents_by_class_kind(&state.db, class, kind).await?;
+    for a in candidates {
+        if let Some(h) = state.live.registry.get(&a.id) {
+            if h.snapshot().state == AgentState::Idle {
+                return Ok(Some((a.id, h.clone())));
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn skip(
     state: &AppState,
@@ -244,7 +282,7 @@ async fn skip(
     db_ops::insert_run_started(
         &state.db,
         prompt.id,
-        prompt.agent_id,
+        None,
         outcome,
         None,
         weekly_pct,
@@ -255,10 +293,10 @@ async fn skip(
     let next = now + chrono::Duration::seconds(prompt.interval_seconds);
     db_ops::set_next_fire_at(&state.db, prompt.id, next, now).await?;
     log::info!(
-        "scheduler: {} prompt={} agent={}",
+        "scheduler: {} prompt={} agent_class={}",
         outcome,
         prompt.id,
-        prompt.agent_id
+        prompt.target_class
     );
     Ok(())
 }

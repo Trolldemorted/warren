@@ -824,7 +824,6 @@ pub async fn create_scheduled_prompt(
 ) -> AppResult<scheduled_prompt::Model> {
     let am = scheduled_prompt::ActiveModel {
         id: Set(Uuid::new_v4()),
-        agent_id: Set(new.agent_id),
         name: Set(new.name.clone()),
         prompt_text: Set(new.prompt_text.clone()),
         interval_seconds: Set(new.interval_seconds),
@@ -832,6 +831,12 @@ pub async fn create_scheduled_prompt(
         ignore_inbox_state: Set(new.ignore_inbox_state),
         weekly_safety_buffer_pct: Set(new.weekly_safety_buffer_pct),
         session_safety_buffer_pct: Set(new.session_safety_buffer_pct),
+        target_class: Set(new.target_class.trim().to_string()),
+        target_kind: Set(new
+            .target_kind
+            .as_deref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())),
         next_fire_at: Set(Some(chrono::Utc::now())),
         ..Default::default()
     };
@@ -962,7 +967,7 @@ pub async fn mark_scheduled_prompt_finished(
 pub async fn insert_run_started(
     db: &Db,
     scheduled_prompt_id: Uuid,
-    agent_id: Uuid,
+    agent_id: Option<Uuid>,
     outcome: &str,
     prompt_id: Option<Uuid>,
     usage_weekly_pct: Option<i32>,
@@ -1059,50 +1064,57 @@ pub async fn reconcile_after_restart(db: &Db) -> AppResult<u64> {
     Ok(reconciled)
 }
 
-/// Count inbox rows actionable for an agent right now (the same
-/// query `list_inbox_for_agent` runs, but cheaper — just a count).
-/// Used by the scheduler to decide whether to fire when the schedule
-/// has `ignore_inbox_state = false`.
-pub async fn count_inbox_for_agent(db: &Db, agent: &agent::Model) -> AppResult<u64> {
+#[derive(FromQueryResult)]
+struct CountRow {
+    pub count: i64,
+}
+
+/// Find every agent whose `(class, kind)` matches the supplied target.
+/// `kind = None` matches agents whose own `kind IS NULL`; `kind =
+/// Some(k)` matches agents where `kind = k OR kind IS NULL` (the same
+/// inbox-match semantic used by `target_type_match`).
+/// Returns rows ordered by `created_at ASC` so a deterministic caller
+/// (e.g. the scheduler) gets a stable choice.
+pub async fn list_agents_by_class_kind(
+    db: &Db,
+    class: &str,
+    kind: Option<&str>,
+) -> AppResult<Vec<agent::Model>> {
+    let mut q = agent::Entity::find().filter(agent::Column::Class.eq(class.to_string()));
+    q = q.filter(match kind {
+        Some(k) => agent::Column::Kind
+            .is_null()
+            .or(agent::Column::Kind.eq(k.to_string()))
+            .into_condition(),
+        None => agent::Column::Kind.is_null().into_condition(),
+    });
+    Ok(q.order_by_asc(agent::Column::CreatedAt).all(db).await?)
+}
+
+/// Count inbox rows actionable for any agent with the given
+/// `(target_class, target_kind)` right now. Mirrors branch A of
+/// `count_inbox_for_agent` but parameterized directly on the address
+/// rather than a specific agent. Used by the scheduler to decide
+/// whether to fire when `ignore_inbox_state = false`.
+pub async fn count_inbox_by_target(db: &Db, class: &str, kind: Option<&str>) -> AppResult<u64> {
     use sea_orm::QuerySelect;
+    let kind_cond = match kind {
+        Some(k) => request::Column::TargetType
+            .is_null()
+            .or(request::Column::TargetType.eq(k.to_string()))
+            .into_condition(),
+        None => request::Column::TargetType.is_null().into_condition(),
+    };
     let row: Option<i64> = request::Entity::find()
         .select_only()
         .column_as(request::Column::Id.count(), "count")
-        .filter(
-            Condition::any()
-                .add(
-                    Condition::all()
-                        .add(request::Column::Status.eq(1_i16))
-                        .add(request::Column::ClaimedBy.is_null())
-                        .add(request::Column::TargetClass.eq(&agent.class))
-                        .add(
-                            Condition::any()
-                                .add(request::Column::TargetType.is_null())
-                                .add(
-                                    request::Column::TargetType
-                                        .eq(agent.kind.as_deref().unwrap_or("")),
-                                ),
-                        ),
-                )
-                .add(
-                    Condition::all()
-                        .add(request::Column::Status.eq(2_i16))
-                        .add(request::Column::ClaimedBy.eq(agent.id)),
-                )
-                .add(
-                    Condition::all()
-                        .add(request::Column::Status.eq(4_i16))
-                        .add(request::Column::SenderAgentId.eq(agent.id)),
-                ),
-        )
+        .filter(request::Column::Status.eq(1_i16))
+        .filter(request::Column::ClaimedBy.is_null())
+        .filter(request::Column::TargetClass.eq(class.to_string()))
+        .filter(kind_cond)
         .into_model::<CountRow>()
         .one(db)
         .await?
         .map(|r| r.count);
     Ok(row.unwrap_or(0).max(0) as u64)
-}
-
-#[derive(FromQueryResult)]
-struct CountRow {
-    pub count: i64,
 }
