@@ -635,8 +635,7 @@ fn format_pending(body: &str, accepted: &[&str], include_response: bool) -> Resu
 /// error, not a recoverable condition).
 fn read_payload(file: Option<&String>, payload: Option<&String>) -> anyhow::Result<String> {
     let s = match (file, payload) {
-        (Some(p), _) => fs::read_to_string(p)
-            .map_err(|e| anyhow::anyhow!("read {p}: {e}"))?,
+        (Some(p), _) => fs::read_to_string(p).map_err(|e| anyhow::anyhow!("read {p}: {e}"))?,
         (None, Some(s)) => s.clone(),
         (None, None) => {
             return Err(anyhow::anyhow!(

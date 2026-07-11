@@ -292,20 +292,37 @@ function writeBinaryFrame(seq, data) {
 // sometimes Firefox desktop with certain input layouts, delivers Backspace
 // to the canvas with `key === "Backspace"` AND `keyCode === 8` while
 // still letting the browser default action run (Backspace-navigates-back
-// to the prior page). Bypass xterm.js's internal keymap for that exact
-// key combo: emit `\x7f` as a raw byte on the WS, and `preventDefault`
-// even if the WS isn't currently connected (so the browser doesn't
-// trigger history navigation).
-term.attachCustomKeyEventHandler(e => {
-  if (e.type !== 'keydown') return true;
-  if (e.key !== 'Backspace' && e.keyCode !== 8) return true;
-  e.preventDefault();
-  e.stopPropagation();
-  if (!connected || !ws || viewerMode) return false;
+// to the prior page). Newer Firefox mobile builds sometimes deliver the
+// keystroke only as `keypress` with `keyCode === 8` (no preceding keydown
+// reaches xterm.js's helper textarea) when the soft keyboard is shown
+// over an off-screen focusable. Bypass xterm.js's internal keymap for
+// the exact Backspace key combo on both `keydown` and `keypress`, emit
+// `\x7f` as a raw byte on the WS, and `preventDefault` even if the WS
+// isn't currently connected (so the browser doesn't trigger history
+// navigation). A short timestamp debounce collapses the keydown→keypress
+// pair into a single 0x7f frame so a double-fire doesn't reach claude.
+const BACKSPACE_DEBOUNCE_MS = 50;
+let lastBackspaceSentAt = 0;
+function isBackspaceEvent(e) {
+  return e.key === 'Backspace' || e.keyCode === 8;
+}
+function emitBackspace() {
+  if (!connected || !ws || viewerMode) return;
   const buf = new Uint8Array(2);
   buf[0] = 0x01;
   buf[1] = 0x7f;
   ws.send(buf);
+}
+term.attachCustomKeyEventHandler(e => {
+  if (e.type !== 'keydown' && e.type !== 'keypress') return true;
+  if (!isBackspaceEvent(e)) return true;
+  e.preventDefault();
+  e.stopPropagation();
+  const now = (typeof performance !== 'undefined' && performance.now)
+    ? performance.now() : Date.now();
+  if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return false;
+  lastBackspaceSentAt = now;
+  emitBackspace();
   return false;
 });
 

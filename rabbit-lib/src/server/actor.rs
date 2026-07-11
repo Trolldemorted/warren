@@ -105,13 +105,7 @@ pub async fn run(
     tui_rows: u16,
 ) -> Result<()> {
     let join = tokio::spawn(run_inner(
-        store,
-        handle,
-        agent_id,
-        socket,
-        cmd_rx,
-        tui_cols,
-        tui_rows,
+        store, handle, agent_id, socket, cmd_rx, tui_cols, tui_rows,
     ));
     join.await.map_err(|e| anyhow::anyhow!("actor join: {e}"))?;
     Ok(())
@@ -932,4 +926,3 @@ mod tests {
             .expect("join");
     }
 }
-

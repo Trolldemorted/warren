@@ -100,7 +100,10 @@ async fn hello_round_trip_over_tokio_tungstenite() {
             break;
         }
     }
-    assert!(saw_ack, "actor must send an Ack within the first 8 envelopes");
+    assert!(
+        saw_ack,
+        "actor must send an Ack within the first 8 envelopes"
+    );
 
     client.close(None).await.ok();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), server_task).await;

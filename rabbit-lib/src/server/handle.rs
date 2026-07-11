@@ -482,7 +482,6 @@ mod tests {
         );
     }
 
-
     // -----------------------------------------------------------------
     // §A.7 / seq-numbered snapshot protocol — `publish_term` /
     // `subscribe_term` / `replay_term` operate on `TermFrame` (chan,
