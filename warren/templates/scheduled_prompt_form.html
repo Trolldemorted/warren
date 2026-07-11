@@ -38,12 +38,10 @@
     <small class="text-muted">e.g. <code>1800</code> = 30 min, <code>3600</code> = 1 hour.</small>
   </div>
   <div class="mb-3 form-check">
-    <input type="hidden" name="enabled" value="false">
     <input type="checkbox" class="form-check-input" id="enabled" name="enabled" value="true" {% if enabled %}checked{% endif %}>
     <label class="form-check-label" for="enabled">Enabled</label>
   </div>
   <div class="mb-3 form-check">
-    <input type="hidden" name="ignore_inbox_state" value="false">
     <input type="checkbox" class="form-check-input" id="ignore_inbox_state" name="ignore_inbox_state" value="true" {% if ignore_inbox_state %}checked{% endif %}>
     <label class="form-check-label" for="ignore_inbox_state">Ignore inbox state (fire even when no actionable requests)</label>
   </div>
