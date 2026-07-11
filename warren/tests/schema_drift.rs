@@ -18,6 +18,19 @@ fn warren_bin() -> Option<PathBuf> {
     std::env::var_os("CARGO_BIN_EXE_warren").map(PathBuf::from)
 }
 
+/// Atlas migrations directory, resolved relative to this crate's
+/// manifest so the test works no matter where the checkout lives.
+/// `CARGO_MANIFEST_DIR` is set by Cargo at compile time to the
+/// absolute path of `warren/` — hardcoding `/workdir/...` worked
+/// locally but failed on CI runners that check out under
+/// `/home/runner/work/...`.
+fn migrations_dir_url() -> String {
+    format!(
+        "file://{}/migrations_atlas",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 fn has(cmd: &str) -> bool {
     Command::new(cmd).arg("--version").output().is_ok()
 }
@@ -78,7 +91,7 @@ fn entity_schema_matches_migrations() {
                 "migrate",
                 "apply",
                 "--dir",
-                "file:///workdir/warren/migrations_atlas",
+                &migrations_dir_url(),
                 "--url",
                 &target_url,
             ])
