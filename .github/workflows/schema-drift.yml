@@ -41,6 +41,4 @@ jobs:
         run: cargo build -p warren --bin warren
 
       - name: Run schema-drift test
-        env:
-          PATH: ${{ github.workspace }}/target/debug:$PATH
         run: cargo test -p warren --test schema_drift -- --ignored --nocapture

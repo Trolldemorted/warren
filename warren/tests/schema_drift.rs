@@ -8,7 +8,15 @@
 //! --test schema_drift -- --ignored` from a checkout that has both
 //! binaries built and a DB available.
 
+use std::path::PathBuf;
 use std::process::Command;
+
+/// Absolute path to the `warren` binary built in the same workspace,
+/// or `None` when the integration test harness didn't expose it (e.g.
+/// `cargo test` was invoked from a path where Cargo can't see the bin).
+fn warren_bin() -> Option<PathBuf> {
+    std::env::var_os("CARGO_BIN_EXE_warren").map(PathBuf::from)
+}
 
 fn has(cmd: &str) -> bool {
     Command::new(cmd).arg("--version").output().is_ok()
@@ -48,10 +56,14 @@ fn psql_exec(url: &str, sql: &str) -> Result<String, String> {
 #[test]
 #[ignore]
 fn entity_schema_matches_migrations() {
-    if !has("atlas") || !has("warren") {
-        eprintln!("skip: atlas or warren binary not on PATH");
+    if !has("atlas") {
+        eprintln!("skip: atlas binary not on PATH");
         return;
     }
+    let Some(warren) = warren_bin() else {
+        eprintln!("skip: CARGO_BIN_EXE_warren not set (run via `cargo test`)");
+        return;
+    };
 
     let db = test_db_name();
     let target_url = format!("postgres://postgres@127.0.0.1:5432/{db}?sslmode=disable");
@@ -79,7 +91,7 @@ fn entity_schema_matches_migrations() {
             ));
         }
 
-        let dump = Command::new("warren")
+        let dump = Command::new(&warren)
             .args(["dump-schema"])
             .output()
             .map_err(|e| format!("warren dump-schema: {e}"))?;
