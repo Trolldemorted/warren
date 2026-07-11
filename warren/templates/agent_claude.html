@@ -140,11 +140,11 @@ body.viewer-mode #viewer-mode-banner { display: block; }
       <span id="state-badge" class="status badge bg-secondary">offline</span>
   {% endmatch %}
 </div>
+<div class="mb-2">
+  <button class="btn btn-sm btn-outline-secondary" id="copy-btn" type="button">Copy</button>
+  <button class="btn btn-sm btn-outline-secondary" id="copy-selection-btn" type="button" disabled title="Copy selected text — Shift+drag to select">Copy selection</button>
+</div>
 <div class="claude-grid {% if !connected %}disconnected{% endif %}" id="claude-grid">
-  <div class="mb-2">
-    <button class="btn btn-sm btn-outline-secondary" id="copy-btn" type="button">Copy</button>
-    <button class="btn btn-sm btn-outline-secondary" id="copy-selection-btn" type="button" disabled title="Copy selected text — Shift+drag to select">Copy selection</button>
-  </div>
   <div class="term-wrap">
     <div id="term"></div>
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its terminal</div>
