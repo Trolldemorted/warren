@@ -485,6 +485,43 @@ pub async fn run(config: Config) -> Result<()> {
                             );
                         }
                     }
+                    Some(LinkEvent::Connected) => {
+                        // §Reconnect state resync: the link just
+                        // (re)established the WS and delivered a
+                        // Hello with `state=Starting`. Warren has no
+                        // memory of the previous connection's state
+                        // and will see us as Starting until we push
+                        // a real State envelope. The supervisor's
+                        // own State(Idle) publish (inside
+                        // `spawn_run_one`) only fires when claude is
+                        // being spawned fresh — on a warren-side
+                        // restart with claude still running, that
+                        // path never runs and the scheduler sees
+                        // the agent as Starting forever, refusing to
+                        // dispatch. Push the current observer state
+                        // (Idle/Running/...) + session_id so the
+                        // scheduler and any browser pane see us in
+                        // the right shape immediately. On the very
+                        // first connect this is also fine:
+                        // `observer.latest_state()` is `Starting`
+                        // until `spawn_run_one` overrides it, so we
+                        // publish Starting here and Idle a few
+                        // hundred ms later when claude is up. A
+                        // duplicate State(Idle) arriving on the
+                        // first-connect path is harmless (idempotent
+                        // in `update_state`).
+                        let st = observer.latest_state();
+                        let _ = send_state(
+                            &observer,
+                            &cmd_tx,
+                            StateFrame {
+                                state: agent_state_from_observer(st),
+                                session_id: observer.latest_session(),
+                                reason: None,
+                            },
+                        )
+                        .await;
+                    }
                     None => {
                         log::warn!("warren_link event channel closed");
                     }

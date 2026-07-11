@@ -926,4 +926,91 @@ mod tests {
             .expect("run_inner joins within 2s")
             .expect("join");
     }
+
+    /// Drives `run_inner` with a Hello(state=Starting) followed by a
+    /// State(state=Idle) envelope and asserts the handle's snapshot
+    /// reflects Idle. This is the exact shape of a real rabbit reconnect
+    /// after a warren restart: the link starts in `Starting` while the
+    /// claude supervisor spawns, then publishes `State{Idle}` once
+    /// claude is up. If `handle.snapshot().state` is still `Starting`
+    /// here, the bug reproduces — and we know the wiring is wrong, not
+    /// some other live-system noise.
+    #[tokio::test]
+    async fn run_inner_transitions_starting_to_idle_on_state_envelope() {
+        let agent_id = Uuid::new_v4();
+        let handle = AgentHandle::new(agent_id);
+
+        // Hello with state=Starting — what the rabbit link sends while
+        // the claude child is still being spawned (see
+        // `rabbit/src/link.rs:241`).
+        let hello = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 1,
+            body: EnvelopeBody::Hello(HelloUp {
+                agent_id,
+                protocol_v: PROTOCOL_VERSION,
+                claude_version: "test-1.0".into(),
+                session_id: None,
+                state: AgentState::Starting,
+                term_size: TermSize { cols: 80, rows: 24 },
+            }),
+        };
+        let hello_json = serde_json::to_string(&hello).expect("serialize hello");
+
+        // The State envelope the supervisor sends once claude is up
+        // (see `rabbit/src/supervisor.rs:~1088`).
+        let idle = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 2,
+            body: EnvelopeBody::State(crate::wire::StateFrame {
+                state: AgentState::Idle,
+                session_id: Some("session-A".into()),
+                reason: None,
+            }),
+        };
+        let idle_json = serde_json::to_string(&idle).expect("serialize state");
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TransportMsg>();
+        tx.send(TransportMsg::Text(hello_json)).expect("preload hello");
+        tx.send(TransportMsg::Text(idle_json)).expect("preload state");
+
+        let transport = MockWsTransport {
+            inbound: rx,
+            outbound: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let store: Arc<dyn SessionStore> = Arc::new(StubStore);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+
+        let join = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                run_inner(store, handle, agent_id, transport, cmd_rx, 120, 40).await;
+            }
+        });
+        // Keep cmd_tx alive for the whole test — dropping it makes
+        // `cmd_rx.recv()` return `None` and the actor loop breaks
+        // before processing the State envelope.
+        let cmd_tx = cmd_tx;
+
+        // Wait for the snapshot to flip to Idle. Poll briefly so we
+        // don't hang if the State envelope is silently dropped.
+        let snap = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let s = handle.snapshot();
+                if s.state == AgentState::Idle {
+                    return s;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("snapshot transitions to Idle within 2s");
+
+        assert_eq!(snap.state, AgentState::Idle);
+        assert_eq!(snap.session_id.as_deref(), Some("session-A"));
+
+        tx.send(TransportMsg::Close(None)).expect("close inbound");
+        let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
+    }
 }

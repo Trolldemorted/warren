@@ -31,6 +31,17 @@ const DEFAULT_TUI_COLS: u16 = 120;
 const DEFAULT_TUI_ROWS: u16 = 40;
 
 pub enum LinkEvent {
+    /// Emitted by the link right after a successful WS handshake + Hello
+    /// send, on every connection attempt (first connect and every
+    /// reconnect). The supervisor listens for this to re-publish the
+    /// current lifecycle state to warren — without it, a warren-side
+    /// restart that drops our WS leaves warren seeing us as
+    /// `state=Starting` forever, because the supervisor's
+    /// `spawn_run_one` path (the only place that publishes State(Idle))
+    /// only fires when claude itself is being spawned fresh, not when
+    /// the link is reconnecting with claude already running. See
+    /// `supervisor::run` for the handler.
+    Connected,
     /// Raw PTY bytes forwarded from warren, tagged with the terminal channel
     /// they belong to (`TERM_CHAN_CLAUDE` or `TERM_CHAN_SHELL`). The supervisor
     /// routes each frame to the matching PTY. Unknown channel ids are dropped
@@ -245,6 +256,13 @@ impl Link {
         let hello_json = serde_json::to_string(&hello)?;
         let (mut sink, mut stream) = ws.split();
         sink.send(Message::Text(hello_json)).await?;
+        // Notify the supervisor that the WS is up + the hello has been
+        // delivered. The supervisor uses this to re-publish the current
+        // lifecycle state to warren — without this signal, a warren
+        // restart that drops our WS would leave warren seeing us as
+        // `state=Starting` until the next claude crash (see
+        // `LinkEvent::Connected` docs).
+        let _ = self.event_tx.send(LinkEvent::Connected).await;
         // §A.7: each replay frame is its own `<chan:1> <seq:8 BE> <data>`
         // binary message, in the order the producer emitted them. warren
         // re-emits each frame verbatim to its browser subscribers so a
@@ -447,6 +465,71 @@ mod tests {
             .expect("run must exit within 2s after shutdown is flipped mid-flight")
             .expect("join")
             .expect("Ok exit");
+    }
+
+    /// Spins up a minimal tokio-tungstenite echo server, connects a
+    /// Link to it, and asserts `LinkEvent::Connected` is emitted
+    /// right after the Hello lands. This is the contract the
+    /// supervisor relies on to re-publish the agent's lifecycle state
+    /// after a warren-side restart (see the `LinkEvent::Connected`
+    /// docs); without it, warren stays stuck seeing `state=Starting`
+    /// until the next claude crash.
+    #[tokio::test]
+    async fn emits_connected_after_successful_hello() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            // Read whatever the link sends (Hello + maybe more), then
+            // close. We don't care about payload — only that Connected
+            // was emitted before this point.
+            while let Some(Ok(_)) = ws.next().await {}
+        });
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (_cmd_tx, cmd_rx) = mpsc::channel::<LinkCmd>(8);
+        let (event_tx, mut event_rx) = mpsc::channel::<LinkEvent>(8);
+        let ring = Arc::new(MetaRing::new(262_144));
+        let replay_snap: ReplaySnapFn = Arc::new(Vec::new);
+
+        let link = Link::new(
+            format!("http://127.0.0.1:{port}"),
+            "test-token".into(),
+            uuid::Uuid::nil(),
+            "test-1.0".into(),
+            cmd_rx,
+            event_tx,
+            replay_snap,
+            ring,
+            shutdown.clone(),
+        );
+        let link_task = tokio::spawn(async move { link.run().await });
+
+        // Wait for Connected to land. If the link exits before emitting
+        // it, this is what tells us the resync contract is broken.
+        let connected = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(LinkEvent::Connected) => return true,
+                    // Drop anything else (Text, Binary) the test
+                    // might surface; we only assert Connected was
+                    // emitted at all.
+                    Some(_) => continue,
+                    None => return false,
+                }
+            }
+        })
+        .await
+        .expect("link should emit Connected within 2s of connect");
+        assert!(connected, "Connected event must fire on connect");
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = tokio::time::timeout(Duration::from_secs(2), link_task).await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
     }
 
     /// §Simplify TUI sizing: with no `TuiConfig` ever shipped (e.g. a
