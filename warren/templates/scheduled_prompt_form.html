@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block body %}
+<h1 class="h3 mb-3">{% if let Some(p) = prompt %}Edit schedule{% else %}New schedule{% endif %}</h1>
+{% if agents.is_empty() %}
+  <div class="alert alert-warning">
+    No agents registered. Create at least one agent before defining schedules.
+  </div>
+{% else %}
+<form method="post" action="{{ form_action }}" class="col-md-8">
+  <div class="mb-3">
+    <label class="form-label">Name</label>
+    <input class="form-control" name="name" required value="{{ name }}">
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Agent</label>
+    {% if let Some(p) = prompt %}
+      <select class="form-select" name="agent_id" disabled>
+        {% for a in agents %}<option value="{{ a.id }}" {% if selected_agent_id_str == a.id.to_string() %}selected{% endif %}>{{ a.name }} ({{ a.class }})</option>{% endfor %}
+      </select>
+      <input type="hidden" name="agent_id" value="{{ selected_agent_id_str }}">
+      <small class="text-muted">Agent cannot be changed after creation.</small>
+    {% else %}
+      <select class="form-select" name="agent_id" required>
+        <option value="" disabled {% if selected_agent_id.is_none() %}selected{% endif %}>Select…</option>
+        {% for a in agents %}<option value="{{ a.id }}" {% if let Some(sel) = selected_agent_id %}{% if sel.to_string() == a.id.to_string() %}selected{% endif %}{% endif %}>{{ a.name }} ({{ a.class }})</option>{% endfor %}
+      </select>
+    {% endif %}
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Prompt text</label>
+    <textarea name="prompt_text" class="form-control" rows="4" required>{{ prompt_text }}</textarea>
+  </div>
+  <div class="mb-3">
+    <label class="form-label">Interval (seconds)</label>
+    <input class="form-control" name="interval_seconds" type="number" min="1" required value="{{ interval_seconds }}">
+    <small class="text-muted">e.g. <code>1800</code> = 30 min, <code>3600</code> = 1 hour.</small>
+  </div>
+  <div class="mb-3 form-check">
+    <input type="hidden" name="enabled" value="false">
+    <input type="checkbox" class="form-check-input" id="enabled" name="enabled" value="true" {% if enabled %}checked{% endif %}>
+    <label class="form-check-label" for="enabled">Enabled</label>
+  </div>
+  <div class="mb-3 form-check">
+    <input type="hidden" name="ignore_inbox_state" value="false">
+    <input type="checkbox" class="form-check-input" id="ignore_inbox_state" name="ignore_inbox_state" value="true" {% if ignore_inbox_state %}checked{% endif %}>
+    <label class="form-check-label" for="ignore_inbox_state">Ignore inbox state (fire even when no actionable requests)</label>
+  </div>
+  <div class="row">
+    <div class="col-md-6 mb-3">
+      <label class="form-label">Weekly safety buffer (%)</label>
+      <input class="form-control" name="weekly_safety_buffer_pct" type="number" min="0" max="100" value="{{ weekly_safety_buffer_pct }}">
+      <small class="text-muted">Skip when <code>100 − weekly_pct</code> &lt; this. <code>0</code> disables.</small>
+    </div>
+    <div class="col-md-6 mb-3">
+      <label class="form-label">Session safety buffer (%)</label>
+      <input class="form-control" name="session_safety_buffer_pct" type="number" min="0" max="100" value="{{ session_safety_buffer_pct }}">
+      <small class="text-muted">Skip when <code>100 − session_pct</code> &lt; this. <code>0</code> disables.</small>
+    </div>
+  </div>
+  <button type="submit" class="btn btn-primary">Save</button>
+  {% if let Some(p) = prompt %}
+    <button type="submit" formaction="/admin/scheduled-prompts/{{ p.id }}/run-now" class="btn btn-outline-secondary">Run now</button>
+  {% endif %}
+  <a href="/admin/scheduled-prompts" class="btn btn-link">Cancel</a>
+</form>
+
+{% if let Some(p) = prompt %}
+<h2 class="h5 mt-5">Run history</h2>
+{% if runs.is_empty() %}
+  <p class="text-muted">No runs yet.</p>
+{% else %}
+<table class="table table-sm table-striped align-middle">
+  <thead>
+    <tr>
+      <th>Fired at</th>
+      <th>Outcome</th>
+      <th>Finished at</th>
+      <th>Skip / error</th>
+      <th>Usage (week / session %)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td><small>{{ r.run.fired_at }}</small></td>
+      <td><span class="badge {{ r.outcome_badge }}">{{ r.run.outcome }}</span></td>
+      <td><small class="text-muted">{% if let Some(t) = r.run.finished_at %}{{ t }}{% else %}—{% endif %}</small></td>
+      <td><small class="text-muted">{% if let Some(s) = r.run.skip_reason %}{{ s }}{% else %}{% if let Some(e) = r.run.outcome_error %}{{ e }}{% else %}—{% endif %}{% endif %}</small></td>
+      <td><small class="text-muted">{% if let Some(w) = r.run.usage_weekly_pct %}{{ w }}{% else %}—{% endif %} / {% if let Some(s) = r.run.usage_session_pct %}{{ s }}{% else %}—{% endif %}</small></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endif %}
+{% endif %}
+{% endblock %}

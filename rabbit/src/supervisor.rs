@@ -1320,6 +1320,16 @@ fn build_envelopes(ev: &ObserverEvent) -> Vec<EnvelopeBody> {
             usage: ev.usage.clone(),
             error: None,
         }),
+        // §Scheduled-prompts: a `PermissionRequest` hook fired while
+        // an in-flight scheduled run is waiting for operator approval.
+        // The scheduler's observation task subscribes to `meta_tx` and
+        // uses this to interrupt the prompt. `by_connection_id: None`
+        // because the event is hook-driven (no originating browser).
+        "permission_request" => Some(EnvelopeBody::NeedsInput {
+            prompt_id: ev.prompt_id.unwrap_or_else(Uuid::nil),
+            reason: "permission_request".to_string(),
+            by_connection_id: None,
+        }),
         "log" => Some(EnvelopeBody::Log(LogLine {
             level: "info".to_string(),
             message: ev.raw.as_ref().map(|r| r.to_string()).unwrap_or_default(),

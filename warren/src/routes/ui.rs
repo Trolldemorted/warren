@@ -1,11 +1,12 @@
 use crate::auth::SESSION_COOKIE;
 use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
-use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew};
+use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew, ScheduledPromptPatch};
 use crate::templates::{
-    AgentClaudeTemplate, AgentFormTemplate, AgentRow, AgentShellTemplate, AgentsTemplate,
-    ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate, CommsRow, CommsTemplate, Flash,
-    LoginTemplate, MigrationsTemplate,
+    format_interval, outcome_badge, AgentClaudeTemplate, AgentFormTemplate, AgentRow,
+    AgentShellTemplate, AgentsTemplate, ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate,
+    CommsRow, CommsTemplate, Flash, LoginTemplate, MigrationsTemplate, ScheduledPromptFormTemplate,
+    ScheduledPromptRow, ScheduledPromptRunRow, ScheduledPromptsTemplate,
 };
 use crate::{auth, AppState};
 use askama::Template;
@@ -70,6 +71,28 @@ pub fn router() -> Router<AppState> {
         .route("/admin/channels/:id/edit", get(channel_edit_page))
         .route("/admin/channels/:id", post(channel_update))
         .route("/admin/channels/:id/delete", post(channel_delete))
+        .route("/admin/scheduled-prompts", get(scheduled_prompts_page))
+        .route(
+            "/admin/scheduled-prompts/new",
+            get(scheduled_prompt_new_page),
+        )
+        .route("/admin/scheduled-prompts", post(scheduled_prompt_create))
+        .route(
+            "/admin/scheduled-prompts/:id/edit",
+            get(scheduled_prompt_edit_page),
+        )
+        .route(
+            "/admin/scheduled-prompts/:id",
+            post(scheduled_prompt_update),
+        )
+        .route(
+            "/admin/scheduled-prompts/:id/delete",
+            post(scheduled_prompt_delete),
+        )
+        .route(
+            "/admin/scheduled-prompts/:id/run-now",
+            post(scheduled_prompt_run_now),
+        )
         .route("/agent/:id/claude", get(agent_claude_page))
         // §D Milestone 5: secondary bash PTY page.
         .route("/agent/:id/shell", get(agent_shell_page))
@@ -988,4 +1011,311 @@ async fn agent_shell_page(
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(e) => err_page(e),
     }
+}
+
+#[derive(Deserialize)]
+struct ScheduledPromptForm {
+    agent_id: String,
+    name: String,
+    prompt_text: String,
+    interval_seconds: String,
+    enabled: Option<String>,
+    ignore_inbox_state: Option<String>,
+    weekly_safety_buffer_pct: String,
+    session_safety_buffer_pct: String,
+}
+
+fn scheduled_prompt_form_checkbox(s: Option<String>) -> bool {
+    matches!(s.as_deref(), Some("true"))
+}
+
+fn parse_scheduled_prompt_form(
+    form: ScheduledPromptForm,
+) -> Result<ScheduledPromptFormParsed, AppError> {
+    if form.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name required".into()));
+    }
+    if form.prompt_text.trim().is_empty() {
+        return Err(AppError::BadRequest("prompt_text required".into()));
+    }
+    let agent_id = Uuid::parse_str(form.agent_id.trim())
+        .map_err(|_| AppError::BadRequest("invalid agent_id".into()))?;
+    let interval_seconds = form
+        .interval_seconds
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| AppError::BadRequest("interval_seconds must be an integer".into()))?;
+    if interval_seconds < 1 {
+        return Err(AppError::BadRequest("interval_seconds must be >= 1".into()));
+    }
+    let weekly_safety_buffer_pct = form
+        .weekly_safety_buffer_pct
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| AppError::BadRequest("weekly_safety_buffer_pct must be an integer".into()))?;
+    let session_safety_buffer_pct = form
+        .session_safety_buffer_pct
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| AppError::BadRequest("session_safety_buffer_pct must be an integer".into()))?;
+    if !(0..=100).contains(&weekly_safety_buffer_pct) {
+        return Err(AppError::BadRequest(
+            "weekly_safety_buffer_pct must be 0..=100".into(),
+        ));
+    }
+    if !(0..=100).contains(&session_safety_buffer_pct) {
+        return Err(AppError::BadRequest(
+            "session_safety_buffer_pct must be 0..=100".into(),
+        ));
+    }
+    Ok(ScheduledPromptFormParsed {
+        agent_id,
+        name: form.name.trim().to_string(),
+        prompt_text: form.prompt_text,
+        interval_seconds,
+        enabled: scheduled_prompt_form_checkbox(form.enabled),
+        ignore_inbox_state: scheduled_prompt_form_checkbox(form.ignore_inbox_state),
+        weekly_safety_buffer_pct,
+        session_safety_buffer_pct,
+    })
+}
+
+struct ScheduledPromptFormParsed {
+    agent_id: Uuid,
+    name: String,
+    prompt_text: String,
+    interval_seconds: i64,
+    enabled: bool,
+    ignore_inbox_state: bool,
+    weekly_safety_buffer_pct: i32,
+    session_safety_buffer_pct: i32,
+}
+
+async fn load_agents(db: &crate::db::Db) -> AppResult<Vec<crate::entity::agent::Model>> {
+    crate::db_ops::list_agents(db).await
+}
+
+async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let prompts = match crate::db_ops::list_scheduled_prompts(&state.db).await {
+        Ok(v) => v,
+        Err(e) => return err_page(e),
+    };
+    let agents = match load_agents(&state.db).await {
+        Ok(v) => v,
+        Err(e) => return err_page(e),
+    };
+    let agent_map: std::collections::HashMap<Uuid, &crate::entity::agent::Model> =
+        agents.iter().map(|a| (a.id, a)).collect();
+
+    let mut rows: Vec<ScheduledPromptRow> = Vec::with_capacity(prompts.len());
+    for p in prompts {
+        let agent_name = agent_map
+            .get(&p.agent_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "(deleted)".to_string());
+        let interval_display = format_interval(p.interval_seconds);
+        let last_outcome =
+            match crate::db_ops::list_runs_for_scheduled_prompt(&state.db, p.id, 1).await {
+                Ok(mut runs) => runs.pop().map(|r| r.outcome),
+                Err(_) => None,
+            };
+        let last_outcome_badge = last_outcome.as_deref().map(outcome_badge);
+        rows.push(ScheduledPromptRow {
+            prompt: p,
+            agent_name,
+            interval_display,
+            last_outcome,
+            last_outcome_badge: last_outcome_badge.map(str::to_string),
+        });
+    }
+    render(ScheduledPromptsTemplate {
+        title: Some("Scheduled prompts"),
+        nav: Some("scheduled_prompts"),
+        flash: None,
+        rows,
+    })
+}
+
+async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let agents = match load_agents(&state.db).await {
+        Ok(v) => v,
+        Err(e) => return err_page(e),
+    };
+    render(ScheduledPromptFormTemplate {
+        title: Some("New schedule"),
+        nav: Some("scheduled_prompts"),
+        flash: None,
+        prompt: None,
+        form_action: "/admin/scheduled-prompts".into(),
+        agents,
+        selected_agent_id: None,
+        selected_agent_id_str: String::new(),
+        name: String::new(),
+        prompt_text: String::new(),
+        interval_seconds: 3600,
+        enabled: true,
+        ignore_inbox_state: false,
+        weekly_safety_buffer_pct: 0,
+        session_safety_buffer_pct: 0,
+        runs: vec![],
+    })
+}
+
+async fn scheduled_prompt_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<ScheduledPromptForm>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let parsed = match parse_scheduled_prompt_form(form) {
+        Ok(p) => p,
+        Err(e) => return err_page(e),
+    };
+    if crate::db_ops::get_agent(&state.db, parsed.agent_id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return err_page(AppError::BadRequest(format!(
+            "agent {} not found",
+            parsed.agent_id
+        )));
+    }
+    let new = crate::models::ScheduledPromptNew {
+        agent_id: parsed.agent_id,
+        name: parsed.name,
+        prompt_text: parsed.prompt_text,
+        interval_seconds: parsed.interval_seconds,
+        enabled: parsed.enabled,
+        ignore_inbox_state: parsed.ignore_inbox_state,
+        weekly_safety_buffer_pct: parsed.weekly_safety_buffer_pct,
+        session_safety_buffer_pct: parsed.session_safety_buffer_pct,
+    };
+    match crate::db_ops::create_scheduled_prompt(&state.db, &new).await {
+        Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn scheduled_prompt_edit_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let agents = match load_agents(&state.db).await {
+        Ok(v) => v,
+        Err(e) => return err_page(e),
+    };
+    match crate::db_ops::get_scheduled_prompt(&state.db, id).await {
+        Ok(Some(p)) => {
+            let runs = match crate::db_ops::list_runs_for_scheduled_prompt(&state.db, id, 50).await
+            {
+                Ok(v) => v
+                    .into_iter()
+                    .map(|r| ScheduledPromptRunRow {
+                        outcome_badge: outcome_badge(&r.outcome).to_string(),
+                        run: r,
+                    })
+                    .collect(),
+                Err(_) => vec![],
+            };
+            render(ScheduledPromptFormTemplate {
+                title: Some("Edit schedule"),
+                nav: Some("scheduled_prompts"),
+                flash: None,
+                prompt: Some(p.clone()),
+                form_action: format!("/admin/scheduled-prompts/{id}"),
+                agents,
+                selected_agent_id: Some(p.agent_id),
+                selected_agent_id_str: p.agent_id.to_string(),
+                name: p.name,
+                prompt_text: p.prompt_text,
+                interval_seconds: p.interval_seconds,
+                enabled: p.enabled,
+                ignore_inbox_state: p.ignore_inbox_state,
+                weekly_safety_buffer_pct: p.weekly_safety_buffer_pct,
+                session_safety_buffer_pct: p.session_safety_buffer_pct,
+                runs,
+            })
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn scheduled_prompt_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Form(form): Form<ScheduledPromptForm>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let parsed = match parse_scheduled_prompt_form(form) {
+        Ok(p) => p,
+        Err(e) => return err_page(e),
+    };
+    let patch = ScheduledPromptPatch {
+        name: Some(parsed.name),
+        prompt_text: Some(parsed.prompt_text),
+        interval_seconds: Some(parsed.interval_seconds),
+        enabled: Some(parsed.enabled),
+        ignore_inbox_state: Some(parsed.ignore_inbox_state),
+        weekly_safety_buffer_pct: Some(parsed.weekly_safety_buffer_pct),
+        session_safety_buffer_pct: Some(parsed.session_safety_buffer_pct),
+    };
+    match crate::db_ops::update_scheduled_prompt(&state.db, id, &patch).await {
+        Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn scheduled_prompt_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    match crate::db_ops::delete_scheduled_prompt(&state.db, id).await {
+        Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),
+        Err(e) => err_page(e),
+    }
+}
+
+async fn scheduled_prompt_run_now(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Response {
+    if require_admin(&state, &headers).await.is_err() {
+        return redirect_to_login();
+    }
+    let prompt = match crate::db_ops::get_scheduled_prompt(&state.db, id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => return err_page(e),
+    };
+    if !prompt.enabled {
+        return err_page(AppError::Conflict("schedule is disabled".into()));
+    }
+    let arc = std::sync::Arc::new(state);
+    if let Err(e) = crate::scheduler::fire_prompt(arc, prompt).await {
+        log::error!("scheduler: run-now failed: {e:?}");
+    }
+    Redirect::to("/admin/scheduled-prompts").into_response()
 }

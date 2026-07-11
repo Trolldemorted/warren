@@ -1,10 +1,11 @@
 use crate::auth::{AgentAuth, AuthContext, SESSION_COOKIE};
 use crate::db::Db;
-use crate::entity::{agent, channel, request};
+use crate::entity::{agent, channel, request, scheduled_prompt, scheduled_prompt_run};
 use crate::error::{AppError, AppResult};
 use crate::ids::{new_agent_token, new_session_token};
 use crate::models::{
     AgentNew, AgentPatch, ChannelNew, ChannelPatch, LoginReq, LoginRes, RequestNew, RequestRespond,
+    ScheduledPromptNew, ScheduledPromptPatch,
 };
 use crate::{auth, AppState};
 use axum::{
@@ -74,6 +75,20 @@ pub fn router() -> Router<AppState> {
             get(api_get_channel)
                 .put(api_update_channel)
                 .delete(api_delete_channel),
+        )
+        .route(
+            "/api/scheduled-prompts",
+            get(api_list_scheduled_prompts).post(api_create_scheduled_prompt),
+        )
+        .route(
+            "/api/scheduled-prompts/:id",
+            get(api_get_scheduled_prompt)
+                .put(api_update_scheduled_prompt)
+                .delete(api_delete_scheduled_prompt),
+        )
+        .route(
+            "/api/scheduled-prompts/:id/run-now",
+            post(api_run_scheduled_prompt_now),
         )
 }
 
@@ -560,6 +575,161 @@ fn validate_channel_new(n: &ChannelNew) -> AppResult<()> {
         return Err(AppError::BadRequest("description required".into()));
     }
     Ok(())
+}
+
+fn validate_scheduled_prompt_new(n: &ScheduledPromptNew) -> AppResult<()> {
+    if n.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name required".into()));
+    }
+    if n.prompt_text.trim().is_empty() {
+        return Err(AppError::BadRequest("prompt_text required".into()));
+    }
+    if n.interval_seconds < 1 {
+        return Err(AppError::BadRequest("interval_seconds must be >= 1".into()));
+    }
+    if !(0..=100).contains(&n.weekly_safety_buffer_pct) {
+        return Err(AppError::BadRequest(
+            "weekly_safety_buffer_pct must be 0..=100".into(),
+        ));
+    }
+    if !(0..=100).contains(&n.session_safety_buffer_pct) {
+        return Err(AppError::BadRequest(
+            "session_safety_buffer_pct must be 0..=100".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scheduled_prompt_patch(p: &ScheduledPromptPatch) -> AppResult<()> {
+    if let Some(n) = &p.name {
+        if n.trim().is_empty() {
+            return Err(AppError::BadRequest("name required".into()));
+        }
+    }
+    if let Some(t) = &p.prompt_text {
+        if t.trim().is_empty() {
+            return Err(AppError::BadRequest("prompt_text required".into()));
+        }
+    }
+    if let Some(i) = p.interval_seconds {
+        if i < 1 {
+            return Err(AppError::BadRequest("interval_seconds must be >= 1".into()));
+        }
+    }
+    if let Some(w) = p.weekly_safety_buffer_pct {
+        if !(0..=100).contains(&w) {
+            return Err(AppError::BadRequest(
+                "weekly_safety_buffer_pct must be 0..=100".into(),
+            ));
+        }
+    }
+    if let Some(s) = p.session_safety_buffer_pct {
+        if !(0..=100).contains(&s) {
+            return Err(AppError::BadRequest(
+                "session_safety_buffer_pct must be 0..=100".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct ScheduledPromptWithRuns {
+    #[serde(flatten)]
+    prompt: scheduled_prompt::Model,
+    recent_runs: Vec<scheduled_prompt_run::Model>,
+}
+
+async fn api_list_scheduled_prompts(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+) -> AppResult<Json<Vec<scheduled_prompt::Model>>> {
+    ctx.require_admin()?;
+    let prompts = crate::db_ops::list_scheduled_prompts(&state.db).await?;
+    Ok(Json(prompts))
+}
+
+async fn api_get_scheduled_prompt(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<ScheduledPromptWithRuns>> {
+    ctx.require_admin()?;
+    let prompt = crate::db_ops::get_scheduled_prompt(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let runs = crate::db_ops::list_runs_for_scheduled_prompt(&state.db, id, 50).await?;
+    Ok(Json(ScheduledPromptWithRuns {
+        prompt,
+        recent_runs: runs,
+    }))
+}
+
+async fn api_create_scheduled_prompt(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Json(new): Json<ScheduledPromptNew>,
+) -> AppResult<Json<scheduled_prompt::Model>> {
+    ctx.require_admin()?;
+    validate_scheduled_prompt_new(&new)?;
+    if crate::db_ops::get_agent(&state.db, new.agent_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::BadRequest(format!(
+            "agent {} not found",
+            new.agent_id
+        )));
+    }
+    let prompt = crate::db_ops::create_scheduled_prompt(&state.db, &new).await?;
+    Ok(Json(prompt))
+}
+
+async fn api_update_scheduled_prompt(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+    Json(patch): Json<ScheduledPromptPatch>,
+) -> AppResult<Json<scheduled_prompt::Model>> {
+    ctx.require_admin()?;
+    validate_scheduled_prompt_patch(&patch)?;
+    let prompt = crate::db_ops::update_scheduled_prompt(&state.db, id, &patch).await?;
+    Ok(Json(prompt))
+}
+
+async fn api_delete_scheduled_prompt(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ctx.require_admin()?;
+    crate::db_ops::delete_scheduled_prompt(&state.db, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_run_scheduled_prompt_now(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<scheduled_prompt_run::Model>> {
+    ctx.require_admin()?;
+    let prompt = crate::db_ops::get_scheduled_prompt(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if !prompt.enabled {
+        return Err(AppError::Conflict("schedule is disabled".into()));
+    }
+    let arc = std::sync::Arc::new(state.clone());
+    if let Err(e) = crate::scheduler::fire_prompt(arc, prompt).await {
+        return Err(AppError::Internal(e));
+    }
+    let runs = crate::db_ops::list_runs_for_scheduled_prompt(&state.db, id, 1).await?;
+    let run = runs.into_iter().next().ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!(
+            "fire_prompt completed without inserting a run row"
+        ))
+    })?;
+    Ok(Json(run))
 }
 
 /// §Reject empty payloads: a `RequestNew` whose `payload` is empty (or

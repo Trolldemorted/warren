@@ -667,6 +667,7 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::Resize { .. } => "resize",
         EnvelopeBody::Repaint => "repaint",
         EnvelopeBody::StopHook { .. } => "stop_hook",
+        EnvelopeBody::NeedsInput { .. } => "needs_input",
         EnvelopeBody::PromptRejected { .. } => "prompt_rejected",
         EnvelopeBody::ScreenSnapshot { .. } => "screen_snapshot",
         EnvelopeBody::SnapshotRequest { .. } => "snapshot_request",

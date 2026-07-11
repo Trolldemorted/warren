@@ -116,6 +116,22 @@ pub enum EnvelopeBody {
         usage: Option<UsageSnapshot>,
         error: Option<String>,
     },
+    /// §Scheduled-prompts: Claude fired a `permission_request` hook
+    /// (the operator needs to approve a tool call before the turn can
+    /// continue). The scheduler's observation task subscribes to
+    /// `meta_tx` and, on receiving a `NeedsInput` matching its
+    /// in-flight `prompt_id`, calls `handle.interrupt()` to cancel the
+    /// scheduled run. Distinct from `PromptRejected` (which fires on
+    /// the *prompt submission* path) so the run-history `outcome`
+    /// can be `'needs_input_canceled'` rather than the generic
+    /// `'interrupted'`. `by_connection_id` mirrors `Prompt`/`PromptRejected`:
+    /// `None` for hooks-driven events (which have no browser tab).
+    NeedsInput {
+        prompt_id: uuid::Uuid,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by_connection_id: Option<uuid::Uuid>,
+    },
     /// §D Milestone 5 (Phase B): late-join screen dump. Sent by rabbit in
     /// response to a [`SnapshotRequest`] from warren so a fresh browser pane
     /// can paint an authoritative terminal state instead of relying on the

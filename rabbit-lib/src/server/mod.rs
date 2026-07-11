@@ -635,7 +635,7 @@ pub mod transport;
 pub use transport::{CloseReason, DynWsTransport, TransportMsg, WsTransport};
 
 pub(crate) mod actor;
-pub(crate) mod handle;
+pub mod handle;
 pub mod http_api;
 pub mod ws_browser;
 pub mod ws_rabbit;

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">Scheduled prompts</h1>
+  <a href="/admin/scheduled-prompts/new" class="btn btn-primary">New schedule</a>
+</div>
+<p class="text-muted">
+  Schedules periodically fire a prompt against an agent when the agent is connected and idle,
+  has actionable inbox items (unless <em>ignore inbox state</em> is set), and is within
+  budget safety buffers. Skipped runs still consume their slot.
+</p>
+{% if rows.is_empty() %}
+  <p class="text-muted">No scheduled prompts yet.</p>
+{% else %}
+<table class="table table-striped align-middle">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Agent</th>
+      <th>Interval</th>
+      <th>Enabled</th>
+      <th>Last outcome</th>
+      <th>Last fired</th>
+      <th>Last finished</th>
+      <th>Next fire</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.prompt.name }}</td>
+      <td><a href="/agent/{{ r.prompt.agent_id }}/claude">{{ r.agent_name }}</a></td>
+      <td><code>{{ r.interval_display }}</code></td>
+      <td>
+        {% if r.prompt.enabled %}
+          <span class="badge bg-success">on</span>
+        {% else %}
+          <span class="badge bg-secondary">off</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if let Some(o) = r.last_outcome %}
+          {% if let Some(b) = r.last_outcome_badge %}
+            <span class="badge {{ b }}">{{ o }}</span>
+          {% else %}
+            <span class="badge bg-secondary">{{ o }}</span>
+          {% endif %}
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td><small class="text-muted">{% if let Some(t) = r.prompt.last_fired_at %}{{ t }}{% else %}—{% endif %}</small></td>
+      <td><small class="text-muted">{% if let Some(t) = r.prompt.last_finished_at %}{{ t }}{% else %}—{% endif %}</small></td>
+      <td><small class="text-muted">{% if let Some(t) = r.prompt.next_fire_at %}{{ t }}{% else %}—{% endif %}</small></td>
+      <td class="text-end">
+        <a class="btn btn-sm btn-outline-secondary" href="/admin/scheduled-prompts/{{ r.prompt.id }}/edit">Edit</a>
+        <a class="btn btn-sm btn-outline-danger" href="#delete-sp-{{ r.prompt.id }}">Delete</a>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% for r in rows %}
+<div id="delete-sp-{{ r.prompt.id }}" class="modal" role="dialog" aria-labelledby="delete-sp-title-{{ r.prompt.id }}">
+  <a class="modal-bg" href="#" aria-label="Close"></a>
+  <div class="modal-dialog" role="document">
+    <div class="modal-header">
+      <h5 class="modal-title" id="delete-sp-title-{{ r.prompt.id }}">Delete schedule?</h5>
+      <a class="modal-close" href="#" aria-label="Close">×</a>
+    </div>
+    <div class="modal-body">
+      <p>Are you sure you want to delete <strong>{{ r.prompt.name }}</strong>? Its run history will also be deleted.</p>
+      <form method="post" action="/admin/scheduled-prompts/{{ r.prompt.id }}/delete">
+        <button type="submit" class="btn btn-danger">Yes, delete</button>
+        <a href="#" class="btn btn-link">Cancel</a>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

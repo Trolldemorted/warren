@@ -235,6 +235,29 @@ fn parse(kind: &str, payload: &serde_json::Value, handle: &ObserverHandle) -> Ob
             error: None,
             raw: Some(payload.clone()),
         },
+        // §Scheduled-prompts: Claude fired a `PermissionRequest` hook —
+        // a tool call needs operator approval before the turn can
+        // continue. We surface it as a distinct `permission_request`
+        // ObserverEvent (not the catch-all `log`) so `build_envelopes`
+        // can emit `EnvelopeBody::NeedsInput` and the warren scheduler
+        // can cancel its in-flight scheduled prompt. State stays
+        // unchanged: the agent is still `Running` (just blocked on a
+        // permission prompt), so flipping it would mislead the
+        // status badge and the reject-when-Running gate.
+        "permission_request" => ObserverEvent {
+            kind: "permission_request",
+            state: None,
+            session_id: None,
+            prompt_id: payload
+                .get("prompt_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok()),
+            started_at: None,
+            ended_at: None,
+            usage: None,
+            error: None,
+            raw: Some(payload.clone()),
+        },
         _ => ObserverEvent {
             kind: "log",
             state: None,

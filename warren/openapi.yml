@@ -264,6 +264,92 @@ components:
         kind: { type: string }
         payload: { type: object, additionalProperties: true }
       required: [id, agent_id, seq, ts, kind, payload]
+    ScheduledPrompt:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        agent_id: { type: string, format: uuid }
+        name: { type: string }
+        prompt_text: { type: string }
+        interval_seconds: { type: integer, format: int64 }
+        enabled: { type: boolean }
+        ignore_inbox_state: { type: boolean }
+        weekly_safety_buffer_pct:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 100
+        session_safety_buffer_pct:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 100
+        last_fired_at: { type: string, format: date-time, nullable: true }
+        last_finished_at: { type: string, format: date-time, nullable: true }
+        next_fire_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [id, agent_id, name, prompt_text, interval_seconds, enabled, ignore_inbox_state, weekly_safety_buffer_pct, session_safety_buffer_pct, created_at, updated_at]
+    ScheduledPromptNew:
+      type: object
+      properties:
+        agent_id: { type: string, format: uuid }
+        name: { type: string }
+        prompt_text: { type: string }
+        interval_seconds: { type: integer, format: int64, minimum: 1 }
+        enabled: { type: boolean, default: false }
+        ignore_inbox_state: { type: boolean, default: false }
+        weekly_safety_buffer_pct: { type: integer, format: int32, default: 0, minimum: 0, maximum: 100 }
+        session_safety_buffer_pct: { type: integer, format: int32, default: 0, minimum: 0, maximum: 100 }
+      required: [agent_id, name, prompt_text, interval_seconds]
+    ScheduledPromptPatch:
+      type: object
+      properties:
+        name: { type: string }
+        prompt_text: { type: string }
+        interval_seconds: { type: integer, format: int64, minimum: 1 }
+        enabled: { type: boolean }
+        ignore_inbox_state: { type: boolean }
+        weekly_safety_buffer_pct: { type: integer, format: int32, minimum: 0, maximum: 100 }
+        session_safety_buffer_pct: { type: integer, format: int32, minimum: 0, maximum: 100 }
+    ScheduledPromptRun:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        scheduled_prompt_id: { type: string, format: uuid }
+        agent_id: { type: string, format: uuid }
+        fired_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+        outcome:
+          type: string
+          enum:
+            - fired
+            - completed
+            - completed_error
+            - needs_input_canceled
+            - warren_restart
+            - rabbit_offline
+            - failed
+            - skipped_offline
+            - skipped_no_idle
+            - skipped_no_inbox
+            - skipped_unsafe_scrape
+            - skipped_weekly_budget
+            - skipped_session_budget
+        skip_reason: { type: string, nullable: true }
+        prompt_id: { type: string, format: uuid, nullable: true }
+        outcome_error: { type: string, nullable: true }
+        usage_weekly_pct: { type: integer, format: int32, nullable: true }
+        usage_session_pct: { type: integer, format: int32, nullable: true }
+      required: [id, scheduled_prompt_id, agent_id, fired_at, outcome]
+    ScheduledPromptWithRuns:
+      allOf:
+        - $ref: '#/components/schemas/ScheduledPrompt'
+        - type: object
+          properties:
+            recent_runs:
+              type: array
+              items: { $ref: '#/components/schemas/ScheduledPromptRun' }
 paths:
   /api/login:
     post:
@@ -939,3 +1025,106 @@ paths:
           content:
             text/event-stream: {}
         '404': { description: Agent not connected }
+  /api/scheduled-prompts:
+    get:
+      tags: [scheduled-prompts]
+      summary: List scheduled prompts
+      security:
+        - adminSession: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScheduledPrompt' }
+    post:
+      tags: [scheduled-prompts]
+      summary: Create a scheduled prompt
+      security:
+        - adminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduledPromptNew' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduledPrompt' }
+        '400': { description: Validation error }
+  /api/scheduled-prompts/{id}:
+    get:
+      tags: [scheduled-prompts]
+      summary: Get one scheduled prompt (includes most recent runs)
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduledPromptWithRuns' }
+        '404': { description: Not found }
+    put:
+      tags: [scheduled-prompts]
+      summary: Patch a scheduled prompt
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScheduledPromptPatch' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduledPrompt' }
+        '404': { description: Not found }
+    delete:
+      tags: [scheduled-prompts]
+      summary: Delete a scheduled prompt (cascades runs)
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '404': { description: Not found }
+  /api/scheduled-prompts/{id}/run-now:
+    post:
+      tags: [scheduled-prompts]
+      summary: Fire one attempt immediately through the same precondition gate as the scheduler tick
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK — the new run row (outcome reflects the precondition decision)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduledPromptRun' }
+        '404': { description: Schedule not found }
+        '409': { description: Schedule is disabled }

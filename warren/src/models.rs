@@ -125,3 +125,37 @@ pub struct ChannelPatch {
 fn default_true() -> bool {
     true
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScheduledPromptNew {
+    pub agent_id: Uuid,
+    pub name: String,
+    pub prompt_text: String,
+    pub interval_seconds: i64,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub ignore_inbox_state: bool,
+    #[serde(default)]
+    pub weekly_safety_buffer_pct: i32,
+    #[serde(default)]
+    pub session_safety_buffer_pct: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ScheduledPromptPatch {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub prompt_text: Option<String>,
+    #[serde(default)]
+    pub interval_seconds: Option<i64>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub ignore_inbox_state: Option<bool>,
+    #[serde(default)]
+    pub weekly_safety_buffer_pct: Option<i32>,
+    #[serde(default)]
+    pub session_safety_buffer_pct: Option<i32>,
+}

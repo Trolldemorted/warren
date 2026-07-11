@@ -173,3 +173,108 @@ impl Flash {
         }
     }
 }
+
+#[derive(Template)]
+#[template(path = "scheduled_prompts.html")]
+pub struct ScheduledPromptsTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub rows: Vec<ScheduledPromptRow>,
+}
+
+/// One row of the scheduled-prompts index, bundling the model with
+/// the agent name (resolved by the handler so the template doesn't
+/// need a `HashMap` lookup), a display-formatted interval string,
+/// and a precomputed Bootstrap badge class for the most-recent
+/// run's `outcome` (Askama can't call free functions, so we
+/// compute the class once in the handler).
+pub struct ScheduledPromptRow {
+    pub prompt: crate::entity::scheduled_prompt::Model,
+    pub agent_name: String,
+    pub interval_display: String,
+    pub last_outcome: Option<String>,
+    pub last_outcome_badge: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "scheduled_prompt_form.html")]
+pub struct ScheduledPromptFormTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub prompt: Option<crate::entity::scheduled_prompt::Model>,
+    pub form_action: String,
+    pub agents: Vec<crate::entity::agent::Model>,
+    pub selected_agent_id: Option<uuid::Uuid>,
+    /// Pre-rendered string for the hidden input that round-trips
+    /// `agent_id` on edit. Askama can't render `Option<Uuid>`'s
+    /// deref-then-stringify cleanly, so we hand the string in.
+    pub selected_agent_id_str: String,
+    pub name: String,
+    pub prompt_text: String,
+    pub interval_seconds: i64,
+    pub enabled: bool,
+    pub ignore_inbox_state: bool,
+    pub weekly_safety_buffer_pct: i32,
+    pub session_safety_buffer_pct: i32,
+    pub runs: Vec<ScheduledPromptRunRow>,
+}
+
+/// Per-run view-model for the run-history table. Askama can't call
+/// free functions, so the badge class is precomputed by the handler.
+pub struct ScheduledPromptRunRow {
+    pub run: crate::entity::scheduled_prompt_run::Model,
+    pub outcome_badge: String,
+}
+
+/// Human-readable interval formatter for the scheduled prompts index.
+/// e.g. `90` → `"1m 30s"`, `3600` → `"1h"`, `86400` → `"1d"`,
+/// `12345` → `"3h 25m 45s"`. Always omits zero components.
+pub fn format_interval(seconds: i64) -> String {
+    if seconds <= 0 {
+        return "0s".into();
+    }
+    let mut s = seconds;
+    let days = s / 86400;
+    s %= 86400;
+    let hours = s / 3600;
+    s %= 3600;
+    let minutes = s / 60;
+    let secs = s % 60;
+    let mut parts: Vec<String> = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    if secs > 0 {
+        parts.push(format!("{secs}s"));
+    }
+    parts.join(" ")
+}
+
+/// Bootstrap badge class for a run `outcome` string. Centralized so
+/// the list page, the form-page history, and any future surfaces
+/// agree on the color coding.
+pub fn outcome_badge(outcome: &str) -> &'static str {
+    match outcome {
+        "completed" => "bg-success",
+        "completed_error" => "bg-warning text-dark",
+        "needs_input_canceled" => "bg-warning text-dark",
+        "warren_restart" => "bg-warning text-dark",
+        "rabbit_offline" => "bg-secondary",
+        "failed" => "bg-danger",
+        "fired" => "bg-secondary",
+        "skipped_offline" | "skipped_no_idle" | "skipped_no_inbox" | "skipped_unsafe_scrape" => {
+            "bg-info text-dark"
+        }
+        "skipped_weekly_budget" | "skipped_session_budget" => "bg-info text-dark",
+        other if other.starts_with("skipped_") => "bg-info text-dark",
+        _ => "bg-secondary",
+    }
+}

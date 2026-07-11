@@ -1,7 +1,10 @@
 use crate::db::Db;
-use crate::entity::{agent, agent_event, channel, request};
+use crate::entity::{agent, agent_event, channel, request, scheduled_prompt, scheduled_prompt_run};
 use crate::error::{map_unique_conflict, AppError, AppResult};
-use crate::models::{AgentNew, AgentPatch, ChannelNew, ChannelPatch, RequestNew};
+use crate::models::{
+    AgentNew, AgentPatch, ChannelNew, ChannelPatch, RequestNew, ScheduledPromptNew,
+    ScheduledPromptPatch,
+};
 use sea_orm::sea_query::{Expr, IntoCondition, Order, Query};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, FromQueryResult,
@@ -800,4 +803,306 @@ pub async fn next_event_seq(db: &Db, agent_id: Uuid) -> AppResult<i64> {
         .one(db)
         .await?;
     Ok(row.map(|r| r.seq).unwrap_or(0) + 1)
+}
+
+// --- scheduled_prompts -------------------------------------------------------
+
+pub async fn list_scheduled_prompts(db: &Db) -> AppResult<Vec<scheduled_prompt::Model>> {
+    Ok(scheduled_prompt::Entity::find()
+        .order_by_asc(scheduled_prompt::Column::Name)
+        .all(db)
+        .await?)
+}
+
+pub async fn get_scheduled_prompt(db: &Db, id: Uuid) -> AppResult<Option<scheduled_prompt::Model>> {
+    Ok(scheduled_prompt::Entity::find_by_id(id).one(db).await?)
+}
+
+pub async fn create_scheduled_prompt(
+    db: &Db,
+    new: &ScheduledPromptNew,
+) -> AppResult<scheduled_prompt::Model> {
+    let am = scheduled_prompt::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        agent_id: Set(new.agent_id),
+        name: Set(new.name.clone()),
+        prompt_text: Set(new.prompt_text.clone()),
+        interval_seconds: Set(new.interval_seconds),
+        enabled: Set(new.enabled),
+        ignore_inbox_state: Set(new.ignore_inbox_state),
+        weekly_safety_buffer_pct: Set(new.weekly_safety_buffer_pct),
+        session_safety_buffer_pct: Set(new.session_safety_buffer_pct),
+        next_fire_at: Set(Some(chrono::Utc::now())),
+        ..Default::default()
+    };
+    Ok(am.insert(db).await?)
+}
+
+pub async fn update_scheduled_prompt(
+    db: &Db,
+    id: Uuid,
+    patch: &ScheduledPromptPatch,
+) -> AppResult<scheduled_prompt::Model> {
+    let mut am = scheduled_prompt::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .into_active_model();
+    if let Some(n) = &patch.name {
+        am.name = Set(n.clone());
+    }
+    if let Some(t) = &patch.prompt_text {
+        am.prompt_text = Set(t.clone());
+    }
+    if let Some(i) = patch.interval_seconds {
+        am.interval_seconds = Set(i);
+    }
+    if let Some(e) = patch.enabled {
+        am.enabled = Set(e);
+    }
+    if let Some(b) = patch.ignore_inbox_state {
+        am.ignore_inbox_state = Set(b);
+    }
+    if let Some(w) = patch.weekly_safety_buffer_pct {
+        am.weekly_safety_buffer_pct = Set(w);
+    }
+    if let Some(s) = patch.session_safety_buffer_pct {
+        am.session_safety_buffer_pct = Set(s);
+    }
+    am.updated_at = Set(chrono::Utc::now());
+    am.update(db).await?;
+    get_scheduled_prompt(db, id)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+pub async fn delete_scheduled_prompt(db: &Db, id: Uuid) -> AppResult<()> {
+    let res = scheduled_prompt::Entity::delete_by_id(id).exec(db).await?;
+    if res.rows_affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Atomically claim due scheduled prompts: select rows where
+/// `enabled = true AND next_fire_at <= now()`, set `next_fire_at = NULL`
+/// to prevent double-fires across overlapping ticks or restarts, and
+/// return the claimed rows. Uses a single transaction so a concurrent
+/// scheduler tick sees an empty set.
+pub async fn claim_due_scheduled_prompts(
+    db: &Db,
+    now: chrono::DateTime<chrono::Utc>,
+    limit: u64,
+) -> AppResult<Vec<scheduled_prompt::Model>> {
+    let due = scheduled_prompt::Entity::find()
+        .filter(scheduled_prompt::Column::Enabled.eq(true))
+        .filter(scheduled_prompt::Column::NextFireAt.lte(now))
+        .order_by_asc(scheduled_prompt::Column::NextFireAt)
+        .limit(Some(limit))
+        .all(db)
+        .await?;
+    if due.is_empty() {
+        return Ok(due);
+    }
+    let ids: Vec<Uuid> = due.iter().map(|m| m.id).collect();
+    scheduled_prompt::Entity::update_many()
+        .col_expr(
+            scheduled_prompt::Column::NextFireAt,
+            Expr::value(None::<chrono::DateTime<chrono::Utc>>),
+        )
+        .filter(scheduled_prompt::Column::Id.is_in(ids))
+        .exec(db)
+        .await?;
+    Ok(due)
+}
+
+/// Update `next_fire_at` and `last_fired_at` after a successful
+/// submission. The new value is computed by the caller (typically
+/// `last_finished_at + interval_seconds` once observation completes,
+/// or `now + interval_seconds` on skip).
+pub async fn set_next_fire_at(
+    db: &Db,
+    id: Uuid,
+    next_fire_at: chrono::DateTime<chrono::Utc>,
+    last_fired_at: chrono::DateTime<chrono::Utc>,
+) -> AppResult<()> {
+    let mut am = scheduled_prompt::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .into_active_model();
+    am.next_fire_at = Set(Some(next_fire_at));
+    am.last_fired_at = Set(Some(last_fired_at));
+    am.updated_at = Set(chrono::Utc::now());
+    am.update(db).await?;
+    Ok(())
+}
+
+/// Mark `last_finished_at` once observation completes. The scheduler
+/// uses this to advance the interval anchor for the next slot.
+pub async fn mark_scheduled_prompt_finished(
+    db: &Db,
+    id: Uuid,
+    finished_at: chrono::DateTime<chrono::Utc>,
+) -> AppResult<()> {
+    let mut am = scheduled_prompt::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .into_active_model();
+    am.last_finished_at = Set(Some(finished_at));
+    am.updated_at = Set(chrono::Utc::now());
+    am.update(db).await?;
+    Ok(())
+}
+
+// --- scheduled_prompt_runs ---------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_run_started(
+    db: &Db,
+    scheduled_prompt_id: Uuid,
+    agent_id: Uuid,
+    outcome: &str,
+    prompt_id: Option<Uuid>,
+    usage_weekly_pct: Option<i32>,
+    usage_session_pct: Option<i32>,
+    skip_reason: Option<&str>,
+) -> AppResult<scheduled_prompt_run::Model> {
+    let am = scheduled_prompt_run::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        scheduled_prompt_id: Set(scheduled_prompt_id),
+        agent_id: Set(agent_id),
+        fired_at: Set(chrono::Utc::now()),
+        finished_at: Set(None),
+        outcome: Set(outcome.to_string()),
+        skip_reason: Set(skip_reason.map(str::to_string)),
+        prompt_id: Set(prompt_id),
+        outcome_error: Set(None),
+        usage_weekly_pct: Set(usage_weekly_pct),
+        usage_session_pct: Set(usage_session_pct),
+    };
+    Ok(am.insert(db).await?)
+}
+
+/// Finalize a run: set `finished_at`, override `outcome` (e.g.
+/// `'completed'`, `'needs_input_canceled'`, `'warren_restart'`), and
+/// optionally store an error message.
+pub async fn finalize_run(
+    db: &Db,
+    run_id: Uuid,
+    outcome: &str,
+    outcome_error: Option<&str>,
+) -> AppResult<()> {
+    let mut am = scheduled_prompt_run::Entity::find_by_id(run_id)
+        .one(db)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .into_active_model();
+    am.outcome = Set(outcome.to_string());
+    am.outcome_error = Set(outcome_error.map(str::to_string));
+    am.finished_at = Set(Some(chrono::Utc::now()));
+    am.update(db).await?;
+    Ok(())
+}
+
+pub async fn list_runs_for_scheduled_prompt(
+    db: &Db,
+    scheduled_prompt_id: Uuid,
+    limit: u64,
+) -> AppResult<Vec<scheduled_prompt_run::Model>> {
+    Ok(scheduled_prompt_run::Entity::find()
+        .filter(scheduled_prompt_run::Column::ScheduledPromptId.eq(scheduled_prompt_id))
+        .order_by_desc(scheduled_prompt_run::Column::FiredAt)
+        .limit(Some(limit))
+        .all(db)
+        .await?)
+}
+
+/// Find runs that were fired but never finalized — used by the
+/// observation sweep to detect lost prompts.
+pub async fn list_unfinalized_runs(
+    db: &Db,
+    older_than: chrono::DateTime<chrono::Utc>,
+    limit: u64,
+) -> AppResult<Vec<scheduled_prompt_run::Model>> {
+    Ok(scheduled_prompt_run::Entity::find()
+        .filter(scheduled_prompt_run::Column::Outcome.eq("fired"))
+        .filter(scheduled_prompt_run::Column::FinishedAt.is_null())
+        .filter(scheduled_prompt_run::Column::FiredAt.lt(older_than))
+        .order_by_asc(scheduled_prompt_run::Column::FiredAt)
+        .limit(Some(limit))
+        .all(db)
+        .await?)
+}
+
+/// Cross-restart reconciliation: every run row in `'fired'` state
+/// without a `finished_at` is presumed lost (warren died mid-prompt,
+/// rabbit dropped, etc.). Flip them to `'warren_restart'`, set
+/// `finished_at = now`, and recompute `next_fire_at` for the parent
+/// schedule so the tick loop picks it up on the next pass. Idempotent:
+/// the `finished_at IS NULL` filter skips already-reconciled rows.
+pub async fn reconcile_after_restart(db: &Db) -> AppResult<u64> {
+    let now = chrono::Utc::now();
+    let stale = list_unfinalized_runs(db, now - chrono::Duration::seconds(5), 1000).await?;
+    let mut reconciled: u64 = 0;
+    for run in stale {
+        finalize_run(db, run.id, "warren_restart", Some("warren_restart")).await?;
+        // Advance the parent schedule by one interval from now.
+        if let Some(p) = get_scheduled_prompt(db, run.scheduled_prompt_id).await? {
+            let next = now + chrono::Duration::seconds(p.interval_seconds);
+            set_next_fire_at(db, p.id, next, now).await?;
+            mark_scheduled_prompt_finished(db, p.id, now).await?;
+        }
+        reconciled += 1;
+    }
+    Ok(reconciled)
+}
+
+/// Count inbox rows actionable for an agent right now (the same
+/// query `list_inbox_for_agent` runs, but cheaper — just a count).
+/// Used by the scheduler to decide whether to fire when the schedule
+/// has `ignore_inbox_state = false`.
+pub async fn count_inbox_for_agent(db: &Db, agent: &agent::Model) -> AppResult<u64> {
+    use sea_orm::QuerySelect;
+    let row: Option<i64> = request::Entity::find()
+        .select_only()
+        .column_as(request::Column::Id.count(), "count")
+        .filter(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(request::Column::Status.eq(1_i16))
+                        .add(request::Column::ClaimedBy.is_null())
+                        .add(request::Column::TargetClass.eq(&agent.class))
+                        .add(
+                            Condition::any()
+                                .add(request::Column::TargetType.is_null())
+                                .add(
+                                    request::Column::TargetType
+                                        .eq(agent.kind.as_deref().unwrap_or("")),
+                                ),
+                        ),
+                )
+                .add(
+                    Condition::all()
+                        .add(request::Column::Status.eq(2_i16))
+                        .add(request::Column::ClaimedBy.eq(agent.id)),
+                )
+                .add(
+                    Condition::all()
+                        .add(request::Column::Status.eq(4_i16))
+                        .add(request::Column::SenderAgentId.eq(agent.id)),
+                ),
+        )
+        .into_model::<CountRow>()
+        .one(db)
+        .await?
+        .map(|r| r.count);
+    Ok(row.unwrap_or(0).max(0) as u64)
+}
+
+#[derive(FromQueryResult)]
+struct CountRow {
+    pub count: i64,
 }
