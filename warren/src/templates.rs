@@ -17,7 +17,26 @@ pub struct AgentsTemplate {
     pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
-    pub agents: Vec<crate::entity::agent::Model>,
+    /// One row per agent, bundling the persisted model with the two
+    /// live-derived columns (status + action items). Parallel
+    /// `Vec<...>` fields would force Askama's indexing dance; a single
+    /// struct lets the template iterate `rows` and pull each piece by
+    /// name. The modals at the bottom of the template iterate the
+    /// inner `agent` field, so the model stays accessible.
+    pub rows: Vec<AgentRow>,
+}
+
+/// Per-row enrichment for the agents index page. `status` is `None`
+/// when no rabbit is currently registered for the agent (the template
+/// renders this as "offline" — distinct from the typed `AgentState::Dead`
+/// which means "registered but not running"). `action_items` counts
+/// requests actionable right now: claims for this agent's class+kind,
+/// already-claimed requests this agent must respond to, and requests
+/// this agent must acknowledge (per `db_ops::list_inbox_for_agent`).
+pub struct AgentRow {
+    pub agent: crate::entity::agent::Model,
+    pub status: Option<rabbit_lib::wire::AgentState>,
+    pub action_items: u64,
 }
 
 #[derive(Template)]

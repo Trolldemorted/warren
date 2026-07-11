@@ -15,8 +15,8 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use portable_pty::ChildKiller;
 use rabbit_lib::wire::{
-    Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame, TermSize,
-    UsageSnapshot, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+    AgentState, Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame,
+    TermSize, UsageSnapshot, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
 };
 use std::collections::VecDeque;
 use std::io::Write;
@@ -1240,31 +1240,49 @@ async fn handle_outcome(
 }
 
 async fn forward_observer_event(cmd_tx: &mpsc::Sender<LinkCmd>, ev: &ObserverEvent) {
-    let env = build_envelope(ev);
-    let body = match env {
-        Some(e) => e,
-        None => return,
-    };
-    crate::dispatch::send_or_warn(
-        "LinkCmd::SendMeta(observer)",
-        cmd_tx,
-        LinkCmd::SendMeta(body.clone()),
-    )
-    .await;
+    for body in build_envelopes(ev) {
+        crate::dispatch::send_or_warn(
+            "LinkCmd::SendMeta(observer)",
+            cmd_tx,
+            LinkCmd::SendMeta(body),
+        )
+        .await;
+    }
 }
 
-fn build_envelope(ev: &ObserverEvent) -> Option<EnvelopeBody> {
-    let raw = match ev.kind {
-        "session" => EnvelopeBody::Session(rabbit_lib::wire::SessionInfo {
+/// Build the wire envelopes for an observer event. Most events produce a
+/// single side-effect envelope (`PromptEcho`, `StopHook`, `Log`, …), but
+/// events that carry a `state` field ALSO produce a `State` envelope so the
+/// browser's status badge reflects hook-driven transitions (Running on
+/// `UserPromptSubmit`, Idle on `Stop`). Without the `State` half the
+/// badge would be stuck on the last supervisor-side transition
+/// (typically `Idle` after the initial `spawn_idle` broadcast) and would
+/// never flip to `Running` while claude is actively producing tokens.
+fn build_envelopes(ev: &ObserverEvent) -> Vec<EnvelopeBody> {
+    let mut out = Vec::with_capacity(2);
+    // State-half first so subscribers see the badge flip before the
+    // side-effect echo lands (matches the supervisor's own ordering:
+    // `send_state` -> `cmd_tx.send(State)` precedes any per-turn traffic).
+    if let Some(st) = ev.state {
+        out.push(EnvelopeBody::State(StateFrame {
+            state: agent_state_from_observer(st),
+            session_id: ev.session_id.clone(),
+            reason: Some(ev.kind.to_string()),
+        }));
+    }
+    let side_effect = match ev.kind {
+        "session" => Some(EnvelopeBody::Session(rabbit_lib::wire::SessionInfo {
             session_id: ev.session_id.clone().unwrap_or_default(),
             resumed: false,
-        }),
-        "session_end" => EnvelopeBody::State(StateFrame {
-            state: "ended".into(),
-            session_id: ev.session_id.clone(),
-            reason: Some("session_end".into()),
-        }),
-        "prompt_echo" => EnvelopeBody::PromptEcho(rabbit_lib::wire::PromptEcho {
+        })),
+        "session_end" => {
+            // The session_end half is folded into the state envelope
+            // above (kind="session_end", state=Ended). Skip the legacy
+            // duplicate here so subscribers don't see two consecutive
+            // State frames for the same transition.
+            None
+        }
+        "prompt_echo" => Some(EnvelopeBody::PromptEcho(rabbit_lib::wire::PromptEcho {
             prompt_id: ev.prompt_id.unwrap_or_else(Uuid::nil),
             text: ev
                 .raw
@@ -1280,19 +1298,38 @@ fn build_envelope(ev: &ObserverEvent) -> Option<EnvelopeBody> {
             // the supervisor-side transcript path still records
             // both the original prompt and the echo verbatim.
             by_connection_id: None,
-        }),
-        "stop_hook" => EnvelopeBody::StopHook {
+        })),
+        "stop_hook" => Some(EnvelopeBody::StopHook {
             prompt_id: ev.prompt_id.unwrap_or_else(Uuid::nil),
             usage: ev.usage.clone(),
             error: None,
-        },
-        "log" => EnvelopeBody::Log(LogLine {
+        }),
+        "log" => Some(EnvelopeBody::Log(LogLine {
             level: "info".to_string(),
             message: ev.raw.as_ref().map(|r| r.to_string()).unwrap_or_default(),
-        }),
-        _ => return None,
+        })),
+        _ => None,
     };
-    Some(raw)
+    if let Some(body) = side_effect {
+        out.push(body);
+    }
+    out
+}
+
+/// Translate the observer-side `State` into the wire-typed
+/// `rabbit_lib::wire::AgentState`. Always succeeds — both enums carry
+/// the same five variants. Keeping the conversion explicit (instead of
+/// `state.as_str().into()`) preserves the typed enum on the wire and
+/// avoids the silent-default-to-`Starting` fallback in `From<&str> for
+/// AgentState`.
+fn agent_state_from_observer(st: State) -> AgentState {
+    match st {
+        State::Starting => AgentState::Starting,
+        State::Idle => AgentState::Idle,
+        State::Running => AgentState::Running,
+        State::Ended => AgentState::Ended,
+        State::Dead => AgentState::Dead,
+    }
 }
 
 /// During a pending graceful shutdown, decide whether the PTY loop should stop
@@ -1847,6 +1884,124 @@ mod tests {
             Duration::from_millis(1500),
             true
         ));
+    }
+
+    // §Status-badge regression: every observer event whose `state` field is
+    // `Some(_)` MUST produce a `State` envelope in addition to the side-
+    // effect envelope (`PromptEcho` / `StopHook`). Without this, the
+    // browser's status badge is stuck on whatever the supervisor emitted
+    // last (typically `Idle`), because `prompt_echo` carries the
+    // `State::Running` flag but the old `build_envelope` only emitted
+    // `PromptEcho` and dropped the state half on the floor.
+
+    fn obs_event(kind: &'static str, state: Option<State>) -> ObserverEvent {
+        ObserverEvent {
+            kind,
+            state,
+            session_id: Some("sess-1".into()),
+            prompt_id: Some(uuid::Uuid::nil()),
+            started_at: None,
+            ended_at: None,
+            usage: None,
+            error: None,
+            raw: None,
+        }
+    }
+
+    #[test]
+    fn build_envelopes_emits_running_for_user_prompt_submit() {
+        // UserPromptSubmit hook → observer event kind="prompt_echo",
+        // state=Some(Running). Without the state half, the badge can't
+        // flip from Idle to Running when the operator sends a prompt.
+        let ev = obs_event("prompt_echo", Some(State::Running));
+        let bodies = build_envelopes(&ev);
+        assert!(
+            bodies.iter().any(|b| matches!(
+                b,
+                EnvelopeBody::State(s) if s.state == AgentState::Running
+            )),
+            "expected a State(Running) envelope for prompt_echo; got {bodies:?}"
+        );
+        // Side-effect envelope still present — browsers render the echo
+        // in the terminal alongside the status flip.
+        assert!(
+            bodies
+                .iter()
+                .any(|b| matches!(b, EnvelopeBody::PromptEcho(_))),
+            "expected PromptEcho side-effect envelope; got {bodies:?}"
+        );
+    }
+
+    #[test]
+    fn build_envelopes_emits_idle_for_stop_hook() {
+        // Stop hook → observer event kind="stop_hook", state=Some(Idle).
+        // Without this, the badge never returns to Idle after a turn
+        // completes and the operator thinks the agent is still running.
+        let ev = obs_event("stop_hook", Some(State::Idle));
+        let bodies = build_envelopes(&ev);
+        assert!(
+            bodies.iter().any(|b| matches!(
+                b,
+                EnvelopeBody::State(s) if s.state == AgentState::Idle
+            )),
+            "expected a State(Idle) envelope for stop_hook; got {bodies:?}"
+        );
+    }
+
+    #[test]
+    fn build_envelopes_emits_ended_for_session_end_without_legacy_duplicate() {
+        // session_end carries state=Ended. The fix folds the legacy
+        // explicit State(state="ended") arm into the new state-driven
+        // path, so subscribers see exactly ONE State frame for this
+        // transition rather than two consecutive duplicates.
+        let ev = obs_event("session_end", Some(State::Ended));
+        let bodies = build_envelopes(&ev);
+        let state_frames: Vec<_> = bodies
+            .iter()
+            .filter_map(|b| match b {
+                EnvelopeBody::State(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            state_frames.len(),
+            1,
+            "expected exactly one State frame for session_end; got {state_frames:?}"
+        );
+        assert_eq!(state_frames[0].state, AgentState::Ended);
+    }
+
+    #[test]
+    fn build_envelopes_omits_state_when_observer_state_is_none() {
+        // Notification/log events carry no state — the badge should not
+        // flicker back to its current value on every log line. The
+        // side-effect envelope (Log) still ships.
+        let ev = obs_event("log", None);
+        let bodies = build_envelopes(&ev);
+        assert!(
+            !bodies.iter().any(|b| matches!(b, EnvelopeBody::State(_))),
+            "no state frame expected when ev.state is None; got {bodies:?}"
+        );
+        assert!(
+            bodies.iter().any(|b| matches!(b, EnvelopeBody::Log(_))),
+            "expected Log side-effect; got {bodies:?}"
+        );
+    }
+
+    #[test]
+    fn agent_state_from_observer_maps_every_variant() {
+        // Symmetry with `from_agent_state`: every observer State has a
+        // matching wire AgentState. If a new variant is added to one
+        // enum and not the other, this test fails fast at compile time.
+        for (obs, wire) in [
+            (State::Starting, AgentState::Starting),
+            (State::Idle, AgentState::Idle),
+            (State::Running, AgentState::Running),
+            (State::Ended, AgentState::Ended),
+            (State::Dead, AgentState::Dead),
+        ] {
+            assert_eq!(agent_state_from_observer(obs), wire);
+        }
     }
 
     /// Regression test for the runtime-hang on `^C`. The blocking PTY

@@ -3,7 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
 use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew};
 use crate::templates::{
-    AgentClaudeTemplate, AgentFormTemplate, AgentShellTemplate, AgentsTemplate,
+    AgentClaudeTemplate, AgentFormTemplate, AgentRow, AgentShellTemplate, AgentsTemplate,
     ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate, CommsRow, CommsTemplate, Flash,
     LoginTemplate, MigrationsTemplate,
 };
@@ -195,11 +195,46 @@ async fn agents_page(State(state): State<AppState>, headers: HeaderMap) -> Respo
     }
     match crate::db_ops::list_agents(&state.db).await {
         Ok(agents) => {
+            // Per-row enrichment: look up live state from the rabbit-lib
+            // registry (None = no rabbit currently registered → render as
+            // "offline") and the agent's inbox count (requests actionable
+            // right now for this agent's class+kind AND items the specific
+            // agent has already claimed or must acknowledge).
+            //
+            // Done sequentially because the page renders at most O(agents)
+            // rows and the queries are cheap. A `futures::join_all` would
+            // be premature — the DB pool's connection cap is 10 by default
+            // and admin agent counts are typically <50. If this ever
+            // becomes a hot path, the natural move is one batched
+            // `SELECT count(*) ... WHERE target_class = ANY(...)` plus a
+            // single registry snapshot.
+            let mut rows = Vec::with_capacity(agents.len());
+            for a in agents {
+                let status = state
+                    .live
+                    .registry
+                    .get(&a.id)
+                    .map(|h| h.snapshot().state);
+                let action_items = crate::db_ops::list_inbox_for_agent(
+                    &state.db,
+                    a.id,
+                    &a.class,
+                    a.kind.as_deref(),
+                )
+                .await
+                .map(|rs| rs.len() as u64)
+                .unwrap_or(0);
+                rows.push(AgentRow {
+                    agent: a,
+                    status,
+                    action_items,
+                });
+            }
             let t = AgentsTemplate {
                 title: Some("Agents"),
                 nav: Some("agents"),
                 flash: None,
-                agents,
+                rows,
             };
             render(t)
         }

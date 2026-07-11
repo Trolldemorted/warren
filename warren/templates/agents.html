@@ -4,44 +4,70 @@
   <h1 class="h3 mb-0">Agents</h1>
   <a href="/admin/agents/new" class="btn btn-primary">New agent</a>
 </div>
-{% if agents.is_empty() %}
+{% if rows.is_empty() %}
   <p class="text-muted">No agents yet.</p>
 {% else %}
 <table class="table table-striped align-middle">
   <thead>
     <tr>
-      <th>Name</th><th>Class</th><th>Kind</th><th>Model</th><th>Created</th><th></th>
+      <th>Name</th><th>Class</th><th>Kind</th><th>Model</th>
+      <th>Status</th><th>Action items</th>
+      <th>Created</th><th></th>
     </tr>
   </thead>
   <tbody>
-    {% for a in agents %}
+    {% for r in rows %}
     <tr>
-      <td><code>{{ a.name }}</code></td>
-      <td>{{ a.class }}</td>
-      <td>{{ a.kind.as_deref().unwrap_or("—") }}</td>
-      <td>{{ a.model }}</td>
-      <td><small class="text-muted">{{ a.created_at }}</small></td>
+      <td><code>{{ r.agent.name }}</code></td>
+      <td>{{ r.agent.class }}</td>
+      <td>{{ r.agent.kind.as_deref().unwrap_or("—") }}</td>
+      <td>{{ r.agent.model }}</td>
+      <td>
+        {% match r.status %}
+          {% when Some with (s) %}
+            {# §Status badge colors mirror `agent_claude.html::setBadge`
+               so the dashboard cell matches the per-agent page exactly.
+               The five variants exhaust `AgentState`; a future enum
+               addition will surface as a plain text label here, which
+               is a deliberate safe-fallback over guessing colors. #}
+            <span class="badge bg-{% if s.as_str() == "idle" %}success{% else if s.as_str() == "running" %}warning{% else if s.as_str() == "starting" %}info{% else if s.as_str() == "ended" %}dark{% else %}secondary{% endif %}">{{ s.as_str() }}</span>
+          {% when None %}
+            <span class="badge bg-secondary">offline</span>
+        {% endmatch %}
+      </td>
+      <td>
+        {% if r.action_items > 0 %}
+          {# §Action items: a non-zero count links to the comms page
+             where the operator can drill into the actionable requests.
+             Zero renders as "—" (em-dash) to match the rest of the
+             table's "nothing here" idiom. #}
+          <a class="badge bg-warning text-dark text-decoration-none" href="/comms">{{ r.action_items }}</a>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      <td><small class="text-muted">{{ r.agent.created_at }}</small></td>
       <td class="text-end">
-        <a class="btn btn-sm btn-outline-secondary" href="/admin/agents/{{ a.id }}/edit">Edit</a>
-        <a class="btn btn-sm btn-outline-primary" href="/agent/{{ a.id }}/claude">claude</a>
-        <a class="btn btn-sm btn-outline-danger" href="#delete-agent-{{ a.id }}">Delete</a>
+        <a class="btn btn-sm btn-outline-secondary" href="/admin/agents/{{ r.agent.id }}/edit">Edit</a>
+        <a class="btn btn-sm btn-outline-primary" href="/agent/{{ r.agent.id }}/claude">claude</a>
+        <a class="btn btn-sm btn-outline-danger" href="#delete-agent-{{ r.agent.id }}">Delete</a>
       </td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
 
-{% for a in agents %}
-<div id="delete-agent-{{ a.id }}" class="modal" role="dialog" aria-labelledby="delete-agent-title-{{ a.id }}">
+{% for r in rows %}
+<div id="delete-agent-{{ r.agent.id }}" class="modal" role="dialog" aria-labelledby="delete-agent-title-{{ r.agent.id }}">
   <a class="modal-bg" href="#" aria-label="Close"></a>
   <div class="modal-dialog" role="document">
     <div class="modal-header">
-      <h5 class="modal-title" id="delete-agent-title-{{ a.id }}">Delete agent?</h5>
+      <h5 class="modal-title" id="delete-agent-title-{{ r.agent.id }}">Delete agent?</h5>
       <a class="modal-close" href="#" aria-label="Close">×</a>
     </div>
     <div class="modal-body">
-      <p>Are you sure you want to delete agent <code>{{ a.name }}</code>? This cannot be undone.</p>
-      <form method="post" action="/admin/agents/{{ a.id }}/delete">
+      <p>Are you sure you want to delete agent <code>{{ r.agent.name }}</code>? This cannot be undone.</p>
+      <form method="post" action="/admin/agents/{{ r.agent.id }}/delete">
         <button type="submit" class="btn btn-danger">Yes, delete</button>
         <a href="#" class="btn btn-link">Cancel</a>
       </form>
