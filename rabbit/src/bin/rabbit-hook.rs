@@ -27,6 +27,25 @@ fn validate_stdin_payload(payload: &str) -> Result<()> {
     Ok(())
 }
 
+/// Determine which lifecycle event fired. Claude Code delivers the event
+/// name in the stdin payload as `hook_event_name` (PascalCase, e.g.
+/// `UserPromptSubmit`); the observer normalizes it to snake_case. Claude
+/// Code silently ignores any `env` block in the hook settings, so the
+/// stdin field — not `RABBIT_HOOK_KIND` — is the reliable source. The env
+/// var is kept only as a fallback for manual/piped invocations.
+fn resolve_hook_kind(payload: &serde_json::Value) -> String {
+    payload
+        .get("hook_event_name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("RABBIT_HOOK_KIND")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     if let Err(e) = simple_logger::init_with_env() {
@@ -35,7 +54,6 @@ async fn main() -> Result<()> {
 
     let url = std::env::var("RABBIT_OBSERVER_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:7777".to_string());
-    let kind = std::env::var("RABBIT_HOOK_KIND").unwrap_or_else(|_| "unknown".to_string());
 
     let mut stdin = tokio::io::stdin();
     let mut payload = String::new();
@@ -43,10 +61,13 @@ async fn main() -> Result<()> {
 
     validate_stdin_payload(&payload)?;
 
+    let parsed = serde_json::from_str::<serde_json::Value>(&payload)
+        .unwrap_or(serde_json::Value::String(payload));
+    let kind = resolve_hook_kind(&parsed);
+
     let body = serde_json::json!({
         "kind": kind,
-        "payload": serde_json::from_str::<serde_json::Value>(&payload)
-            .unwrap_or(serde_json::Value::String(payload)),
+        "payload": parsed,
     });
 
     let client = reqwest::Client::builder()
@@ -69,7 +90,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_stdin_payload;
+    use super::{resolve_hook_kind, validate_stdin_payload};
 
     #[test]
     fn rejects_empty_stdin() {
@@ -109,5 +130,25 @@ mod tests {
         // least one non-whitespace character, we accept it.
         validate_stdin_payload("\n{\"k\":\"v\"}\n")
             .expect("non-empty payload with surrounding whitespace must validate");
+    }
+
+    #[test]
+    fn kind_from_hook_event_name() {
+        // Claude Code puts the event name on the stdin payload; this is
+        // the reliable discriminator (the settings `env` block is ignored).
+        let p = serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": "hi"});
+        assert_eq!(resolve_hook_kind(&p), "UserPromptSubmit");
+        let p = serde_json::json!({"hook_event_name": "Stop", "stop_hook_active": true});
+        assert_eq!(resolve_hook_kind(&p), "Stop");
+    }
+
+    #[test]
+    fn kind_unknown_when_absent_and_no_env() {
+        let p = serde_json::json!({"prompt": "hi"});
+        // Guard against a stray RABBIT_HOOK_KIND in the test runner's env,
+        // which is a legitimate manual-invocation fallback.
+        if std::env::var("RABBIT_HOOK_KIND").is_err() {
+            assert_eq!(resolve_hook_kind(&p), "unknown");
+        }
     }
 }

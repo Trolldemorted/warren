@@ -2,12 +2,14 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const HOOK_KINDS: &[(&str, &str)] = &[
-    ("SessionStart", "session_start"),
-    ("UserPromptSubmit", "user_prompt_submit"),
-    ("Stop", "stop"),
-    ("SessionEnd", "session_end"),
-];
+/// Claude lifecycle events rabbit installs a hook for. The event name is
+/// the settings.json key; the shared `rabbit-hook` binary discovers which
+/// one fired from the `hook_event_name` field on its stdin payload (Claude
+/// Code silently ignores any `env` block, so it can't be used to tag the
+/// event). No `matcher` is emitted — it's ignored for `UserPromptSubmit` /
+/// `Stop`, and an empty matcher would stop `SessionStart` / `SessionEnd`
+/// from ever firing.
+const HOOK_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"];
 
 pub fn install(workdir: &Path, hook_bin: &Path) -> Result<()> {
     let dir = workdir.join(".claude");
@@ -22,16 +24,14 @@ pub fn install(workdir: &Path, hook_bin: &Path) -> Result<()> {
 fn build(hook_bin: &Path) -> String {
     let mut settings = json!({});
     let mut hooks = serde_json::Map::new();
-    for (claude_key, kind) in HOOK_KINDS {
+    for event in HOOK_EVENTS {
         let entry = json!([{
-            "matcher": "",
             "hooks": [{
                 "type": "command",
                 "command": hook_bin.to_string_lossy(),
-                "env": { "RABBIT_HOOK_KIND": kind },
             }],
         }]);
-        hooks.insert((*claude_key).to_string(), entry);
+        hooks.insert((*event).to_string(), entry);
     }
     settings["hooks"] = Value::Object(hooks);
     serde_json::to_string_pretty(&settings).expect("static json")
@@ -61,7 +61,6 @@ pub fn resolve_hook_bin(explicit: Option<PathBuf>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use tempfile::tempdir;
 
     #[test]
@@ -72,14 +71,16 @@ mod tests {
         let raw = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
         let v: Value = serde_json::from_str(&raw).unwrap();
         let hooks = v.get("hooks").expect("hooks key");
-        for (claude_key, kind) in HOOK_KINDS {
-            let arr = hooks
-                .get(claude_key)
-                .unwrap_or_else(|| panic!("{claude_key}"));
-            assert!(arr.is_array(), "{claude_key} should be array");
+        for event in HOOK_EVENTS {
+            let arr = hooks.get(event).unwrap_or_else(|| panic!("{event}"));
+            assert!(arr.is_array(), "{event} should be array");
             let inner = &arr[0]["hooks"][0];
             assert_eq!(inner["command"], "/usr/local/bin/rabbit-hook");
-            assert_eq!(inner["env"]["RABBIT_HOOK_KIND"], *kind);
+            // Claude Code ignores an `env` block and an empty `matcher`;
+            // rabbit-hook reads the event from `hook_event_name` on stdin,
+            // so neither field is emitted.
+            assert!(inner.get("env").is_none(), "{event} must omit env");
+            assert!(arr[0].get("matcher").is_none(), "{event} must omit matcher");
         }
     }
 
@@ -153,18 +154,22 @@ mod tests {
     }
 
     #[test]
-    fn hook_env_has_no_duplicate_keys() {
+    fn each_event_registered_once_without_matcher_or_env() {
         let out = build(Path::new("rabbit-hook"));
-        let mut seen: HashMap<String, String> = HashMap::new();
-        for (claude_key, expected) in HOOK_KINDS {
-            let v: Value = serde_json::from_str(&out).unwrap();
-            let kind = v["hooks"][*claude_key][0]["hooks"][0]["env"]["RABBIT_HOOK_KIND"]
-                .as_str()
-                .unwrap()
-                .to_string();
-            let prev = seen.insert(claude_key.to_string(), kind.clone());
-            assert!(prev.is_none(), "duplicate key {claude_key}");
-            assert_eq!(&kind, expected);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let hooks = v["hooks"].as_object().expect("hooks object");
+        assert_eq!(hooks.len(), HOOK_EVENTS.len(), "one entry per event");
+        for event in HOOK_EVENTS {
+            let entry = &v["hooks"][*event];
+            assert!(entry.is_array(), "{event} should be array");
+            assert!(
+                entry[0].get("matcher").is_none(),
+                "{event} must omit matcher (empty matcher blocks session events)"
+            );
+            assert!(
+                entry[0]["hooks"][0].get("env").is_none(),
+                "{event} must omit the ignored env block"
+            );
         }
     }
 }
