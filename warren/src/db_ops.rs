@@ -839,6 +839,7 @@ pub async fn create_scheduled_prompt(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())),
         next_fire_at: Set(Some(chrono::Utc::now())),
+        context_clear_threshold_pct: Set(new.context_clear_threshold_pct),
         ..Default::default()
     };
     Ok(am.insert(db).await?)
@@ -875,6 +876,9 @@ pub async fn update_scheduled_prompt(
     if let Some(s) = patch.session_safety_buffer_pct {
         am.session_safety_buffer_pct = Set(s);
     }
+    if let Some(c) = patch.context_clear_threshold_pct {
+        am.context_clear_threshold_pct = Set(Some(c));
+    }
     am.updated_at = Set(chrono::Utc::now());
     am.update(db).await?;
     get_scheduled_prompt(db, id)
@@ -892,7 +896,9 @@ pub async fn delete_scheduled_prompt(db: &Db, id: Uuid) -> AppResult<()> {
         .filter(scheduled_prompt_run::Column::ScheduledPromptId.eq(id))
         .exec(&txn)
         .await?;
-    let res = scheduled_prompt::Entity::delete_by_id(id).exec(&txn).await?;
+    let res = scheduled_prompt::Entity::delete_by_id(id)
+        .exec(&txn)
+        .await?;
     txn.commit().await?;
     if res.rows_affected == 0 {
         return Err(AppError::NotFound);

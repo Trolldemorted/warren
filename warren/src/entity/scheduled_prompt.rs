@@ -34,6 +34,11 @@ pub struct Model {
     /// `kind IS NOT DISTINCT FROM target_kind`.
     pub target_class: String,
     pub target_kind: Option<String>,
+    /// Whole-percent threshold on the scraped `/context` `ctx_used_pct`
+    /// at fire time. `None` or `Some(0)` disables auto-`/clear`;
+    /// `Some(1..=100)` clears before submitting the prompt when
+    /// `ctx_used_pct >= this`.
+    pub context_clear_threshold_pct: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -25,10 +25,7 @@ fn warren_bin() -> Option<PathBuf> {
 /// locally but failed on CI runners that check out under
 /// `/home/runner/work/...`.
 fn migrations_dir_url() -> String {
-    format!(
-        "file://{}/migrations_atlas",
-        env!("CARGO_MANIFEST_DIR")
-    )
+    format!("file://{}/migrations_atlas", env!("CARGO_MANIFEST_DIR"))
 }
 
 fn has(cmd: &str) -> bool {

@@ -142,6 +142,8 @@ pub struct ScheduledPromptNew {
     pub weekly_safety_buffer_pct: i32,
     #[serde(default)]
     pub session_safety_buffer_pct: i32,
+    #[serde(default)]
+    pub context_clear_threshold_pct: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -160,4 +162,6 @@ pub struct ScheduledPromptPatch {
     pub weekly_safety_buffer_pct: Option<i32>,
     #[serde(default)]
     pub session_safety_buffer_pct: Option<i32>,
+    #[serde(default)]
+    pub context_clear_threshold_pct: Option<i32>,
 }

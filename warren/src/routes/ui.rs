@@ -1024,6 +1024,7 @@ struct ScheduledPromptForm {
     ignore_inbox_state: Option<String>,
     weekly_safety_buffer_pct: String,
     session_safety_buffer_pct: String,
+    context_clear_threshold_pct: String,
 }
 
 fn scheduled_prompt_form_checkbox(s: Option<String>) -> bool {
@@ -1070,6 +1071,22 @@ fn parse_scheduled_prompt_form(
             "session_safety_buffer_pct must be 0..=100".into(),
         ));
     }
+    let context_clear_threshold_pct_raw = form.context_clear_threshold_pct.trim();
+    let context_clear_threshold_pct = if context_clear_threshold_pct_raw.is_empty() {
+        None
+    } else {
+        let v = context_clear_threshold_pct_raw
+            .parse::<i32>()
+            .map_err(|_| {
+                AppError::BadRequest("context_clear_threshold_pct must be an integer".into())
+            })?;
+        if !(0..=100).contains(&v) {
+            return Err(AppError::BadRequest(
+                "context_clear_threshold_pct must be 0..=100".into(),
+            ));
+        }
+        Some(v)
+    };
     Ok(ScheduledPromptFormParsed {
         target_class: form.target_class.trim().to_string(),
         target_kind: {
@@ -1087,6 +1104,7 @@ fn parse_scheduled_prompt_form(
         ignore_inbox_state: scheduled_prompt_form_checkbox(form.ignore_inbox_state),
         weekly_safety_buffer_pct,
         session_safety_buffer_pct,
+        context_clear_threshold_pct,
     })
 }
 
@@ -1100,6 +1118,7 @@ struct ScheduledPromptFormParsed {
     ignore_inbox_state: bool,
     weekly_safety_buffer_pct: i32,
     session_safety_buffer_pct: i32,
+    context_clear_threshold_pct: Option<i32>,
 }
 
 async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1162,6 +1181,7 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
         ignore_inbox_state: false,
         weekly_safety_buffer_pct: 0,
         session_safety_buffer_pct: 0,
+        context_clear_threshold_pct: None,
         runs: vec![],
     })
 }
@@ -1188,6 +1208,7 @@ async fn scheduled_prompt_create(
         ignore_inbox_state: parsed.ignore_inbox_state,
         weekly_safety_buffer_pct: parsed.weekly_safety_buffer_pct,
         session_safety_buffer_pct: parsed.session_safety_buffer_pct,
+        context_clear_threshold_pct: parsed.context_clear_threshold_pct,
     };
     match crate::db_ops::create_scheduled_prompt(&state.db, &new).await {
         Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),
@@ -1237,6 +1258,7 @@ async fn scheduled_prompt_edit_page(
                 ignore_inbox_state: p.ignore_inbox_state,
                 weekly_safety_buffer_pct: p.weekly_safety_buffer_pct,
                 session_safety_buffer_pct: p.session_safety_buffer_pct,
+                context_clear_threshold_pct: p.context_clear_threshold_pct,
                 runs,
             })
         }
@@ -1266,6 +1288,7 @@ async fn scheduled_prompt_update(
         ignore_inbox_state: Some(parsed.ignore_inbox_state),
         weekly_safety_buffer_pct: Some(parsed.weekly_safety_buffer_pct),
         session_safety_buffer_pct: Some(parsed.session_safety_buffer_pct),
+        context_clear_threshold_pct: parsed.context_clear_threshold_pct,
     };
     match crate::db_ops::update_scheduled_prompt(&state.db, id, &patch).await {
         Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),

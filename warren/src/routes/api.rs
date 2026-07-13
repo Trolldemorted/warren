@@ -600,6 +600,13 @@ fn validate_scheduled_prompt_new(n: &ScheduledPromptNew) -> AppResult<()> {
             "session_safety_buffer_pct must be 0..=100".into(),
         ));
     }
+    if let Some(c) = n.context_clear_threshold_pct {
+        if !(0..=100).contains(&c) {
+            return Err(AppError::BadRequest(
+                "context_clear_threshold_pct must be 0..=100".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -630,6 +637,13 @@ fn validate_scheduled_prompt_patch(p: &ScheduledPromptPatch) -> AppResult<()> {
         if !(0..=100).contains(&s) {
             return Err(AppError::BadRequest(
                 "session_safety_buffer_pct must be 0..=100".into(),
+            ));
+        }
+    }
+    if let Some(c) = p.context_clear_threshold_pct {
+        if !(0..=100).contains(&c) {
+            return Err(AppError::BadRequest(
+                "context_clear_threshold_pct must be 0..=100".into(),
             ));
         }
     }
@@ -845,5 +859,62 @@ mod tests {
             response: "refactor landed in abc123".into(),
         };
         validate_request_respond(&r).expect("non-empty response must validate");
+    }
+
+    fn ok_new() -> ScheduledPromptNew {
+        ScheduledPromptNew {
+            target_class: "claude".into(),
+            target_kind: None,
+            name: "schedule-x".into(),
+            prompt_text: "say hi".into(),
+            interval_seconds: 60,
+            enabled: true,
+            ignore_inbox_state: false,
+            weekly_safety_buffer_pct: 0,
+            session_safety_buffer_pct: 0,
+            context_clear_threshold_pct: None,
+        }
+    }
+
+    #[test]
+    fn scheduled_prompt_new_rejects_out_of_range_clear_threshold() {
+        let mut n = ok_new();
+        n.context_clear_threshold_pct = Some(150);
+        assert_bad_request_contains(
+            validate_scheduled_prompt_new(&n).unwrap_err(),
+            "context_clear_threshold_pct must be 0..=100",
+        );
+        n.context_clear_threshold_pct = Some(-1);
+        assert_bad_request_contains(
+            validate_scheduled_prompt_new(&n).unwrap_err(),
+            "context_clear_threshold_pct must be 0..=100",
+        );
+    }
+
+    #[test]
+    fn scheduled_prompt_new_accepts_clear_threshold_at_boundaries() {
+        for v in [None, Some(0), Some(100)] {
+            let mut n = ok_new();
+            n.context_clear_threshold_pct = v;
+            validate_scheduled_prompt_new(&n)
+                .unwrap_or_else(|e| panic!("threshold {v:?} must validate: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn scheduled_prompt_patch_rejects_out_of_range_clear_threshold() {
+        let mut p = ScheduledPromptPatch::default();
+        p.context_clear_threshold_pct = Some(101);
+        assert_bad_request_contains(
+            validate_scheduled_prompt_patch(&p).unwrap_err(),
+            "context_clear_threshold_pct must be 0..=100",
+        );
+    }
+
+    #[test]
+    fn scheduled_prompt_patch_ignores_clearing_threshold_via_none() {
+        let mut p = ScheduledPromptPatch::default();
+        p.context_clear_threshold_pct = Some(0);
+        validate_scheduled_prompt_patch(&p).expect("Some(0) (disabled) must validate on patch");
     }
 }

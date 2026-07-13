@@ -145,20 +145,21 @@ pub async fn fire_prompt(
     }
 
     // (3) Fresh usage scrape via the chosen handle.
-    let (weekly_pct, session_pct, context_pct) = match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT).await {
-        Some(t) => t,
-        None => {
-            skip(
-                &state,
-                &prompt,
-                "skipped_unsafe_scrape",
-                (None, None, None),
-                now,
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let (weekly_pct, session_pct, context_pct) =
+        match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT).await {
+            Some(t) => t,
+            None => {
+                skip(
+                    &state,
+                    &prompt,
+                    "skipped_unsafe_scrape",
+                    (None, None, None),
+                    now,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
     let weekly_i = weekly_pct.map(|x| x.round() as i32);
     let session_i = session_pct.map(|x| x.round() as i32);
     // §Context-window: round to whole percent the same way weekly /
@@ -191,6 +192,26 @@ pub async fn fire_prompt(
             )
             .await?;
             return Ok(());
+        }
+    }
+
+    // (3.5) Optional auto-`/clear` when the freshly-scraped context
+    // window is at or above the schedule's threshold. Best-effort:
+    // a clear failure is logged but the tick still fires — the
+    // operator configured this as a guardrail, not a hard gate.
+    if let Some(threshold) = prompt.context_clear_threshold_pct {
+        if threshold > 0 {
+            if let Some(c) = context_pct {
+                if c >= threshold as f64 {
+                    if let Err(e) = handle.clear(false).await {
+                        log::warn!(
+                            "scheduler: auto-clear failed for prompt={} agent={}: {e:?}",
+                            prompt.id,
+                            agent_id
+                        );
+                    }
+                }
+            }
         }
     }
 

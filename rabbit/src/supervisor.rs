@@ -200,14 +200,10 @@ pub async fn run(config: Config) -> Result<()> {
     // scrape instead of starting two parallel scrapers competing
     // for the broadcast receiver and the writer actor's FIFO.
     // Mirrors the `current_scrape` slot above.
-    type SharedContextReceiver = Arc<
-        tokio::sync::Mutex<
-            tokio::sync::watch::Receiver<(ContextSnapshot, bool)>,
-        >,
-    >;
-    let current_context_scrape: Arc<
-        tokio::sync::Mutex<Option<SharedContextReceiver>>,
-    > = Arc::new(tokio::sync::Mutex::new(None));
+    type SharedContextReceiver =
+        Arc<tokio::sync::Mutex<tokio::sync::watch::Receiver<(ContextSnapshot, bool)>>>;
+    let current_context_scrape: Arc<tokio::sync::Mutex<Option<SharedContextReceiver>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     loop {
         // Spawn a new claude generation if we have nothing running and aren't dead.

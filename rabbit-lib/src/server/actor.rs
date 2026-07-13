@@ -1000,8 +1000,10 @@ mod tests {
         let idle_json = serde_json::to_string(&idle).expect("serialize state");
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TransportMsg>();
-        tx.send(TransportMsg::Text(hello_json)).expect("preload hello");
-        tx.send(TransportMsg::Text(idle_json)).expect("preload state");
+        tx.send(TransportMsg::Text(hello_json))
+            .expect("preload hello");
+        tx.send(TransportMsg::Text(idle_json))
+            .expect("preload state");
 
         let transport = MockWsTransport {
             inbound: rx,

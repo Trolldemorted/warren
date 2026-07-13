@@ -72,9 +72,7 @@ impl ContextSnapshot {
     /// when a single paint has surfaced enough data for the
     /// dashboard's primary row.
     pub fn all_populated(&self) -> bool {
-        self.used_tokens.is_some()
-            && self.total_tokens.is_some()
-            && self.used_pct.is_some()
+        self.used_tokens.is_some() && self.total_tokens.is_some() && self.used_pct.is_some()
     }
 
     /// Copy any `Some` fields from `other` into `self` where
@@ -264,9 +262,7 @@ impl ContextParser {
     }
 
     fn all_populated(&self) -> bool {
-        self.used_tokens.is_some()
-            && self.total_tokens.is_some()
-            && self.used_pct.is_some()
+        self.used_tokens.is_some() && self.total_tokens.is_some() && self.used_pct.is_some()
     }
 
     // --- dismissal detection (cross-chunk) ---
@@ -368,7 +364,9 @@ impl ContextParser {
         // Pull out the trailing "(P%)" if present.
         let (without_pct, pct) = if let Some(open) = rest.find('(') {
             let close = rest[open..].find(')').map(|c| open + c);
-            let pct_str = rest.get(open + 1..close.unwrap_or(rest.len())).unwrap_or("");
+            let pct_str = rest
+                .get(open + 1..close.unwrap_or(rest.len()))
+                .unwrap_or("");
             let pct = parse_pct(pct_str.trim());
             let without = rest[..open].trim();
             (without.to_string(), pct)
@@ -440,7 +438,9 @@ fn strip_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
         return None;
     }
     let after = &line[label.len()..];
-    let after = after.strip_prefix(':').or_else(|| after.strip_prefix(' '))?;
+    let after = after
+        .strip_prefix(':')
+        .or_else(|| after.strip_prefix(' '))?;
     Some(after)
 }
 
