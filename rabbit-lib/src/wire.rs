@@ -103,6 +103,17 @@ pub enum EnvelopeBody {
     /// the overlay, and publishes the parsed limits back as
     /// `EnvelopeBody::Usage(snap)` with the four new fields set.
     UsageCheck,
+    /// §Context-window: server-initiated request for rabbit to scrape
+    /// Claude's `/context` overlay and return a fresh `Usage` envelope
+    /// with the `ctx_*` fields populated. Same fire-and-forget shape as
+    /// `UsageCheck`: HTTP returns 202 immediately; the parsed fields
+    /// arrive on SSE `/events/stream` inside a fresh `Usage` envelope
+    /// carrying the new fields (None when no scrape has happened).
+    /// Triggered by the "Context" button in the warren UI and (in the
+    /// future) by the scheduled-prompt scheduler at fire time, to
+    /// capture the context-window utilization alongside the plan-level
+    /// weekly/session limits.
+    ContextCheck,
     Restart {
         fresh: bool,
     },
@@ -352,6 +363,50 @@ pub struct UsageSnapshot {
     /// is the more informative signal and should win in the UI.
     #[serde(default)]
     pub scrape_aborted: bool,
+    /// §Context-window: tokens consumed in the current context
+    /// window, scraped from Claude's `/context` modal. None until
+    /// an explicit `ContextCheck` runs. Paired with
+    /// `ctx_total_tokens` (both Some or both None). Distinct from
+    /// the transcript-derived `context_pct_est` heuristic — the
+    /// modal value is authoritative.
+    #[serde(default)]
+    pub ctx_used_tokens: Option<u64>,
+    /// §Context-window: the size of the context window Claude is
+    /// using (typically 200_000 for Sonnet/Opus, smaller for
+    /// Haiku-class). Paired with `ctx_used_tokens`.
+    #[serde(default)]
+    pub ctx_total_tokens: Option<u64>,
+    /// §Context-window: percentage of the window consumed,
+    /// `[0, 100]`, derived from the modal's bar or trailing
+    /// `(P%)` label. Distinct from `context_pct_est`, which is the
+    /// transcript-side heuristic estimator.
+    #[serde(default)]
+    pub ctx_used_pct: Option<f64>,
+    /// §Context-window: percentage free, mirror of `ctx_used_pct`.
+    /// Convenience for the UI; either alone is enough to render.
+    #[serde(default)]
+    pub ctx_free_pct: Option<f64>,
+    /// §Context-window: Claude's labeled window size (e.g. `200K`
+    /// → 200_000). Set when the modal labels the bar; independent
+    /// of `ctx_total_tokens` so either can populate without the
+    /// other.
+    #[serde(default)]
+    pub ctx_window_tokens: Option<u64>,
+    /// §Context-window: optional per-category breakdown as a JSON
+    /// object (e.g. `{"system": 1234, "tools": 5678, "conversation":
+    /// 9012}`). We do NOT lock the shape — Claude's TUI may evolve.
+    /// Pass through whatever the modal emits; the UI surfaces it as
+    /// a small key/value table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_categories: Option<serde_json::Value>,
+    /// §Context-window / §Small-terminal: when `true`, the most
+    /// recent `/context` scrape did not surface all primary fields
+    /// (`ctx_used_tokens`, `ctx_total_tokens`, `ctx_used_pct`).
+    /// Mirrors `scrape_incomplete` on the `/usage` side so the UI
+    /// can surface a "context scrape incomplete — try a larger
+    /// window" hint.
+    #[serde(default)]
+    pub ctx_scrape_incomplete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,6 +522,13 @@ mod tests {
             session_resets_at: Some(session_resets),
             scrape_incomplete: false,
             scrape_aborted: false,
+            ctx_used_tokens: None,
+            ctx_total_tokens: None,
+            ctx_used_pct: None,
+            ctx_free_pct: None,
+            ctx_window_tokens: None,
+            ctx_categories: None,
+            ctx_scrape_incomplete: false,
         };
         let json = serde_json::to_value(&snap).expect("serialize");
         assert_eq!(json["weekly_pct"], 73.0);
@@ -525,6 +587,13 @@ mod tests {
             session_resets_at: None, // partial — session reset missing
             scrape_incomplete: true,
             scrape_aborted: false,
+            ctx_used_tokens: None,
+            ctx_total_tokens: None,
+            ctx_used_pct: None,
+            ctx_free_pct: None,
+            ctx_window_tokens: None,
+            ctx_categories: None,
+            ctx_scrape_incomplete: false,
         };
         let json = serde_json::to_value(&snap).expect("serialize");
         assert_eq!(json["scrape_incomplete"], true);
@@ -548,5 +617,126 @@ mod tests {
         let back: UsageSnapshot =
             serde_json::from_value(v1_json).expect("v1 envelope must deserialize");
         assert!(!back.scrape_incomplete);
+    }
+
+    #[test]
+    fn usage_snapshot_round_trips_with_context_fields() {
+        // §Context-window: a v2 rabbit that has scraped the `/context`
+        // overlay emits all seven new fields. The shape must
+        // round-trip through serde so warren's HTTP handler can
+        // deserialize the envelope it receives on the SSE stream.
+        let snap = UsageSnapshot {
+            input_tokens: 12_345,
+            output_tokens: 6_789,
+            cache_read: 1_000,
+            cache_write: 200,
+            context_pct_est: Some(42.5), // distinct from ctx_used_pct
+            parse_errors: 0,
+            source: "context_check".to_string(),
+            weekly_pct: None,
+            weekly_resets_at: None,
+            session_pct: None,
+            session_resets_at: None,
+            scrape_incomplete: false,
+            scrape_aborted: false,
+            ctx_used_tokens: Some(87_432),
+            ctx_total_tokens: Some(200_000),
+            ctx_used_pct: Some(43.7),
+            ctx_free_pct: Some(56.3),
+            ctx_window_tokens: Some(200_000),
+            ctx_categories: Some(serde_json::json!({
+                "system": 1234,
+                "tools": 5678,
+                "conversation": 80_520,
+            })),
+            ctx_scrape_incomplete: false,
+        };
+        let json = serde_json::to_value(&snap).expect("serialize");
+        assert_eq!(json["ctx_used_tokens"], 87_432);
+        assert_eq!(json["ctx_total_tokens"], 200_000);
+        assert_eq!(json["ctx_used_pct"], 43.7);
+        assert_eq!(json["ctx_free_pct"], 56.3);
+        assert_eq!(json["ctx_window_tokens"], 200_000);
+        assert_eq!(json["ctx_categories"]["system"], 1234);
+        assert_eq!(json["ctx_categories"]["tools"], 5678);
+        assert_eq!(json["ctx_scrape_incomplete"], false);
+
+        let back: UsageSnapshot = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.ctx_used_tokens, Some(87_432));
+        assert_eq!(back.ctx_total_tokens, Some(200_000));
+        assert_eq!(back.ctx_used_pct, Some(43.7));
+        assert_eq!(back.ctx_free_pct, Some(56.3));
+        assert_eq!(back.ctx_window_tokens, Some(200_000));
+        assert_eq!(back.ctx_categories.unwrap()["conversation"], 80_520);
+    }
+
+    #[test]
+    fn usage_snapshot_v1_json_without_context_fields_deserializes_to_none() {
+        // §Context-window: a v1 producer (pre-/context rabbit) never
+        // emitted the seven `ctx_*` fields; the v2 struct must
+        // tolerate their absence and default them to None. This
+        // keeps the rollout window safe: a v1 rabbit talking to a
+        // v2 warren (or vice-versa) must not panic on the missing
+        // keys.
+        let v1_json = serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read": 10,
+            "cache_write": 5,
+            "context_pct_est": null,
+            "parse_errors": 0,
+            "source": "transcript",
+            "weekly_pct": null,
+            "weekly_resets_at": null,
+            "session_pct": null,
+            "session_resets_at": null,
+            "scrape_incomplete": false,
+            "scrape_aborted": false,
+        });
+        let snap: UsageSnapshot = serde_json::from_value(v1_json)
+            .expect("v1 envelope must deserialize under a v2 struct");
+        assert_eq!(snap.ctx_used_tokens, None);
+        assert_eq!(snap.ctx_total_tokens, None);
+        assert_eq!(snap.ctx_used_pct, None);
+        assert_eq!(snap.ctx_free_pct, None);
+        assert_eq!(snap.ctx_window_tokens, None);
+        assert_eq!(snap.ctx_categories, None);
+        assert!(!snap.ctx_scrape_incomplete);
+    }
+
+    #[test]
+    fn usage_snapshot_ctx_categories_skipped_when_none() {
+        // §Context-window: the `ctx_categories` field has
+        // `skip_serializing_if = "Option::is_none"` so envelopes
+        // without a per-category breakdown don't carry an empty
+        // `"ctx_categories": null` over the wire. Pin the behavior
+        // so a future "tighten the derive" refactor can't silently
+        // start emitting nulls.
+        let snap = UsageSnapshot {
+            ctx_categories: None,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&snap).expect("serialize");
+        assert!(
+            json.get("ctx_categories").is_none(),
+            "ctx_categories: null must be elided from the wire JSON"
+        );
+    }
+
+    #[test]
+    fn envelope_body_context_check_serializes_with_correct_tag() {
+        // §Context-window: pin the wire tag `"context_check"` so a
+        // future rename (e.g. nested `{"t":"context_check", ...}`)
+        // has to be intentional. Mirrors the v1
+        // `usage_check` envelope shape.
+        let env = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 0,
+            body: EnvelopeBody::ContextCheck,
+        };
+        let json = serde_json::to_value(&env).expect("serialize");
+        assert_eq!(json["t"], "context_check");
+        let back: Envelope = serde_json::from_value(json).expect("deserialize");
+        assert!(matches!(back.body, EnvelopeBody::ContextCheck));
     }
 }

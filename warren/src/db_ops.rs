@@ -982,6 +982,7 @@ pub async fn insert_run_started(
     prompt_id: Option<Uuid>,
     usage_weekly_pct: Option<i32>,
     usage_session_pct: Option<i32>,
+    usage_context_pct: Option<i32>,
     skip_reason: Option<&str>,
 ) -> AppResult<scheduled_prompt_run::Model> {
     let am = scheduled_prompt_run::ActiveModel {
@@ -996,6 +997,7 @@ pub async fn insert_run_started(
         outcome_error: Set(None),
         usage_weekly_pct: Set(usage_weekly_pct),
         usage_session_pct: Set(usage_session_pct),
+        usage_context_pct: Set(usage_context_pct),
     };
     Ok(am.insert(db).await?)
 }

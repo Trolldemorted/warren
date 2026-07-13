@@ -318,6 +318,20 @@ impl AgentHandle {
             .map_err(|_| anyhow::anyhow!("actor not running"))
     }
 
+    /// §Context-window: ask rabbit to drive the `/context` overlay
+    /// and report back the context-window usage. Fire-and-forget —
+    /// the HTTP handler returns 202 Accepted immediately; the parsed
+    /// data arrives on the SSE `/events/stream` channel a moment
+    /// later as a fresh `Usage` envelope carrying the new `ctx_*`
+    /// fields (e.g. `ctx_used_tokens`, `ctx_total_tokens`,
+    /// `ctx_used_pct`).
+    pub async fn context_check(&self) -> AnyResult<()> {
+        self.cmd_tx()
+            .send(Command::ContextCheck)
+            .await
+            .map_err(|_| anyhow::anyhow!("actor not running"))
+    }
+
     pub async fn restart(&self, fresh: bool) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Restart { fresh })

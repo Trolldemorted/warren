@@ -77,6 +77,7 @@
       <th>Finished at</th>
       <th>Skip / error</th>
       <th>Usage (week / session %)</th>
+      <th>Context %</th>
     </tr>
   </thead>
   <tbody>
@@ -87,6 +88,7 @@
       <td><small class="text-muted">{% if let Some(t) = r.run.finished_at %}{{ t }}{% else %}—{% endif %}</small></td>
       <td><small class="text-muted">{% if let Some(s) = r.run.skip_reason %}{{ s }}{% else %}{% if let Some(e) = r.run.outcome_error %}{{ e }}{% else %}—{% endif %}{% endif %}</small></td>
       <td><small class="text-muted">{% if let Some(w) = r.run.usage_weekly_pct %}{{ w }}{% else %}—{% endif %} / {% if let Some(s) = r.run.usage_session_pct %}{{ s }}{% else %}—{% endif %}</small></td>
+      <td><small class="text-muted">{% if let Some(c) = r.run.usage_context_pct %}{{ c }}{% else %}—{% endif %}</small></td>
     </tr>
     {% endfor %}
   </tbody>

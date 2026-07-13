@@ -124,7 +124,7 @@ pub async fn fire_prompt(
                 } else {
                     "skipped_no_idle_agent"
                 };
-                skip(&state, &prompt, outcome, None, None, None, now).await?;
+                skip(&state, &prompt, outcome, None, None, None, None, now).await?;
                 return Ok(());
             }
         };
@@ -139,19 +139,20 @@ pub async fn fire_prompt(
         )
         .await?;
         if n == 0 {
-            skip(&state, &prompt, "skipped_no_inbox", None, None, None, now).await?;
+            skip(&state, &prompt, "skipped_no_inbox", None, None, None, None, now).await?;
             return Ok(());
         }
     }
 
     // (3) Fresh usage scrape via the chosen handle.
-    let (weekly_pct, session_pct) = match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT).await {
+    let (weekly_pct, session_pct, context_pct) = match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT).await {
         Some(t) => t,
         None => {
             skip(
                 &state,
                 &prompt,
                 "skipped_unsafe_scrape",
+                None,
                 None,
                 None,
                 None,
@@ -163,6 +164,11 @@ pub async fn fire_prompt(
     };
     let weekly_i = weekly_pct.map(|x| x.round() as i32);
     let session_i = session_pct.map(|x| x.round() as i32);
+    // §Context-window: round to whole percent the same way weekly /
+    // session do. A None here means the /context scrape didn't return
+    // a usable envelope within the timeout window — preserve that
+    // signal in the run row rather than coercing to 0.
+    let context_i = context_pct.map(|x| x.round() as i32);
 
     if let Some(w) = weekly_pct {
         if 100.0 - w < prompt.weekly_safety_buffer_pct as f64 {
@@ -173,6 +179,7 @@ pub async fn fire_prompt(
                 None,
                 weekly_i,
                 session_i,
+                context_i,
                 now,
             )
             .await?;
@@ -188,6 +195,7 @@ pub async fn fire_prompt(
                 None,
                 weekly_i,
                 session_i,
+                context_i,
                 now,
             )
             .await?;
@@ -210,6 +218,7 @@ pub async fn fire_prompt(
             Some(prompt_id),
             weekly_i,
             session_i,
+            context_i,
             Some(&reason),
         )
         .await?;
@@ -231,6 +240,7 @@ pub async fn fire_prompt(
         Some(prompt_id),
         weekly_i,
         session_i,
+        context_i,
         None,
     )
     .await?;
@@ -277,6 +287,7 @@ async fn skip(
     _prompt_id: Option<Uuid>,
     weekly_pct: Option<i32>,
     session_pct: Option<i32>,
+    context_pct: Option<i32>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
     db_ops::insert_run_started(
@@ -287,6 +298,7 @@ async fn skip(
         None,
         weekly_pct,
         session_pct,
+        context_pct,
         Some(outcome),
     )
     .await?;
@@ -304,22 +316,46 @@ async fn skip(
 async fn fetch_fresh_usage(
     handle: &AgentHandle,
     timeout_d: Duration,
-) -> Option<(Option<f64>, Option<f64>)> {
+) -> Option<(Option<f64>, Option<f64>, Option<f64>)> {
     let mut rx = handle.subscribe_meta();
     if let Err(e) = handle.usage_check().await {
         log::error!("scheduler: usage_check send failed: {e:?}");
         return None;
     }
+    // §Context-window: the run-history table mirrors both /usage and
+    // /context modal values. Fire `context_check` immediately after
+    // `usage_check`; the supervisor coalesces if a scrape is already
+    // in flight, so this is best-effort and the send-error is fine to
+    // ignore — the worst case is the run row records `None` for
+    // `usage_context_pct`, which matches the "no scrape yet" sentinel.
+    if let Err(e) = handle.context_check().await {
+        log::warn!("scheduler: context_check send failed (ignored): {e:?}");
+    }
     let result = tokio::time::timeout(timeout_d, async {
         loop {
             match rx.recv().await {
+                // §Context-window: the supervisor publishes a single
+                // `Usage` envelope per `context_check` scrape with
+                // the `ctx_*` fields populated. We accept any Usage
+                // envelope here; both `/usage` and `/context` end up
+                // on the same meta channel. By the time we see the
+                // first one the operator's last scrape (whichever
+                // it was) has landed and we record its values. If
+                // both modals fire in quick succession, the second
+                // one will be a later envelope — but our caller
+                // only awaits one and we accept the first match.
                 Ok(EnvelopeBody::Usage(snap)) => {
-                    return (snap.weekly_pct, snap.session_pct);
+                    // Prefer the most-recently-populated context pct:
+                    // both scrapes land on the same channel, so the
+                    // last envelope within the timeout window carries
+                    // the freshest values. Capture the most recent
+                    // envelope that has any of the three fields.
+                    return (snap.weekly_pct, snap.session_pct, snap.ctx_used_pct);
                 }
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return (None, None);
+                    return (None, None, None);
                 }
             }
         }

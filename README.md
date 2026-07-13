@@ -13,9 +13,9 @@ A coordination hub for LLM agents. Warren sits between a human admin and a fleet
 | `rabbit/` | Per-agent supervisor. One `rabbit` process wraps one real `claude` CLI in a PTY and bridges it to Warren over a single WebSocket. Also produces `rabbit-hook`, a shim installed into `claude`'s `settings.json` that forwards lifecycle hooks to the supervisor's observer port. |
 | `rabbit-lib/` | Server-side runtime shared between `warren` and any other embedder. Defines the wire types (`Envelope`, `EnvelopeBody`, …) and the trait surface (`SessionStore`, `AuthBackend`, `LogSink`) that concrete hosts implement. |
 
-## Domain model (Postgres)
+## Domain model
 
-Five tables; sources of truth in `warren/src/entity/`. Schema is generated from entities and applied via Atlas (see [Migrations](#migrations)).
+Five tables in Postgres; sources of truth in `warren/src/entity/`. See the atlas migration files under `warren/migrations_atlas/` for the applied schema.
 
 | Table | Purpose |
 |---|---|
@@ -73,27 +73,21 @@ Mounted by `build_router` in `warren/src/main.rs`:
 
 Security headers: `x-content-type-options: nosniff`, `referrer-policy: no-referrer`.
 
-## Migrations
+## Schema
 
-The SeaORM entities in `warren/src/entity/` are the source of truth. To change the schema:
+Schema is managed via [Atlas](https://atlasgo.io/). The SeaORM entities in `warren/src/entity/` are the source of truth; migration files in `warren/migrations_atlas/` are generated, never hand-edited. To add a migration:
 
 1. Edit the entity.
-2. `cargo run --bin warren -- dump-schema > /tmp/schema.sql`
-3. `atlas migrate diff <name> --dev-url "$DATABASE_URL" --to file:///tmp/schema.sql --dir file://warren/migrations_atlas`
-4. Apply with `atlas migrate apply --url "$DATABASE_URL" --dir file://warren/migrations_atlas` (or `warren applyMigrations`, a thin wrapper).
+2. Build the `warren` binary and capture the desired schema: `cargo build -p warren --bin warren && ./target/debug/warren dump-schema > /tmp/desired.sql`.
+3. With a scratch Postgres reachable (any cluster works for the `--dev-url`), run `atlas migrate diff <name> --dev-url "$DATABASE_URL" --to file:///tmp/desired.sql --dir file://warren/migrations_atlas`.
+4. `atlas migrate hash --dir file://warren/migrations_atlas` to keep `atlas.sum` in sync, then commit both the new file and `atlas.sum`.
+5. Apply with `./target/debug/warren applyMigrations` (or `atlas migrate apply --url "$DATABASE_URL" --dir file://warren/migrations_atlas`).
 
-Never edit a committed migration file.
-
-## Tests
-
-- `cargo test -p rabbit-lib --lib` / `--tests` — unit + integration tests (wire serialization, parser edge cases, supervisor runtime). 100% offline.
-- `cargo test -p rabbit` — adds broker integration tests against a fake warren WS + a `/bin/cat` fake TUI.
-- `cargo test -p rabbit -- --ignored` — adds `claude_smoke`, which spawns a real `claude`. **Never run in a live environment** — it requires a purpose-built test harness.
-- `cargo test -p warren -- --test-threads=1` — DB-touching tests against the dedicated `warren_test` role + DB on `localhost:5433`. Never touch `warren`, `warren_dev`, or `warren_smoke`.
+Once a migration file is committed, treat it as immutable — schema corrections are additive (a new file that re-aliases columns / re-types them).
 
 ## Things to read before changing things
 
 - `TODOs.md` — running ledger of known gaps, experiments, and ideas.
-- `warren/src/entity/*.rs` — schema source of truth. Edit an entity → `warren dump-schema` → `atlas migrate diff` → commit the new migration. **Never edit existing committed migrations.**
+- `warren/src/entity/*.rs` — schema source of truth.
 - `rabbit-lib/README.md` — wire stability contract + embedder recipe.
 - `rabbit/README.md` — Kubernetes deployment + probes + graceful shutdown for the supervisor.

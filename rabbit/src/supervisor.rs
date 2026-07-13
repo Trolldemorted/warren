@@ -4,6 +4,7 @@ use crate::hooks_install;
 use crate::input;
 use crate::link::{Link, LinkCmd, LinkEvent, ReplaySnapFn};
 use crate::meta_ring::MetaRing;
+use crate::observer::context::{ContextParser, ContextSnapshot};
 use crate::observer::hooks::{ObserverEvent, ObserverHandle};
 use crate::observer::limits::{LimitsParser, UsageLimits};
 use crate::observer::state::State;
@@ -193,6 +194,20 @@ pub async fn run(config: Config) -> Result<()> {
         Arc<tokio::sync::Mutex<tokio::sync::watch::Receiver<(UsageLimits, bool)>>>;
     let current_scrape: Arc<tokio::sync::Mutex<Option<SharedScrapeReceiver>>> =
         Arc::new(tokio::sync::Mutex::new(None));
+
+    // §Context-window: parallel coalescing slot for `/context`
+    // scrapes. Two clicks within a single scrape window share ONE
+    // scrape instead of starting two parallel scrapers competing
+    // for the broadcast receiver and the writer actor's FIFO.
+    // Mirrors the `current_scrape` slot above.
+    type SharedContextReceiver = Arc<
+        tokio::sync::Mutex<
+            tokio::sync::watch::Receiver<(ContextSnapshot, bool)>,
+        >,
+    >;
+    let current_context_scrape: Arc<
+        tokio::sync::Mutex<Option<SharedContextReceiver>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     loop {
         // Spawn a new claude generation if we have nothing running and aren't dead.
@@ -394,6 +409,94 @@ pub async fn run(config: Config) -> Result<()> {
                                     "LinkCmd::SendMeta(Usage)",
                                     &cmd_tx,
                                     LinkCmd::SendMeta(EnvelopeBody::Usage(snap)),
+                                )
+                                .await;
+                            }
+                        } else if let EnvelopeBody::ContextCheck = &env.body {
+                            // §Context-window: drive the synchronous
+                            // `/context` overlay scrape. Two clicks
+                            // within the scrape window coalesce — the
+                            // second ContextCheck awaits the same
+                            // watch receiver the first one registered
+                            // instead of starting a parallel scraper
+                            // competing for the broadcast receiver
+                            // and the writer actor's FIFO.
+                            //
+                            // Result envelope: a fresh `Usage`
+                            // carrying the new `ctx_*` fields
+                            // layered on top of the most-recent
+                            // transcript-derived snapshot (read via
+                            // `observer::latest_usage()`) so the
+                            // dashboard's input/output/cache
+                            // counters keep updating independently
+                            // of the modal scrape.
+                            if let Some(active) = &active {
+                                let receiver = {
+                                    let mut g = current_context_scrape.lock().await;
+                                    if let Some(rx) = g.as_ref() {
+                                        rx.clone()
+                                    } else {
+                                        // First ContextCheck in the
+                                        // window: create the watch
+                                        // pair, store the receiver,
+                                        // spawn the scrape with the
+                                        // sender.
+                                        let (tx, rx) = tokio::sync::watch::channel(
+                                            (ContextSnapshot::default(), false),
+                                        );
+                                        let rx =
+                                            Arc::new(tokio::sync::Mutex::new(rx));
+                                        *g = Some(rx.clone());
+                                        let writer_for_scrape =
+                                            active.writer.clone();
+                                        let bcast_for_scrape =
+                                            active.term_bcast_tx.clone();
+                                        let current_for_task =
+                                            current_context_scrape.clone();
+                                        tokio::spawn(async move {
+                                            let (snap, aborted) = run_context_scrape(
+                                                writer_for_scrape,
+                                                bcast_for_scrape,
+                                            )
+                                            .await;
+                                            // Send BEFORE clearing
+                                            // the slot so a third
+                                            // ContextCheck arriving
+                                            // during this brief gap
+                                            // sees `Some` and joins
+                                            // the just-finished scrape.
+                                            let _ = tx.send((snap, aborted));
+                                            *current_for_task.lock().await = None;
+                                        });
+                                        rx
+                                    }
+                                };
+                                let mut rx = receiver.lock().await;
+                                let _ = rx.changed().await;
+                                let (snap, aborted) = rx.borrow().clone();
+                                drop(rx);
+                                let scrape_incomplete =
+                                    !snap.is_empty() && !snap.all_populated();
+                                // Merge the modal fields on top of
+                                // the most-recent transcript
+                                // snapshot. The supervisor doesn't
+                                // parse the transcript — it reads
+                                // the cached snapshot that
+                                // `record_usage()` keeps fresh.
+                                let mut combined = crate::observer::latest_usage();
+                                combined.source = "context_check".to_string();
+                                combined.ctx_used_tokens = snap.used_tokens;
+                                combined.ctx_total_tokens = snap.total_tokens;
+                                combined.ctx_used_pct = snap.used_pct;
+                                combined.ctx_free_pct = snap.free_pct;
+                                combined.ctx_window_tokens = snap.window_tokens;
+                                combined.ctx_categories = snap.categories;
+                                combined.ctx_scrape_incomplete = scrape_incomplete;
+                                let _ = aborted;
+                                crate::dispatch::send_or_warn(
+                                    "LinkCmd::SendMeta(Usage+context)",
+                                    &cmd_tx,
+                                    LinkCmd::SendMeta(EnvelopeBody::Usage(combined)),
                                 )
                                 .await;
                             }
@@ -1644,6 +1747,91 @@ async fn run_usage_scrape(
     }
 
     (limits, aborted)
+}
+
+/// §Context-window: drive the synchronous `/context` overlay scrape.
+///
+/// Mirrors `run_usage_scrape` but is simpler — `/context` is a
+/// single-page modal with no scroll rounds, so we only wait for the
+/// initial paint + Esc dismiss. The actor's writer FIFO delivers
+/// the bytes atomically against any concurrent operator submission.
+///
+/// Returns the parsed snapshot. Any field the parser did not see
+/// is `None`; the calling code publishes the result as a fresh
+/// `Usage` envelope (with the `ctx_*` fields layered on top of the
+/// most-recent transcript snapshot).
+async fn run_context_scrape(
+    writer: crate::pty_writer::WriterHandle,
+    term_bcast_tx: broadcast::Sender<TermFrame>,
+) -> (ContextSnapshot, bool) {
+    use crate::pty_writer::SequenceOutcome;
+    use tokio::time::Duration;
+
+    // §Context-window: `/context` paints faster than `/usage` —
+    // the modal is single-page and has no scroll rounds. 700ms is
+    // generous for the initial paint; if the overlay doesn't
+    // surface the data, we dismiss anyway and ship whatever was
+    // parsed.
+    const INITIAL_BUDGET: Duration = Duration::from_millis(700);
+    const TICK: Duration = Duration::from_millis(100);
+
+    let mut slash: Vec<u8> = Vec::with_capacity(8 + 9);
+    slash.extend_from_slice(b"\x1b[201~");
+    let mut shim = BufShim { out: &mut slash };
+    let _ = input::slash(&mut shim, "context");
+    let slash_bytes = slash;
+    let init_items = vec![slash_bytes];
+    let init_delay = Duration::from_millis(10);
+    let init_outcome_rx = writer.sequence(init_items, init_delay).await;
+
+    let mut parser = ContextParser::new();
+    let mut snap = ContextSnapshot::default();
+    let mut rx = term_bcast_tx.subscribe();
+    parser.reset_section();
+    drain_one_window(&mut rx, &mut parser, &mut snap, INITIAL_BUDGET, TICK).await;
+
+    let init_outcome = init_outcome_rx.await.unwrap_or(SequenceOutcome::Failed(
+        "init outcome channel closed".into(),
+    ));
+    if matches!(init_outcome, SequenceOutcome::Failed(_)) {
+        log::warn!("context_check: initial /context write failed; aborting scrape");
+        writer.bytes(b"\x1b".to_vec()).await;
+        return (snap, false);
+    }
+
+    // Best-effort dismiss.
+    writer.bytes(b"\x1b".to_vec()).await;
+
+    snap.scrape_incomplete = !snap.is_empty() && !snap.all_populated();
+    (snap, false)
+}
+
+/// Drain broadcast frames for at most `budget`, feeding each
+/// frame's bytes to the parser. Already-committed values in `snap`
+/// are preserved via first-wins merge (`ContextSnapshot::merge_from`).
+async fn drain_one_window(
+    rx: &mut broadcast::Receiver<TermFrame>,
+    parser: &mut ContextParser,
+    snap: &mut ContextSnapshot,
+    budget: tokio::time::Duration,
+    tick: tokio::time::Duration,
+) {
+    use tokio::time::{timeout, Instant};
+
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        match timeout(tick, rx.recv()).await {
+            Ok(Ok(frame)) => {
+                let _ = parser.feed(&frame.data);
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(broadcast::error::RecvError::Closed)) => break,
+            Err(_) => {} // tick timeout — keep draining
+        }
+    }
+    if let Some(pass) = parser.flush() {
+        snap.merge_from(pass);
+    }
 }
 
 /// Drain broadcast frames for at most `budget`, feeding each

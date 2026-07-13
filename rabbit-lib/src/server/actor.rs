@@ -52,6 +52,17 @@ pub enum Command {
     /// immediately — the parsed data arrives on the SSE
     /// `/events/stream` channel a moment later.
     UsageCheck,
+    /// §Context-window: triggered by `POST /api/agents/:id/claude/context_check`.
+    /// The actor sends `EnvelopeBody::ContextCheck` to rabbit; the
+    /// supervisor runs the synchronous `/context` scrape (write
+    /// `\x15/context\r`, drain ~700ms of PTY bytes, parse with the new
+    /// `observer::context::ContextParser`, send single Esc to dismiss
+    /// the overlay) and publishes the parsed `Usage` envelope back
+    /// carrying the new `ctx_*` fields. Same fire-and-forget shape as
+    /// `UsageCheck`. The HTTP handler returns 202 immediately; the
+    /// parsed data arrives on the SSE `/events/stream` channel a
+    /// moment later.
+    ContextCheck,
     Restart {
         fresh: bool,
     },
@@ -598,6 +609,22 @@ async fn dispatch<T: WsTransport>(
             sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
+        Command::ContextCheck => {
+            // §Context-window: send a ContextCheck envelope to rabbit;
+            // the supervisor runs the synchronous `/context` scrape and
+            // publishes the parsed result back as an `EnvelopeBody::Usage`
+            // carrying the new `ctx_*` fields. This arm is
+            // fire-and-forget — the HTTP handler already returned 202
+            // Accepted to the browser; the parsed data arrives on the
+            // SSE `/events/stream` channel via the meta plane.
+            let env = Envelope {
+                v: PROTOCOL_VERSION,
+                seq: 0,
+                body: EnvelopeBody::ContextCheck,
+            };
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
+                .await?;
+        }
         Command::Restart { fresh } => {
             let env = Envelope {
                 v: PROTOCOL_VERSION,
@@ -663,6 +690,7 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::Interrupt => "interrupt",
         EnvelopeBody::Clear { .. } => "clear",
         EnvelopeBody::UsageCheck => "usage_check",
+        EnvelopeBody::ContextCheck => "context_check",
         EnvelopeBody::Restart { .. } => "restart",
         EnvelopeBody::Resize { .. } => "resize",
         EnvelopeBody::Repaint => "repaint",
@@ -936,6 +964,7 @@ mod tests {
     /// here, the bug reproduces — and we know the wiring is wrong, not
     /// some other live-system noise.
     #[tokio::test]
+    #[allow(unused_variables)]
     async fn run_inner_transitions_starting_to_idle_on_state_envelope() {
         let agent_id = Uuid::new_v4();
         let handle = AgentHandle::new(agent_id);

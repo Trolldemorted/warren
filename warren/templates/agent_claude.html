@@ -178,11 +178,30 @@ body.viewer-mode #viewer-mode-banner { display: block; }
        the panel looks identical to before when the scrape is
        either absent or fully populated. #}
     <div id="usage-hint" class="small text-warning mb-2"></div>
+    {# §Context-window: the modal-derived context-window
+       utilization scraped from Claude's `/context` overlay. Kept
+       distinct from the existing `context_pct_est` row (the
+       transcript-side heuristic) so operators can spot divergence
+       between the two. `context_pct_est` continues to update
+       from the live transcript; the modal-derived fields only
+       populate when the operator clicks "Context" or the
+       scheduled-prompt scheduler fires. #}
+    <h2 class="h6">Context window</h2>
+    <dl class="small mb-3">
+      <dt>used / total</dt><dd id="ctx-used-total">—</dd>
+      <dt>used %</dt><dd id="ctx-used-pct">—</dd>
+      <dt>free %</dt><dd id="ctx-free-pct">—</dd>
+      <dt>window</dt><dd id="ctx-window">—</dd>
+      <dt>est. %</dt><dd id="ctx-pct-est">—</dd>
+    </dl>
+    <div id="ctx-categories" class="small text-muted mb-2"></div>
+    <div id="ctx-hint" class="small text-warning mb-2"></div>
     <h2 class="h6">Actions</h2>
     <button class="btn btn-outline-warning action" data-action="interrupt">Interrupt</button>
     <button class="btn btn-outline-secondary action" data-action="clear">Clear</button>
     <button class="btn btn-outline-secondary action" data-action="compact">Compact</button>
     <button class="btn btn-outline-info action" data-action="usage_check">Usage</button>
+    <button class="btn btn-outline-info action" data-action="context_check">Context</button>
     <button class="btn btn-outline-danger action" data-action="restart">Restart</button>
   </aside>
 </div>
@@ -208,6 +227,16 @@ const usageSession = document.getElementById('usage-session');
 // populated). Hidden until `scrape_incomplete` arrives on a
 // `Usage` envelope.
 const usageHint = document.getElementById('usage-hint');
+// §Context-window: handles for the new modal-derived context
+// window panel. Populated only on a `/context` scrape (manual
+// via the Context button, or scheduled at fire time).
+const ctxUsedTotal = document.getElementById('ctx-used-total');
+const ctxUsedPct = document.getElementById('ctx-used-pct');
+const ctxFreePct = document.getElementById('ctx-free-pct');
+const ctxWindow = document.getElementById('ctx-window');
+const ctxPctEst = document.getElementById('ctx-pct-est');
+const ctxCategories = document.getElementById('ctx-categories');
+const ctxHint = document.getElementById('ctx-hint');
 const promptRejectedBanner = document.getElementById('prompt-rejected-banner');
 
 // §D read-only viewer mode: `?viewer=true` on the URL puts the page into
@@ -530,6 +559,57 @@ function applyMeta(env) {
       } else {
         usageHint.textContent = '';
       }
+      // §Context-window: modal-derived fields layered onto the
+      // same `Usage` envelope. Both `ctx_used_tokens` and
+      // `ctx_total_tokens` are `None` until an explicit
+      // `/context` scrape runs — the modal is one-page so
+      // they typically populate together. `ctx_used_pct`
+      // populates either from the modal's `(P%)` label or
+      // from the bare percentage in percentage-only mode.
+      //
+      // Per user choice, `context_pct_est` (the
+      // transcript-side heuristic) stays visible alongside
+      // the new modal-derived `ctx_used_pct` so operators
+      // can spot divergence between the two.
+      if (env.ctx_used_tokens != null && env.ctx_total_tokens != null) {
+        ctxUsedTotal.textContent =
+          env.ctx_used_tokens.toLocaleString() + ' / ' +
+          env.ctx_total_tokens.toLocaleString();
+      }
+      if (env.ctx_used_pct != null) {
+        ctxUsedPct.textContent = env.ctx_used_pct.toFixed(1) + '%';
+      }
+      if (env.ctx_free_pct != null) {
+        ctxFreePct.textContent = env.ctx_free_pct.toFixed(1) + '%';
+      }
+      if (env.ctx_window_tokens != null) {
+        ctxWindow.textContent =
+          env.ctx_window_tokens.toLocaleString() + ' tokens';
+      }
+      if (env.context_pct_est != null) {
+        ctxPctEst.textContent =
+          env.context_pct_est.toFixed(1) + '%' +
+          ' <span class="text-muted">(est.)</span>';
+      }
+      if (env.ctx_categories && typeof env.ctx_categories === 'object') {
+        ctxCategories.innerHTML = Object.entries(env.ctx_categories)
+          .map(([k, v]) => {
+            const display = typeof v === 'number'
+              ? v.toLocaleString()
+              : String(v);
+            return '<div>' + k + ': ' + display + '</div>';
+          })
+          .join('');
+      } else if (!env.ctx_used_tokens) {
+        // No categories AND no used tokens yet → blank slate.
+        ctxCategories.innerHTML = '';
+      }
+      if (env.ctx_scrape_incomplete) {
+        ctxHint.textContent =
+          'context scrape incomplete — try a larger window';
+      } else {
+        ctxHint.textContent = '';
+      }
       break;
     case 'cleared':
       if (env.hard) term.reset();
@@ -724,6 +804,12 @@ document.querySelectorAll('button.action').forEach(btn => {
       btn.disabled = true;
       setTimeout(() => { btn.disabled = false; }, 2500);
       showActionToast('fetching usage limits…');
+    }
+    if (action === 'context_check') {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      setTimeout(() => { btn.disabled = false; }, 2500);
+      showActionToast('fetching context window…');
     }
     let body = null;
     if (action === 'restart') {

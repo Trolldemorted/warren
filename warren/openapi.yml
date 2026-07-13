@@ -188,6 +188,11 @@ components:
           type: number
           format: float
           nullable: true
+          description: |
+            Transcript-derived heuristic estimate of context-window
+            utilization. Lives alongside `ctx_used_pct` (the
+            authoritative value parsed from the `/context` modal) so
+            operators can spot divergence between the two.
         source: { type: string }
         # §Usage-limits: plan-level weekly + 5-hour session
         # limits. Populated only after an explicit
@@ -211,6 +216,49 @@ components:
           type: string
           format: date-time
           nullable: true
+        # §Context-window: authoritative fields parsed from the
+        # `/context` modal after an explicit
+        # `POST /claude/context_check` triggers a scrape on the
+        # rabbit side. All `null` until that scrape lands; once it
+        # does, `ctx_used_pct` is the operator-facing truth.
+        ctx_used_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        ctx_total_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        ctx_used_pct:
+          type: number
+          format: float
+          nullable: true
+        ctx_free_pct:
+          type: number
+          format: float
+          nullable: true
+        ctx_window_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        ctx_categories:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Per-category token breakdown (e.g. `system_prompt`,
+            `tools`, `conversation`) parsed from the `/context`
+            modal. Keys are normalized to snake_case; values are
+            integers or strings depending on what the modal emits.
+        ctx_scrape_incomplete:
+          type: boolean
+          default: false
+          description: |
+            True when the most recent `/context` scrape returned
+            only a partial snapshot (e.g. the parser recognized the
+            modal but did not see all of `used / total / pct`).
+            The dashboard surfaces this as a hint to widen the
+            terminal window.
       required: [input_tokens, output_tokens, cache_read, cache_write, source]
     ClaudeStateResponse:
       type: object
@@ -984,6 +1032,27 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '202': { description: Scrape triggered; parsed limits arrive on SSE }
+        '404': { description: Agent not connected }
+  /api/agents/{id}/claude/context_check:
+    post:
+      tags: [claude]
+      summary: >-
+        Drive the synchronous `/context` overlay scrape and return
+        202 Accepted. Parsed context-window utilization
+        (`ctx_used_tokens`, `ctx_total_tokens`, `ctx_used_pct`,
+        `ctx_free_pct`, `ctx_window_tokens`, `ctx_categories`)
+        arrives on the SSE `/events/stream` channel a moment later
+        inside a fresh `Usage` envelope. Same fire-and-forget shape
+        as `/usage_check`.
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '202': { description: Scrape triggered; parsed context window arrives on SSE }
         '404': { description: Agent not connected }
   /api/agents/{id}/claude/events:
     get:

@@ -20,6 +20,11 @@ pub struct Model {
     /// scrape was missing or incomplete).
     pub usage_weekly_pct: Option<i32>,
     pub usage_session_pct: Option<i32>,
+    /// Whole-percent snapshot of the `/context` modal's `ctx_used_pct` at
+    /// fire time (None if the scrape was missing, incomplete, or no
+    /// `context_check` ran). Mirrors `usage_weekly_pct` — same nullable
+    /// shape so a missing scrape is indistinguishable from a clean 0%.
+    pub usage_context_pct: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

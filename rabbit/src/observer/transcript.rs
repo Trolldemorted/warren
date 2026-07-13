@@ -186,8 +186,30 @@ impl TranscriptTail {
                 // "scrape aborted" hint never applies here. Same
                 // convention as `scrape_incomplete`.
                 scrape_aborted: false,
+                // §Context-window: the transcript-side estimator
+                // (`context_pct_est`) is heuristic; the authoritative
+                // `ctx_*` fields are populated only by the
+                // supervisor's `/context` scrape. The supervisor's
+                // ContextCheck arm merges these `None`s with the
+                // scraped snapshot before publishing.
+                ctx_used_tokens: None,
+                ctx_total_tokens: None,
+                ctx_used_pct: None,
+                ctx_free_pct: None,
+                ctx_window_tokens: None,
+                ctx_categories: None,
+                ctx_scrape_incomplete: false,
             };
             let kind = msg.role.unwrap_or_else(|| "unknown".to_string());
+            // §Context-window: cache the latest transcript-derived
+            // snapshot so the supervisor's `/context` scrape arm
+            // can layer the modal fields on top of fresh
+            // input/output/cache counters. The record is
+            // best-effort — observers that don't care (tests,
+            // scratch consumers) just observe the next scrape's
+            // result envelope with whatever transcript state was
+            // last seen.
+            crate::observer::record_usage(snap.clone());
             out.push(UsageUpdate {
                 usage: snap,
                 message_kind: kind,
