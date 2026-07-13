@@ -473,6 +473,7 @@ pub async fn run(config: Config) -> Result<()> {
                                 drop(rx);
                                 let scrape_incomplete =
                                     !snap.is_empty() && !snap.all_populated();
+                                let scrape_empty = snap.is_empty();
                                 // Merge the modal fields on top of
                                 // the most-recent transcript
                                 // snapshot. The supervisor doesn't
@@ -487,7 +488,19 @@ pub async fn run(config: Config) -> Result<()> {
                                 combined.ctx_free_pct = snap.free_pct;
                                 combined.ctx_window_tokens = snap.window_tokens;
                                 combined.ctx_categories = snap.categories;
-                                combined.ctx_scrape_incomplete = scrape_incomplete;
+                                // §Context-window: an empty parse is
+                                // also "incomplete" — the operator
+                                // pressed the button, the modal
+                                // didn't surface data inside the
+                                // 700ms scrape window, and the
+                                // panel otherwise looks identical
+                                // to a button-press that never
+                                // happened. Fold both into the
+                                // same flag so the UI surfaces a
+                                // hint either way.
+                                combined.ctx_scrape_incomplete =
+                                    scrape_incomplete || scrape_empty;
+                                combined.scrape_aborted = scrape_empty;
                                 let _ = aborted;
                                 crate::dispatch::send_or_warn(
                                     "LinkCmd::SendMeta(Usage+context)",

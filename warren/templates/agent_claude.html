@@ -606,8 +606,15 @@ function applyMeta(env) {
         ctxCategories.innerHTML = '';
       }
       if (env.ctx_scrape_incomplete) {
-        ctxHint.textContent =
-          'context scrape incomplete — try a larger window';
+        // Empty scrape (no fields populated) means the modal didn't
+        // paint within the 700ms scrape window — tell the operator
+        // that explicitly. Partial scrape is the larger-window hint.
+        const anyPopulated = env.ctx_used_tokens != null
+          || env.ctx_used_pct != null
+          || env.ctx_window_tokens != null;
+        ctxHint.textContent = anyPopulated
+          ? 'context scrape incomplete — try a larger window'
+          : 'context scrape returned no data — claude may be busy or the terminal too small; try a larger window';
       } else {
         ctxHint.textContent = '';
       }
