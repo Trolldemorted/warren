@@ -519,11 +519,17 @@ pub async fn run(config: Config) -> Result<()> {
                                 // to a button-press that never
                                 // happened. Fold both into the
                                 // same flag so the UI surfaces a
-                                // hint either way.
+                                // hint either way. `scrape_aborted`
+                                // stays reserved for actual
+                                // operator-interrupt preemption
+                                // (writer's
+                                // `SequenceOutcome::AbortedBeforeStep`);
+                                // conflating it with empty-parse
+                                // would make every slow-scrape look
+                                // like the operator hit Ctrl-C.
                                 combined.ctx_scrape_incomplete =
                                     scrape_incomplete || scrape_empty;
-                                combined.scrape_aborted = scrape_empty;
-                                let _ = aborted;
+                                combined.scrape_aborted = aborted;
                                 crate::dispatch::send_or_warn(
                                     "LinkCmd::SendMeta(Usage+context)",
                                     &cmd_tx,
@@ -1853,6 +1859,11 @@ async fn run_context_scrape(
     // bleed modal residue into the restore grid.
     const RESTORE_SETTLE: Duration = Duration::from_millis(200);
 
+    let pre_modal = vt.lock().snapshot();
+    let pre_modal_after_seq = next_seq
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .wrapping_sub(1);
+
     let mut slash: Vec<u8> = Vec::with_capacity(8 + 9);
     slash.extend_from_slice(b"\x1b[201~");
     let mut shim = BufShim { out: &mut slash };
@@ -1871,13 +1882,18 @@ async fn run_context_scrape(
     let init_outcome = init_outcome_rx.await.unwrap_or(SequenceOutcome::Failed(
         "init outcome channel closed".into(),
     ));
+    let init_aborted = matches!(init_outcome, SequenceOutcome::AbortedBeforeStep(_));
     if matches!(init_outcome, SequenceOutcome::Failed(_)) {
         log::warn!("context_check: initial /context write failed; aborting scrape");
         writer.bytes(b"\x1b".to_vec()).await;
         return (snap, false);
     }
 
-    // Best-effort dismiss.
+    // Best-effort dismiss. The actor's interrupt path
+    // preempts in-flight Sequences — a `Cancel` that arrives
+    // mid-modal is not observable here, so we treat the dismiss
+    // as best-effort and only report what the writer actually
+    // told us via `init_aborted`.
     writer.bytes(b"\x1b".to_vec()).await;
 
     snap.scrape_incomplete = !snap.is_empty() && !snap.all_populated();
@@ -1893,16 +1909,30 @@ async fn run_context_scrape(
     // this restore the operator's xterm would be left showing the
     // leftover modal text after dismiss.
     tokio::time::sleep(RESTORE_SETTLE).await;
-    let restore = vt.lock().snapshot();
-    // Read the live reader's seq watermark right before publishing
-    // the snapshot — `next_seq - 1` is the highest seq that any
-    // frame already broadcast on the binary channel can carry. The
-    // producer emits frames strictly in seq order, so any frame
-    // the browser receives after this snapshot will have `seq >
-    // after_seq` and layer correctly on top of the restored grid.
-    let after_seq = next_seq
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .wrapping_sub(1);
+    // §Context-window / §A.7: publish the *pre-modal* screen as
+    // a `ScreenSnapshot` envelope. Re-capturing after dismiss
+    // would return the post-dismiss VT state, which is a
+    // composition of modal-paint + partial-dismiss-redraw bytes
+    // — modal residue bleeds through. The pre-modal capture
+    // contains none of the modal's paint bytes by definition,
+    // so the operator's xterm gets a clean restore. `after_seq`
+    // is the live reader's seq watermark AT THE TIME OF THE
+    // PRE-MODAL CAPTURE: every frame the browser has already
+    // buffered with seq ≤ pre_modal_after_seq corresponds to
+    // bytes reflected in `pre_modal.text`, so the browser's
+    // trim step drops them; every frame with seq >
+    // pre_modal_after_seq corresponds to modal/dismiss bytes
+    // that have arrived AFTER the pre-modal capture — the
+    // snapshot's `term.reset()` erases them and any surviving
+    // live frames layer on top of the restored grid in seq
+    // order. Producer-side ordering (single blocking reader,
+    // monotonic seq mutex) guarantees that no buffered frame
+    // carries a seq below `pre_modal_after_seq` and above the
+    // snapshot's arrival on the meta channel, so the consumer
+    // never observes a "stale row painted on top of fresh
+    // reset" flicker.
+    let restore = pre_modal;
+    let after_seq = pre_modal_after_seq;
     let body = ScreenSnapshotBody {
         chan: TERM_CHAN_CLAUDE,
         cols: restore.cols,
@@ -1920,7 +1950,7 @@ async fn run_context_scrape(
         log::warn!("context_check: failed to publish restore snapshot: {e:?}");
     }
 
-    (snap, false)
+    (snap, init_aborted)
 }
 
 /// Drain broadcast frames for at most `budget`, feeding each
