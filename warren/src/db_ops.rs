@@ -7,8 +7,9 @@ use crate::models::{
 };
 use sea_orm::sea_query::{Expr, IntoCondition, Order, Query};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, EntityTrait, FromQueryResult,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseBackend, DatabaseTransaction, EntityTrait,
+    FromQueryResult, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    Statement, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -973,6 +974,13 @@ pub async fn mark_scheduled_prompt_finished(
 
 // --- scheduled_prompt_runs ---------------------------------------------------
 
+/// Cap on `scheduled_prompt_runs` rows per prompt. The scheduler
+/// trims oldest-first after every insert inside the same
+/// transaction so each prompt keeps its most recent runs without a
+/// separate sweep job. `Tuning`: bump if the operator's
+/// run-history UI needs a deeper page (current page is `LIMIT 50`).
+pub const SCHEDULED_RUNS_PER_PROMPT_CAP: u64 = 100;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_run_started(
     db: &Db,
@@ -985,6 +993,7 @@ pub async fn insert_run_started(
     usage_context_pct: Option<i32>,
     skip_reason: Option<&str>,
 ) -> AppResult<scheduled_prompt_run::Model> {
+    let txn = db.begin().await?;
     let am = scheduled_prompt_run::ActiveModel {
         id: Set(Uuid::new_v4()),
         scheduled_prompt_id: Set(scheduled_prompt_id),
@@ -999,7 +1008,48 @@ pub async fn insert_run_started(
         usage_session_pct: Set(usage_session_pct),
         usage_context_pct: Set(usage_context_pct),
     };
-    Ok(am.insert(db).await?)
+    let inserted = am.insert(&txn).await?;
+    trim_runs_keeping_newest(&txn, scheduled_prompt_id, SCHEDULED_RUNS_PER_PROMPT_CAP).await?;
+    txn.commit().await?;
+    Ok(inserted)
+}
+
+/// Delete the oldest `scheduled_prompt_runs` rows for `prompt_id`
+/// so that no more than `keep` rows remain. Runs are ordered by
+/// `fired_at` ascending so deletes consume from the front; with
+/// `(id)` ties broken by `id`, but `fired_at` is fine-grained enough
+/// that ties are rare.
+async fn trim_runs_keeping_newest(
+    db: &DatabaseTransaction,
+    prompt_id: Uuid,
+    keep: u64,
+) -> AppResult<()> {
+    let count = scheduled_prompt_run::Entity::find()
+        .filter(scheduled_prompt_run::Column::ScheduledPromptId.eq(prompt_id))
+        .count(db)
+        .await?;
+    if count <= keep {
+        return Ok(());
+    }
+    let surplus = count - keep;
+    // Fetch the oldest `surplus` ids. We select ids only to keep the
+    // round-trip small even when the table is at the cap.
+    let oldest: Vec<Uuid> = scheduled_prompt_run::Entity::find()
+        .filter(scheduled_prompt_run::Column::ScheduledPromptId.eq(prompt_id))
+        .order_by_asc(scheduled_prompt_run::Column::FiredAt)
+        .limit(Some(surplus))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    if !oldest.is_empty() {
+        scheduled_prompt_run::Entity::delete_many()
+            .filter(scheduled_prompt_run::Column::Id.is_in(oldest))
+            .exec(db)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Finalize a run: set `finished_at`, override `outcome` (e.g.

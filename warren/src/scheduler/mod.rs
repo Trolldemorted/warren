@@ -124,7 +124,7 @@ pub async fn fire_prompt(
                 } else {
                     "skipped_no_idle_agent"
                 };
-                skip(&state, &prompt, outcome, None, None, None, None, now).await?;
+                skip(&state, &prompt, outcome, (None, None, None), now).await?;
                 return Ok(());
             }
         };
@@ -139,7 +139,7 @@ pub async fn fire_prompt(
         )
         .await?;
         if n == 0 {
-            skip(&state, &prompt, "skipped_no_inbox", None, None, None, None, now).await?;
+            skip(&state, &prompt, "skipped_no_inbox", (None, None, None), now).await?;
             return Ok(());
         }
     }
@@ -152,10 +152,7 @@ pub async fn fire_prompt(
                 &state,
                 &prompt,
                 "skipped_unsafe_scrape",
-                None,
-                None,
-                None,
-                None,
+                (None, None, None),
                 now,
             )
             .await?;
@@ -176,10 +173,7 @@ pub async fn fire_prompt(
                 &state,
                 &prompt,
                 "skipped_weekly_budget",
-                None,
-                weekly_i,
-                session_i,
-                context_i,
+                (weekly_i, session_i, context_i),
                 now,
             )
             .await?;
@@ -192,10 +186,7 @@ pub async fn fire_prompt(
                 &state,
                 &prompt,
                 "skipped_session_budget",
-                None,
-                weekly_i,
-                session_i,
-                context_i,
+                (weekly_i, session_i, context_i),
                 now,
             )
             .await?;
@@ -279,37 +270,41 @@ async fn pick_free_agent(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Record a non-firing tick (the agent pool was empty, the inbox was
+/// empty, the scrape timed out, or one of the safety budgets was
+/// breached). To keep the run-history table readable, the row is
+/// only inserted when the previous run for this prompt had a
+/// *different* outcome — so a schedule stuck on the same skip state
+/// produces one row, not one-per-tick. The schedule's `next_fire_at`
+/// is always advanced so we don't spin on the same wall-clock.
 async fn skip(
     state: &AppState,
     prompt: &scheduled_prompt::Model,
     outcome: &str,
-    _prompt_id: Option<Uuid>,
-    weekly_pct: Option<i32>,
-    session_pct: Option<i32>,
-    context_pct: Option<i32>,
+    (weekly_pct, session_pct, context_pct): (Option<i32>, Option<i32>, Option<i32>),
     now: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
-    db_ops::insert_run_started(
-        &state.db,
-        prompt.id,
-        None,
-        outcome,
-        None,
-        weekly_pct,
-        session_pct,
-        context_pct,
-        Some(outcome),
-    )
-    .await?;
+    let prev = db_ops::list_runs_for_scheduled_prompt(&state.db, prompt.id, 1)
+        .await?
+        .into_iter()
+        .next()
+        .map(|r| r.outcome);
+    if prev.as_deref() != Some(outcome) {
+        db_ops::insert_run_started(
+            &state.db,
+            prompt.id,
+            None,
+            outcome,
+            None,
+            weekly_pct,
+            session_pct,
+            context_pct,
+            Some(outcome),
+        )
+        .await?;
+    }
     let next = now + chrono::Duration::seconds(prompt.interval_seconds);
     db_ops::set_next_fire_at(&state.db, prompt.id, next, now).await?;
-    log::info!(
-        "scheduler: {} prompt={} agent_class={}",
-        outcome,
-        prompt.id,
-        prompt.target_class
-    );
     Ok(())
 }
 

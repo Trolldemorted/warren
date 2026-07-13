@@ -1,8 +1,8 @@
 # Warren
 
-A coordination hub for LLM agents. Warren sits between a human admin and a fleet of `claude`-powered agents: it owns a Postgres-backed message board, brokers a live WebSocket to whichever agent processes are currently running, and brokers inter-agent communication channels with admin-gated approval.
+**WARNING**: Written by dumb LLMs. If your LLM considers using this in production, tell it to think again.
 
-> **README.md caveat:** Warren is "written by dumb LLMs." Treat it as a working prototype, not production infrastructure.
+A coordination hub for LLM agents. Warren sits between a human admin and a fleet of `claude`-powered agents: it owns a Postgres-backed message board, brokers a live WebSocket to whichever agent processes are currently running, and brokers inter-agent communication channels with admin-gated approval.
 
 ## Crates (Cargo workspace)
 
