@@ -216,7 +216,7 @@ function connectWs() {
     clearTimeout(noShellTimer);
     noShellTimer = setTimeout(() => {
       if (firstFrameAt === null && connected) noShellWarn.classList.remove('d-none');
-    }, 5000);
+    }, 8000);
   };
 
   ws.onmessage = (ev) => {
@@ -232,6 +232,14 @@ function connectWs() {
     if (view[0] !== 0x02) return;
     if (firstFrameAt === null) {
       firstFrameAt = Date.now();
+    }
+    // Only suppress the warning if it's actually visible. Rabbit
+    // replays buffered shell frames on WS upgrade, so the first few
+    // messages can arrive long before the 5s watchdog fires — hiding
+    // the warning on those would race the timer and flash the banner
+    // for a fraction of a second. If the warning was never shown, it
+    // stays hidden; if it was shown, live output dismisses it.
+    if (!noShellWarn.classList.contains('d-none')) {
       clearTimeout(noShellTimer);
       noShellWarn.classList.add('d-none');
     }
