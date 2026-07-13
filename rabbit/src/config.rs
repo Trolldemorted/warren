@@ -53,7 +53,7 @@ impl Config {
             env::var("WARREN_URL").map_err(|_| anyhow::anyhow!("WARREN_URL must be set"))?;
         validate_warren_url(&warren_url)?;
         let agent_token =
-            env::var("AGENT_TOKEN").map_err(|_| anyhow::anyhow!("AGENT_TOKEN must be set"))?;
+            env::var("WARREN_TOKEN").map_err(|_| anyhow::anyhow!("WARREN_TOKEN must be set"))?;
         let workdir = env::var("WORKDIR").unwrap_or_else(|_| "/workdir".to_string());
         let claude_bin = env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
         let claude_args = env::var("CLAUDE_ARGS")

@@ -21,7 +21,7 @@ All configuration is via environment variables (see [`config.rs`](src/config.rs)
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `WARREN_URL` | — (required) | warren base URL (`http(s)://…`; rewritten to `ws(s)://…/ws/rabbit`). |
-| `AGENT_TOKEN` | — (required) | Bearer token presented on the WS upgrade. |
+| `WARREN_TOKEN` | — (required) | Bearer token presented on the WS upgrade. |
 | `WORKDIR` | `/workdir` | claude's cwd; also where `settings.json` hooks are installed. |
 | `CLAUDE_BIN` | `claude` | claude executable. |
 | `CLAUDE_ARGS` | `--dangerously-skip-permissions` | Base argv (space-split). |
