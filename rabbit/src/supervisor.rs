@@ -204,6 +204,12 @@ pub async fn run(config: Config) -> Result<()> {
         Arc<tokio::sync::Mutex<tokio::sync::watch::Receiver<(ContextSnapshot, bool)>>>;
     let current_context_scrape: Arc<tokio::sync::Mutex<Option<SharedContextReceiver>>> =
         Arc::new(tokio::sync::Mutex::new(None));
+    // §Context-window / §A.7: handle to the live PTY reader's seq
+    // watermark. Updated by each `spawn_run_one` so the outer loop's
+    // `/context` arm can pass it to `run_context_scrape` for the
+    // restore snapshot's `after_seq`. None between generations.
+    let next_seq_slot: Arc<tokio::sync::Mutex<Option<Arc<std::sync::atomic::AtomicU64>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     loop {
         // Spawn a new claude generation if we have nothing running and aren't dead.
@@ -251,7 +257,9 @@ pub async fn run(config: Config) -> Result<()> {
                         killer: sess.killer,
                         writer: sess.writer,
                         term_bcast_tx: sess.term_bcast_tx,
+                        vt: sess.vt,
                     });
+                    *next_seq_slot.lock().await = Some(sess.next_seq);
                 }
                 Err(e) => {
                     log::error!("run_one spawn failed: {e:?}");
@@ -447,12 +455,26 @@ pub async fn run(config: Config) -> Result<()> {
                                             active.writer.clone();
                                         let bcast_for_scrape =
                                             active.term_bcast_tx.clone();
+                                        let vt_for_scrape =
+                                            active.vt.clone();
+                                        let next_seq_for_scrape = next_seq_slot
+                                            .lock()
+                                            .await
+                                            .clone()
+                                            .unwrap_or_else(|| {
+                                                Arc::new(std::sync::atomic::AtomicU64::new(1))
+                                            });
+                                        let cmd_tx_for_scrape =
+                                            cmd_tx.clone();
                                         let current_for_task =
                                             current_context_scrape.clone();
                                         tokio::spawn(async move {
                                             let (snap, aborted) = run_context_scrape(
                                                 writer_for_scrape,
                                                 bcast_for_scrape,
+                                                vt_for_scrape,
+                                                next_seq_for_scrape,
+                                                cmd_tx_for_scrape,
                                             )
                                             .await;
                                             // Send BEFORE clearing
@@ -504,6 +526,24 @@ pub async fn run(config: Config) -> Result<()> {
                                 let _ = aborted;
                                 crate::dispatch::send_or_warn(
                                     "LinkCmd::SendMeta(Usage+context)",
+                                    &cmd_tx,
+                                    LinkCmd::SendMeta(EnvelopeBody::Usage(combined)),
+                                )
+                                .await;
+                            } else {
+                                // §Context-window: no active claude
+                                // session — can't write `/context` to
+                                // a PTY. Publish an envelope anyway
+                                // so the JS panel doesn't sit at
+                                // "—" forever after the operator
+                                // pressed the button; the hint path
+                                // surfaces "no active session".
+                                let mut combined = crate::observer::latest_usage();
+                                combined.source = "context_check".to_string();
+                                combined.ctx_scrape_incomplete = true;
+                                combined.scrape_aborted = true;
+                                crate::dispatch::send_or_warn(
+                                    "LinkCmd::SendMeta(Usage+context:no-session)",
                                     &cmd_tx,
                                     LinkCmd::SendMeta(EnvelopeBody::Usage(combined)),
                                 )
@@ -853,6 +893,12 @@ struct ActiveSession {
     /// somehow falls behind, the `Lagged` variant of `RecvError`
     /// signals the parser to keep draining.
     term_bcast_tx: broadcast::Sender<TermFrame>,
+    /// §Context-window: shared handle to the `TermTracker` so the
+    /// `/context` scrape routine can snapshot the screen state
+    /// before writing the modal and again after dismiss, then
+    /// publish the post-dismiss snapshot to restore the operator's
+    /// terminal pane.
+    vt: Arc<parking_lot::Mutex<crate::vt::TermTracker>>,
 }
 
 struct OutcomeChannels {
@@ -865,6 +911,8 @@ struct SpawnResult {
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
     writer: crate::pty_writer::WriterHandle,
     term_bcast_tx: broadcast::Sender<TermFrame>,
+    vt: Arc<parking_lot::Mutex<crate::vt::TermTracker>>,
+    next_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -920,6 +968,14 @@ fn spawn_run_one(
     let vt_arc: Arc<parking_lot::Mutex<crate::vt::TermTracker>> = Arc::new(
         parking_lot::Mutex::new(crate::vt::TermTracker::new(cols, rows, 5_000)),
     );
+    // §Context-window / §A.7: shared "next seq to assign" counter,
+    // updated by the blocking PTY reader thread under its own mutex
+    // and read by other tasks (PtyCmd::Snapshot, run_context_scrape)
+    // to set `after_seq` on `ScreenSnapshot` envelopes. Starts at 1
+    // (0 is reserved for "no bytes fed"). Single producer → Relaxed
+    // ordering is fine; we only need a consistent read-after-write.
+    let next_seq: Arc<std::sync::atomic::AtomicU64> =
+        Arc::new(std::sync::atomic::AtomicU64::new(1));
     // §Once-and-for-all writer actor: take the writer ONCE here,
     // hand it to the dedicated tokio actor task, and let every
     // other site (outer loop, blocking thread via WriteBack
@@ -952,11 +1008,14 @@ fn spawn_run_one(
     // Clone for the driver task (consumed by the WriteBack
     // forwarding arm) and for the outer loop via `SpawnResult`.
     let writer_handle_for_driver = writer_handle.clone();
+    let vt_arc_for_result = vt_arc.clone();
+    let next_seq_for_result = next_seq.clone();
     let pty_join = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
         let pty_arc = pty_arc;
         let vt_arc = vt_arc;
         let mut reader = pty_arc.lock().reader();
         let term_bcast_tx = term_bcast_tx_for_blocking;
+        let next_seq = next_seq;
 
         let mut io_buf = [0u8; 4096];
         let mut graceful_pending = false;
@@ -970,12 +1029,9 @@ fn spawn_run_one(
         let mut trust_watcher = auto_trust.then(|| crate::trust::TrustWatcher::new(3));
         // §A.7 / seq-numbered snapshot protocol — single-producer seq
         // counter for the bytes this blocking thread feeds out of
-        // claude's PTY. Starts at 1 (0 is reserved for "no bytes fed
-        // yet"). Incremented *before* assignment so the first byte read
-        // carries seq=1, the next seq=2, … `wrap` is fine; the browser's
-        // comparison is `<=` between values within a single session, so
-        // >2^63 separations aren't a realistic concern.
-        let mut next_seq: u64 = 1;
+        // claude's PTY. Stored in the shared `next_seq` atomic so
+        // sibling tasks (PtyCmd::Snapshot, run_context_scrape) can
+        // read the current watermark for their `after_seq` fields.
         // The `PtyEvt::Read` ESC placeholder during shutdown uses seq=0
         // intentionally (it's a meta signal, not bytes-fed). We bump
         // it before assignment to the placeholder so the next real
@@ -1059,7 +1115,7 @@ fn spawn_run_one(
                         // seq (the highest seq a buffered live frame could
                         // already carry).
                         let after_seq = if bytes_read_since_spawn {
-                            next_seq.wrapping_sub(1)
+                            next_seq.load(Ordering::Relaxed).wrapping_sub(1)
                         } else {
                             0
                         };
@@ -1156,9 +1212,10 @@ fn spawn_run_one(
                     }
                     // §A.7: assign the next seq to this read, then bump.
                     // The blocking thread is the single producer, so no
-                    // CAS / Ordering is required for correctness.
-                    let seq = next_seq;
-                    next_seq = next_seq.wrapping_add(1);
+                    // CAS / Ordering is required for correctness. Stored
+                    // in the shared atomic so PtyCmd::Snapshot and
+                    // run_context_scrape can read it for their `after_seq`.
+                    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
                     bytes_read_since_spawn = true;
                     let frame = TermFrame {
                         chan: TERM_CHAN_CLAUDE,
@@ -1342,6 +1399,8 @@ fn spawn_run_one(
         killer,
         writer: writer_handle,
         term_bcast_tx,
+        vt: vt_arc_for_result,
+        next_seq: next_seq_for_result,
     })
 }
 
@@ -1772,6 +1831,9 @@ async fn run_usage_scrape(
 async fn run_context_scrape(
     writer: crate::pty_writer::WriterHandle,
     term_bcast_tx: broadcast::Sender<TermFrame>,
+    vt: Arc<parking_lot::Mutex<crate::vt::TermTracker>>,
+    next_seq: Arc<std::sync::atomic::AtomicU64>,
+    cmd_tx: mpsc::Sender<LinkCmd>,
 ) -> (ContextSnapshot, bool) {
     use crate::pty_writer::SequenceOutcome;
     use tokio::time::Duration;
@@ -1783,6 +1845,13 @@ async fn run_context_scrape(
     // parsed.
     const INITIAL_BUDGET: Duration = Duration::from_millis(700);
     const TICK: Duration = Duration::from_millis(100);
+    // §Context-window: settle window between dismiss and the
+    // restore-snapshot. Lets the modal fully unrender before we
+    // capture the restored screen — the §A.7 snapshot protocol's
+    // `after_seq` watermark already handles ordering at the
+    // consumer, but capturing the screen mid-unrender would still
+    // bleed modal residue into the restore grid.
+    const RESTORE_SETTLE: Duration = Duration::from_millis(200);
 
     let mut slash: Vec<u8> = Vec::with_capacity(8 + 9);
     slash.extend_from_slice(b"\x1b[201~");
@@ -1812,6 +1881,45 @@ async fn run_context_scrape(
     writer.bytes(b"\x1b".to_vec()).await;
 
     snap.scrape_incomplete = !snap.is_empty() && !snap.all_populated();
+
+    // §Context-window / §A.7: capture the now-restored screen and
+    // publish it as a `ScreenSnapshot` envelope. The browser's
+    // two-step apply (a) drops buffered live frames whose `seq ≤
+    // snapshot.after_seq` (already baked into the snapshot grid),
+    // (b) resets xterm, (c) paints the snapshot rows, (d) replays
+    // surviving live frames in seq order. Ordering is preserved at
+    // the producer (single blocking reader, monotonic seq mutex)
+    // and `after_seq` keeps the consumer side consistent. Without
+    // this restore the operator's xterm would be left showing the
+    // leftover modal text after dismiss.
+    tokio::time::sleep(RESTORE_SETTLE).await;
+    let restore = vt.lock().snapshot();
+    // Read the live reader's seq watermark right before publishing
+    // the snapshot — `next_seq - 1` is the highest seq that any
+    // frame already broadcast on the binary channel can carry. The
+    // producer emits frames strictly in seq order, so any frame
+    // the browser receives after this snapshot will have `seq >
+    // after_seq` and layer correctly on top of the restored grid.
+    let after_seq = next_seq
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .wrapping_sub(1);
+    let body = ScreenSnapshotBody {
+        chan: TERM_CHAN_CLAUDE,
+        cols: restore.cols,
+        rows: restore.rows,
+        cursor_col: restore.cursor_col,
+        cursor_row: restore.cursor_row,
+        cursor_visible: restore.cursor_visible,
+        text: restore.text,
+        after_seq,
+    };
+    if let Err(e) = cmd_tx
+        .send(LinkCmd::SendMeta(EnvelopeBody::ScreenSnapshot(body)))
+        .await
+    {
+        log::warn!("context_check: failed to publish restore snapshot: {e:?}");
+    }
+
     (snap, false)
 }
 
@@ -2624,6 +2732,7 @@ mod tests {
             killer: dummy_killer,
             writer: writer.clone(),
             term_bcast_tx: broadcast::channel::<TermFrame>(1).0,
+            vt: Arc::new(Mutex::new(crate::vt::TermTracker::new(80, 24, 5_000))),
         };
 
         // Reader thread drains whatever cat echoes back. This mirrors
@@ -2743,6 +2852,7 @@ mod tests {
             killer: dummy_killer,
             writer: writer.clone(),
             term_bcast_tx: broadcast::channel::<TermFrame>(1).0,
+            vt: Arc::new(Mutex::new(crate::vt::TermTracker::new(80, 24, 5_000))),
         };
 
         let (echo_tx, echo_rx) = std_mpsc::channel::<Vec<u8>>();

@@ -606,15 +606,23 @@ function applyMeta(env) {
         ctxCategories.innerHTML = '';
       }
       if (env.ctx_scrape_incomplete) {
-        // Empty scrape (no fields populated) means the modal didn't
-        // paint within the 700ms scrape window — tell the operator
-        // that explicitly. Partial scrape is the larger-window hint.
         const anyPopulated = env.ctx_used_tokens != null
           || env.ctx_used_pct != null
           || env.ctx_window_tokens != null;
-        ctxHint.textContent = anyPopulated
-          ? 'context scrape incomplete — try a larger window'
-          : 'context scrape returned no data — claude may be busy or the terminal too small; try a larger window';
+        if (env.scrape_aborted && !anyPopulated && env.source === 'context_check') {
+          // Rabbit couldn't even start the scrape — no active claude
+          // session to drive `/context` against. Distinct from the
+          // "modal didn't paint in time" case so the operator knows
+          // it's not a terminal-size problem.
+          ctxHint.textContent =
+            'context scrape aborted — claude is not running a turn';
+        } else if (anyPopulated) {
+          ctxHint.textContent =
+            'context scrape incomplete — try a larger window';
+        } else {
+          ctxHint.textContent =
+            'context scrape returned no data — claude may be busy or the terminal too small; try a larger window';
+        }
       } else {
         ctxHint.textContent = '';
       }
