@@ -49,17 +49,20 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">shell · {{ agent.name }}</h1>
-  <a class="btn btn-sm btn-outline-secondary" href="/agent/{{ agent.id }}/claude">→ claude</a>
+  <a class="btn btn-sm btn-outline-secondary" href="/agent/{{ agent.id }}/claude" target="_blank" rel="noopener">→ claude</a>
 </div>
 <div class="d-flex align-items-center gap-2 mb-2">
   <button class="btn btn-sm btn-outline-secondary" id="copy-btn" type="button">Copy</button>
   <button class="btn btn-sm btn-outline-secondary" id="copy-selection-btn" type="button" disabled title="Copy selected text — Shift+drag to select">Copy selection</button>
   <span class="text-muted small" id="copy-status" aria-live="polite"></span>
 </div>
+<div id="no-shell-warning" class="alert alert-warning py-2 px-3 small d-none" role="alert">
+  No shell output yet. If a rabbit is connected, make sure it was started with <code>RABBIT_ENABLE_SHELL=1</code>.
+</div>
 <div class="shell-grid {% if !connected %}disconnected{% endif %}" id="shell-grid">
   <div class="term-wrap">
     <div id="term"></div>
-    <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its shell</div>
+    <div class="offline-overlay">agent offline — connect a rabbit to this agent id (with <code>RABBIT_ENABLE_SHELL=1</code>) to see its shell</div>
   </div>
 </div>
 <div id="viewer-mode-banner" role="status" aria-live="polite">
@@ -92,6 +95,9 @@ term.focus();
 let ws = null;
 let wsBackoff = 500;
 let connected = false;
+let firstFrameAt = null;
+const noShellWarn = document.getElementById('no-shell-warning');
+let noShellTimer = null;
 
 function setConnected(c) {
   connected = c;
@@ -201,7 +207,17 @@ function connectWs() {
   ws = new WebSocket(`${proto}//${location.host}/agent/${agentId}/shell/ws${viewerQuery}`);
   ws.binaryType = 'arraybuffer';
 
-  ws.onopen = () => { wsBackoff = 500; setConnected(true); };
+  ws.onopen = () => {
+    wsBackoff = 500;
+    setConnected(true);
+    // Reset the "still no shell output" watchdog each time the WS
+    // reconnects; the rabbit may have just been (re)started.
+    firstFrameAt = null;
+    clearTimeout(noShellTimer);
+    noShellTimer = setTimeout(() => {
+      if (firstFrameAt === null && connected) noShellWarn.classList.remove('d-none');
+    }, 5000);
+  };
 
   ws.onmessage = (ev) => {
     if (!(ev.data instanceof ArrayBuffer)) return;
@@ -214,11 +230,19 @@ function connectWs() {
     if (ev.data.byteLength < 10) return;
     const view = new Uint8Array(ev.data);
     if (view[0] !== 0x02) return;
+    if (firstFrameAt === null) {
+      firstFrameAt = Date.now();
+      clearTimeout(noShellTimer);
+      noShellWarn.classList.add('d-none');
+    }
     term.write(bytesToUtf8(view.subarray(9)));
   };
 
   ws.onclose = () => {
     setConnected(false);
+    // The watchdog is per-connection; suppress while we're offline.
+    clearTimeout(noShellTimer);
+    noShellWarn.classList.add('d-none');
     setTimeout(connectWs, wsBackoff);
     wsBackoff = Math.min(wsBackoff * 2, 15000);
   };

@@ -95,7 +95,7 @@ impl Config {
             .ok()
             .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
             .unwrap_or(true);
-        let enable_shell = env::var("ENABLE_SHELL")
+        let enable_shell = env::var("RABBIT_ENABLE_SHELL")
             .ok()
             .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
             .unwrap_or(false);

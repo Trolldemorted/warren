@@ -3,7 +3,7 @@
 //! A second, optional PTY (`bash -i` by default) running on the same rabbit
 //! as claude. It's a plain byte-pump: output is tagged with
 //! [`TERM_CHAN_SHELL`] on the way to warren, and inbound shell-channel bytes
-//! are written straight into the PTY. Enabled with `ENABLE_SHELL=1`.
+//! are written straight into the PTY. Enabled with `RABBIT_ENABLE_SHELL=1`.
 //!
 //! The shell has a much simpler lifecycle than claude — no crash-window
 //! throttling, no session resume, no graceful-ESC dance, no trust dialog.
