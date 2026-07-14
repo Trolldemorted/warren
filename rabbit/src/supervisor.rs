@@ -1845,11 +1845,14 @@ async fn run_context_scrape(
     use tokio::time::Duration;
 
     // §Context-window: `/context` paints faster than `/usage` —
-    // the modal is single-page and has no scroll rounds. 700ms is
-    // generous for the initial paint; if the overlay doesn't
-    // surface the data, we dismiss anyway and ship whatever was
-    // parsed.
-    const INITIAL_BUDGET: Duration = Duration::from_millis(700);
+    // the modal is single-page and has no scroll rounds. 1100ms
+    // accommodates a slow PTY round-trip on a busy host while
+    // still feeling snappy to the operator (well under the
+    // 2.5 s button-disabled window the UI sets). The broadcast
+    // subscriber is created before the slash is written so the
+    // modal-paint frames aren't pre-empted by a stale-buffer
+    // bug; see the subscribe-then-write note below.
+    const INITIAL_BUDGET: Duration = Duration::from_millis(1100);
     const TICK: Duration = Duration::from_millis(100);
     // §Context-window: settle window between dismiss and the
     // restore-snapshot. Lets the modal fully unrender before we
@@ -1860,9 +1863,19 @@ async fn run_context_scrape(
     const RESTORE_SETTLE: Duration = Duration::from_millis(200);
 
     let pre_modal = vt.lock().snapshot();
-    let pre_modal_after_seq = next_seq
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .wrapping_sub(1);
+
+    // §Context-window: subscribe to the PTY broadcast **before**
+    // sending the slash. A fresh `broadcast::Receiver` only sees
+    // frames produced after `subscribe()` returns — anything
+    // already in the ring buffer is not replayed. If we wrote
+    // `/context` first and only subscribed after `writer.sequence`
+    // returned, the slash echo + most of the modal paint bytes
+    // would land in the ring buffer before our subscriber existed
+    // and silently evaporate, leaving the parser with the trailing
+    // category rows but no headline. Subscribing here makes the
+    // subsequent `drain_one_window` observe the full modal
+    // lifecycle.
+    let mut rx = term_bcast_tx.subscribe();
 
     let mut slash: Vec<u8> = Vec::with_capacity(8 + 9);
     slash.extend_from_slice(b"\x1b[201~");
@@ -1875,7 +1888,6 @@ async fn run_context_scrape(
 
     let mut parser = ContextParser::new();
     let mut snap = ContextSnapshot::default();
-    let mut rx = term_bcast_tx.subscribe();
     parser.reset_section();
     drain_one_window(&mut rx, &mut parser, &mut snap, INITIAL_BUDGET, TICK).await;
 
@@ -1909,30 +1921,34 @@ async fn run_context_scrape(
     // this restore the operator's xterm would be left showing the
     // leftover modal text after dismiss.
     tokio::time::sleep(RESTORE_SETTLE).await;
-    // §Context-window / §A.7: publish the *pre-modal* screen as
-    // a `ScreenSnapshot` envelope. Re-capturing after dismiss
-    // would return the post-dismiss VT state, which is a
-    // composition of modal-paint + partial-dismiss-redraw bytes
-    // — modal residue bleeds through. The pre-modal capture
-    // contains none of the modal's paint bytes by definition,
-    // so the operator's xterm gets a clean restore. `after_seq`
-    // is the live reader's seq watermark AT THE TIME OF THE
-    // PRE-MODAL CAPTURE: every frame the browser has already
-    // buffered with seq ≤ pre_modal_after_seq corresponds to
-    // bytes reflected in `pre_modal.text`, so the browser's
-    // trim step drops them; every frame with seq >
-    // pre_modal_after_seq corresponds to modal/dismiss bytes
-    // that have arrived AFTER the pre-modal capture — the
-    // snapshot's `term.reset()` erases them and any surviving
-    // live frames layer on top of the restored grid in seq
-    // order. Producer-side ordering (single blocking reader,
-    // monotonic seq mutex) guarantees that no buffered frame
-    // carries a seq below `pre_modal_after_seq` and above the
-    // snapshot's arrival on the meta channel, so the consumer
-    // never observes a "stale row painted on top of fresh
-    // reset" flicker.
+    // §Context-window / §A.7: publish a `ScreenSnapshot` that
+    // wipes the modal off the operator's xterm and lays the
+    // restored pre-modal grid back down. `after_seq` MUST
+    // reflect the live reader's seq watermark AT THE MOMENT OF
+    // PUBLICATION — not the watermark at pre-modal capture.
+    // Any frame with seq ≤ after_seq is dropped by the
+    // browser's two-step apply (its bytes are part of the
+    // captured grid), and the snapshot's `term.reset()`
+    // discards the modal residue. Frames with seq >
+    // after_seq are live PTY bytes emitted by the reader
+    // thread after we read the watermark (typically idle
+    // prompt bytes from the post-dismiss settle) and get
+    // layered on top of the restored grid in seq order.
+    // Producer-side ordering (single blocking PTY reader,
+    // monotonic seq mutex over `next_seq`) guarantees that
+    // every buffered live frame either lands before this
+    // snapshot's `after_seq` (and is therefore already part
+    // of the grid capture) or arrives at the browser after
+    // the snapshot envelope (and is therefore safely
+    // replayed post-apply). Using the *pre-modal* watermark
+    // here would leave the browser replaying the entire
+    // slash-echo + modal-paint + dismiss-unrender frame
+    // range over the freshly reset xterm, recreating the
+    // glitch the screenshot showed.
     let restore = pre_modal;
-    let after_seq = pre_modal_after_seq;
+    let after_seq = next_seq
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .wrapping_sub(1);
     let body = ScreenSnapshotBody {
         chan: TERM_CHAN_CLAUDE,
         cols: restore.cols,
