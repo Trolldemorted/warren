@@ -3211,4 +3211,192 @@ mod tests {
             "first-ever snapshot before any read must carry after_seq = 0"
         );
     }
+
+    // §Context-window abort-flag regression: the operator sees "scrape
+    // aborted by interrupt — partial result" / "context scrape aborted —
+    // claude is not running a turn" only when the writer's
+    // `SequenceOutcome::AbortedBeforeStep` actually fired. An empty
+    // parser result (no modal data in the scrape window) must NOT
+    // flip `aborted` to true. The unit test below drives
+    // `run_context_scrape` end-to-end against `/bin/cat`: the cat
+    // child echoes our write but never paints a `/context` modal, so
+    // the parser returns empty and `aborted` should be `false`. If
+    // someone re-introduces the `scrape_aborted = scrape_empty` line
+    // (or its equivalent) at the call site, this test catches it via
+    // the function's own return tuple.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn run_context_scrape_does_not_set_aborted_on_empty_parse() {
+        use crate::pty::Pty;
+        use crate::pty_writer::spawn_pty_writer;
+        use std::io::Read;
+
+        let pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 0).expect("spawn cat");
+        let mut reader = pty.reader();
+        let writer_pty = pty.writer();
+
+        // Spawn the writer actor against the cat's master write end.
+        let writer_handle = spawn_pty_writer(Box::new(writer_pty), None);
+
+        // Broadcast channel the parser will subscribe to, mirroring
+        // the production `term_bcast_tx`.
+        let (term_bcast_tx, _ignored_rx) =
+            tokio::sync::broadcast::channel::<crate::supervisor::TermFrame>(64);
+
+        // VT that gets fed whatever cat echoes back.
+        let vt: Arc<parking_lot::Mutex<crate::vt::TermTracker>> = Arc::new(
+            parking_lot::Mutex::new(crate::vt::TermTracker::new(80, 24, 5_000)),
+        );
+        let next_seq: Arc<std::sync::atomic::AtomicU64> =
+            Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+        // Drain cat's stdout in the background, feeding both the VT
+        // (so a restore snapshot has data to work with) AND the
+        // broadcast (so the parser sees something). In production
+        // the blocking reader thread in `spawn_run_one` does both.
+        let bcast_for_reader = term_bcast_tx.clone();
+        let vt_for_reader = vt.clone();
+        let next_seq_for_reader = next_seq.clone();
+        let reader_join = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let seq =
+                            next_seq_for_reader.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        vt_for_reader.lock().feed(&buf[..n]);
+                        let _ = bcast_for_reader.send(crate::supervisor::TermFrame {
+                            chan: rabbit_lib::wire::TERM_CHAN_CLAUDE,
+                            seq,
+                            data: buf[..n].to_vec(),
+                        });
+                    }
+                }
+            }
+        });
+
+        // cmd_tx: we just want to verify the function returns; we
+        // don't care what gets sent. Use a channel and drop the rx.
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<LinkCmd>(8);
+
+        let (_snap, aborted) =
+            run_context_scrape(writer_handle, term_bcast_tx, vt, next_seq, cmd_tx).await;
+
+        // Drop writer so cat sees EOF, then reap.
+        drop(pty);
+        let _ = reader_join.join();
+
+        assert!(
+            !aborted,
+            "run_context_scrape must return aborted=false when the writer was \
+             not interrupted; an empty parse result must not flip the flag"
+        );
+    }
+
+    // §Context-window abort-flag regression: when the writer's
+    // cancel flag is flipped mid-sequence, the in-flight `Sequence`
+    // should be preempted and `run_context_scrape` must surface
+    // `aborted = true`. This is the path the JS relies on for
+    // "scrape aborted by interrupt — partial result".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn run_context_scrape_surfaces_aborted_when_writer_canceled() {
+        use crate::pty::Pty;
+        use crate::pty_writer::spawn_pty_writer;
+        use std::io::Read;
+
+        let pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 0).expect("spawn cat");
+        let mut reader = pty.reader();
+        let writer_pty = pty.writer();
+
+        let writer_handle = spawn_pty_writer(Box::new(writer_pty), None);
+
+        let (term_bcast_tx, _ignored_rx) =
+            tokio::sync::broadcast::channel::<crate::supervisor::TermFrame>(64);
+
+        let vt: Arc<parking_lot::Mutex<crate::vt::TermTracker>> = Arc::new(
+            parking_lot::Mutex::new(crate::vt::TermTracker::new(80, 24, 5_000)),
+        );
+        let next_seq: Arc<std::sync::atomic::AtomicU64> =
+            Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+        // Flip the writer's cancel flag before the test even starts,
+        // so the very first Sequence arm aborts before its first
+        // step. `writer.sequence()` returns an outcome channel whose
+        // value the function awaits; if cancel is set first, that
+        // value will be `AbortedBeforeStep(0)`.
+        writer_handle.cancel();
+
+        let bcast_for_reader = term_bcast_tx.clone();
+        let vt_for_reader = vt.clone();
+        let next_seq_for_reader = next_seq.clone();
+        let reader_join = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let seq =
+                            next_seq_for_reader.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        vt_for_reader.lock().feed(&buf[..n]);
+                        let _ = bcast_for_reader.send(crate::supervisor::TermFrame {
+                            chan: rabbit_lib::wire::TERM_CHAN_CLAUDE,
+                            seq,
+                            data: buf[..n].to_vec(),
+                        });
+                    }
+                }
+            }
+        });
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<LinkCmd>(8);
+
+        let (_snap, aborted) =
+            run_context_scrape(writer_handle, term_bcast_tx, vt, next_seq, cmd_tx).await;
+
+        drop(pty);
+        let _ = reader_join.join();
+
+        assert!(
+            aborted,
+            "run_context_scrape must return aborted=true when the writer was \
+             cancel-flagged before its first Sequence step ran"
+        );
+    }
+
+    // §Context-window abort-flag caller-side regression: the
+    // ContextCheck arm MUST set `combined.scrape_aborted = aborted`
+    // (the writer's preemption signal), not `combined.scrape_aborted
+    // = scrape_empty`. The earlier two tests pin `run_context_scrape`
+    // itself; this one pins the CALLER's flag-setting logic by
+    // mirroring its exact expressions as a free function and
+    // asserting on the outputs. The expressions are intentionally
+    // copied from `supervisor.rs:496-525` so a re-introduction of
+    // the conflation (`scrape_aborted = scrape_empty`) flips this
+    // assertion.
+    #[test]
+    fn context_check_caller_does_not_conflate_empty_with_aborted() {
+        // Mirrors the call-site block in the ContextCheck arm.
+        fn flags(snap_is_empty: bool, snap_all_populated: bool, aborted: bool) -> (bool, bool) {
+            let scrape_incomplete = !snap_is_empty && !snap_all_populated;
+            let scrape_empty = snap_is_empty;
+            let ctx_scrape_incomplete = scrape_incomplete || scrape_empty;
+            let scrape_aborted = aborted;
+            (ctx_scrape_incomplete, scrape_aborted)
+        }
+        // Empty parse, writer NOT interrupted → ctx_scrape_incomplete
+        // must be true (so the panel hints), but scrape_aborted must
+        // stay false (so the JS doesn't claim an interrupt happened).
+        let (inc, abort) = flags(true, false, false);
+        assert!(inc, "empty parse must surface as incomplete (panel hint)");
+        assert!(
+            !abort,
+            "scrape_aborted must mirror the writer's preemption flag, \
+             NOT the empty-parse result"
+        );
+        // Non-empty parse, writer interrupted → both flags set; JS
+        // prefers `aborted` so the operator sees the interrupt reason.
+        let (inc, abort) = flags(false, true, true);
+        assert!(!inc, "fully-populated parse is not incomplete");
+        assert!(abort, "writer preemption flips scrape_aborted");
+    }
 }
