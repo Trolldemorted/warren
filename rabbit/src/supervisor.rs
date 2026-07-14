@@ -3534,4 +3534,140 @@ Context\n\
             snap.categories
         );
     }
+
+    // §Context-window real-bytes reproducer: drives
+    // `run_context_scrape` end-to-end against a shell child
+    // that pipes the freshly-captured `/tmp/context5.bin`
+    // bytes (live PTY capture from the current Claude session).
+    // This is the closest possible reproducer for the live UI
+    // "scrape returned no data" complaint without standing up
+    // the full trust-dialog/auto-accept choreography in-test.
+    // The bytes going into the parser are REAL; only the
+    // child process is a `cat` substitute.
+    //
+    // To regenerate /tmp/context5.bin from the live session:
+    //   timeout 35 python3 /tmp/cap2.py /tmp/context5.bin
+    //
+    // If this test fails despite the synthetic-modal test
+    // (`run_context_scrape_populates_all_fields_on_captured_modal`)
+    // passing, the bug is byte-shape-dependent (real modal
+    // emits something the synthetic fixture did not exercise).
+    // If this test passes but the live UI still fails, the
+    // bug is downstream of the parser — warren/JS path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[ignore]
+    async fn run_context_scrape_against_real_capture_bytes() {
+        use crate::pty::Pty;
+        use crate::pty_writer::spawn_pty_writer;
+        use std::io::Read;
+
+        // Skip cleanly if the capture file isn't present in
+        // this dev env (e.g. fresh CI checkout). The synthetic
+        // test above covers the structural regression contract.
+        let capture_path = "/tmp/context5.bin";
+        if !std::path::Path::new(capture_path).exists() {
+            eprintln!(
+                "[repro] {capture_path} missing; \
+                 capture with: timeout 35 python3 /tmp/cap2.py {capture_path}"
+            );
+            return;
+        }
+        let fixture_path = std::path::Path::new(capture_path);
+
+        let shell_arg = format!("cat {}", fixture_path.display());
+        let pty =
+            Pty::spawn("/bin/sh", &["-c".into(), shell_arg], "/tmp", 120, 40, 0).expect("spawn sh");
+
+        let mut reader = pty.reader();
+        let writer_pty = pty.writer();
+        let writer_handle = spawn_pty_writer(Box::new(writer_pty), None);
+
+        let (term_bcast_tx, _ignored_rx) =
+            tokio::sync::broadcast::channel::<crate::supervisor::TermFrame>(512);
+
+        let vt: Arc<parking_lot::Mutex<crate::vt::TermTracker>> = Arc::new(
+            parking_lot::Mutex::new(crate::vt::TermTracker::new(120, 40, 5_000)),
+        );
+        let next_seq: Arc<std::sync::atomic::AtomicU64> =
+            Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+        let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bcast_for_reader = term_bcast_tx.clone();
+        let vt_for_reader = vt.clone();
+        let next_seq_for_reader = next_seq.clone();
+        let cap_for_reader = captured.clone();
+        let reader_join = std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let seq =
+                            next_seq_for_reader.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let slice = &buf[..n];
+                        vt_for_reader.lock().feed(slice);
+                        cap_for_reader.lock().unwrap().extend_from_slice(slice);
+                        let _ = bcast_for_reader.send(crate::supervisor::TermFrame {
+                            chan: rabbit_lib::wire::TERM_CHAN_CLAUDE,
+                            seq,
+                            data: slice.to_vec(),
+                        });
+                    }
+                }
+            }
+        });
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<LinkCmd>(8);
+        let (snap, aborted) =
+            run_context_scrape(writer_handle, term_bcast_tx, vt, next_seq, cmd_tx).await;
+
+        drop(pty);
+        let _ = reader_join.join();
+
+        eprintln!("[repro/run] run_context_scrape(REAL bytes) returned:");
+        eprintln!("  aborted  = {aborted}");
+        eprintln!("  used     = {:?}", snap.used_tokens);
+        eprintln!("  total    = {:?}", snap.total_tokens);
+        eprintln!("  used_pct = {:?}", snap.used_pct);
+        eprintln!("  free_pct = {:?}", snap.free_pct);
+        eprintln!("  window   = {:?}", snap.window_tokens);
+        eprintln!(
+            "  cats     = {} keys",
+            snap.categories
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .map(|o| o.len())
+                .unwrap_or(0)
+        );
+        let cap = captured.lock().unwrap();
+        eprintln!(
+            "[repro/run] PTY captured {} bytes (last 600 after ANSI strip):",
+            cap.len()
+        );
+        let cleaned =
+            crate::observer::text::ansi::strip_ansi_bytes(&cap[cap.len().saturating_sub(4096)..]);
+        for line in cleaned
+            .split('\n')
+            .filter(|l| !l.trim().is_empty())
+            .rev()
+            .take(12)
+        {
+            eprintln!("  | {}", line.trim_end());
+        }
+
+        assert!(!aborted, "writer was not interrupted");
+        assert!(
+            snap.used_tokens.is_some(),
+            "used_tokens must populate; got snap.used_tokens={:?}",
+            snap.used_tokens
+        );
+        assert!(snap.total_tokens.is_some(), "total_tokens must populate");
+        assert!(snap.used_pct.is_some(), "used_pct must populate");
+        assert!(
+            snap.free_pct.is_some(),
+            "free_pct must populate (this is the bug from earlier)"
+        );
+        assert!(snap.categories.is_some(), "categories must populate");
+    }
 }
