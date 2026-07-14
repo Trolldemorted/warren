@@ -310,9 +310,58 @@ impl ContextParser {
         if trimmed.is_empty() {
             return;
         }
+        // §Context-window: check the compact headline shape
+        // BEFORE the section-header check, because the real
+        // Claude modal paints `Context Usage` and the
+        // bar chart + headline on the SAME visual line —
+        // `Context Usage    ⎁ ⎁ 24.2k/200k tokens (12%)     ⎶ ⎶
+        // Estimated usage by category`. A line that starts
+        // with `Context` is therefore the headline line, not
+        // just a section header. The legacy form below is
+        // preserved for older builds. The headline match
+        // does NOT return — terminal capture joins visual
+        // rows with CR-only, so the same parser line may
+        // also contain the per-category rows that follow
+        // the headline on screen. We fall through to the
+        // category-label loop after populating the
+        // headline fields.
+        let mut headline_matched = false;
+        if let Some((pct, used_str, total_str)) = parse_compact_headline(trimmed) {
+            if self.used_tokens.is_none() {
+                if let Some(n) = parse_compact_number(used_str) {
+                    self.used_tokens = Some(n);
+                }
+            }
+            if self.total_tokens.is_none() {
+                if let Some(n) = parse_compact_number(total_str) {
+                    self.total_tokens = Some(n);
+                }
+            }
+            if self.window_tokens.is_none() {
+                if let Some(n) = parse_compact_number(total_str) {
+                    self.window_tokens = Some(n);
+                }
+            }
+            if let Some(p) = pct {
+                if self.used_pct.is_none() {
+                    self.used_pct = Some(p);
+                }
+            }
+            headline_matched = true;
+        }
+        if headline_matched {
+            // Mark the section context — the rest of the
+            // line may also contain `System prompt:` /
+            // `Tools:` category rows.
+            self.section = Section::Context;
+        }
 
-        // Section headers.
-        if trimmed.starts_with("/context") || trimmed.starts_with("Context") {
+        // Section headers. Skip if the headline match already
+        // ran — that line is the headline line, not just a
+        // section header, and we want to fall through to the
+        // category-label loop below.
+        if !headline_matched && (trimmed.starts_with("/context") || trimmed.starts_with("Context"))
+        {
             self.section = Section::Context;
             return;
         }
@@ -320,6 +369,17 @@ impl ContextParser {
         // "Used: N / M tokens (P%)" or any of the variants.
         if let Some(rest) = strip_label(trimmed, "Used") {
             self.parse_used_line(rest);
+            return;
+        }
+
+        // "Free space: 142.8k (71.4%)" — Claude Code 2.1+ uses
+        // "Free space" rather than the legacy "Free".
+        if let Some(rest) = strip_label(trimmed, "Free space") {
+            if let Some(pct) = parse_pct(rest) {
+                if self.free_pct.is_none() {
+                    self.free_pct = Some(pct);
+                }
+            }
             return;
         }
 
@@ -346,16 +406,31 @@ impl ContextParser {
             return;
         }
 
-        // Per-category rows.
+        // Per-category rows. Scan for ANY occurrence of a
+        // category label in the line, not just at the
+        // start — Claude TUI bundles multiple visual rows on
+        // one parser line (CR-only line terminators are
+        // stripped to LF, so the headline row and the
+        // per-category rows below it share a single `\n`-
+        // delimited line). First-wins merge keeps already-
+        // populated values.
         for label in CATEGORY_LABELS {
-            if let Some(rest) = strip_label(trimmed, label) {
-                let key = normalize_category_key(label);
-                if let Some(n) = parse_token_int(rest.trim().as_bytes()) {
-                    self.categories_map.entry(key).or_insert(json!(n));
-                } else if !rest.trim().is_empty() {
-                    self.categories_map.entry(key).or_insert(json!(rest.trim()));
+            if let Some(rel) = trimmed.find(label) {
+                let after = &trimmed[rel + label.len()..];
+                let rest = after
+                    .strip_prefix(':')
+                    .or_else(|| after.strip_prefix(' '))
+                    .or_else(|| after.strip_prefix("  "));
+                if let Some(rest) = rest {
+                    let key = normalize_category_key(label);
+                    if let Some(n) = parse_compact_token_count(rest.trim()) {
+                        self.categories_map.entry(key).or_insert(json!(n));
+                    } else if let Some(n) = parse_token_int(rest.trim().as_bytes()) {
+                        self.categories_map.entry(key).or_insert(json!(n));
+                    } else if !rest.trim().is_empty() {
+                        self.categories_map.entry(key).or_insert(json!(rest.trim()));
+                    }
                 }
-                return;
             }
         }
     }
@@ -416,11 +491,19 @@ impl ContextParser {
 
 const CATEGORY_LABELS: &[&str] = &[
     "System prompt",
+    "System tools",
     "Tools",
     "Conversation",
     "Messages",
     "Skills",
     "MCP",
+    "Memory",
+    "Memory files",
+    "Free space",
+    "Autocompact buffer",
+    "Auto-compact buffer",
+    "Auto-compact window",
+    "Free",
 ];
 
 // ----- free fns -----
@@ -465,6 +548,23 @@ fn parse_token_int(bytes: &[u8]) -> Option<u64> {
 }
 
 fn parse_pct(s: &str) -> Option<f64> {
+    let s = s.trim();
+    // `Free space: 142.8k (71.4%)` — the real Claude TUI
+    // embeds the percentage inside parens after a compact
+    // token count. When the input ends in `)`, pull the
+    // inner digits-and-dot string from the trailing `(...)`.
+    // If the input does NOT end in `)`, the caller has
+    // already stripped the outer parens — just trim `%`
+    // and parse.
+    let s = if s.ends_with(')') {
+        if let Some(open) = s.rfind('(') {
+            &s[open + 1..s.len() - 1]
+        } else {
+            s
+        }
+    } else {
+        s
+    };
     let s = s.trim().trim_end_matches('%').trim();
     s.parse().ok()
 }
@@ -488,6 +588,157 @@ fn parse_window_label(s: &str) -> Option<u64> {
         'M' | 'm' => Some(base.saturating_mul(1_000_000)),
         _ => None,
     }
+}
+
+/// §Context-window: parse a compact token-count form like
+/// `24.2k`, `200k`, `1.5m`, `164`, `33k`, `~360`. Returns the
+/// expanded integer (k → ×1_000, m → ×1_000_000, fractional
+/// component is rounded to the nearest unit so `24.2k` →
+/// `24200`). A leading `~` is tolerated (the per-file rows
+/// render approximate counts with a tilde prefix).
+fn parse_compact_number(s: &str) -> Option<u64> {
+    let s = s.trim().trim_start_matches('~').trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Split digits-and-dot from suffix.
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+        i += 1;
+    }
+    let (num_str, suffix) = s.split_at(i);
+    if num_str.is_empty() {
+        return None;
+    }
+    let num: f64 = num_str.parse().ok()?;
+    let multiplier: f64 = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" => 1.0,
+        "k" => 1_000.0,
+        "m" => 1_000_000.0,
+        _ => return None,
+    };
+    Some((num * multiplier).round() as u64)
+}
+
+/// §Context-window: pull a `Nk tokens (P%)` or `Nk` count from
+/// the right side of a category line. Returns the integer
+/// token count, ignoring any trailing `(P%)` and any leading
+/// `~` (approximate-count prefix used for per-file rows).
+fn parse_compact_token_count(s: &str) -> Option<u64> {
+    let s = s.trim();
+    // Take the first whitespace-delimited token (e.g. `2.9k`).
+    let first = s.split_whitespace().next()?;
+    parse_compact_number(first)
+}
+
+/// §Context-window: detect the canonical Claude TUI `/context`
+/// headline line — `USED/TOTAL tokens (P%)` in compact k/m
+/// notation. Returns `(used_pct, used_str, total_str)` so the
+/// caller can apply `parse_compact_number` to the two halves.
+/// `used_pct` is `None` when the line has no `(P%)` suffix
+/// (rare but possible on truncated renders).
+///
+/// Claude's TUI paints the bar-chart and the headline text on
+/// the SAME visual line — the line as fed to the parser is
+/// `⎁  Context Usage    ⎁ ⎁ ⎁ 24.2k/200k tokens (12%)     ⎶ ⎶
+///
+/// Estimated usage by category` — so we must scan the whole
+/// line for the `Nk/Nk tokens (P%)` shape, not assume it
+/// starts at column 0.
+fn parse_compact_headline(line: &str) -> Option<(Option<f64>, &str, &str)> {
+    if !line.contains('/') {
+        return None;
+    }
+    // The USED/TOTAL pair sits immediately before ` tokens`
+    // (or ` tokens (P%)`). Find the FIRST occurrence of
+    // ` tokens` in the line — the headline is painted before
+    // any per-category rows that share the line.
+    let tokens_suffix = " tokens";
+    let idx = line.find(tokens_suffix)?;
+    // The `(P%)` lives AFTER ` tokens` on the real Claude
+    // modal (e.g. `24.2k/200k tokens (12%)`).
+    let tail = line[idx + tokens_suffix.len()..].trim_start();
+    let pct = if tail.starts_with('(') {
+        tail.find(')').and_then(|close| parse_pct(&tail[1..close]))
+    } else {
+        None
+    };
+    // Find a `/` in the prefix such that the tokens on each
+    // side both parse as compact numbers. We prefer the
+    // rightmost such `/` (the headline is the last
+    // `<num>/<num> tokens` shape on the line). The USED
+    // half may be embedded mid-line (the bar chart paints
+    // the headline on the same visual row as section text
+    // + bar glyphs), so we extract just the trailing
+    // compact-number token from the left of `/`, not the
+    // entire `prefix[..rel]` substring.
+    let prefix = &line[..idx];
+    let mut search_from = prefix.len();
+    let mut found: Option<(&str, &str)> = None;
+    while let Some(rel) = prefix[..search_from].rfind('/') {
+        let right = prefix[rel + 1..].trim();
+        if parse_compact_number(right).is_none() {
+            search_from = rel;
+            continue;
+        }
+        // Walk left from `/` to extract the USED compact
+        // number. Skip whitespace, then take a run of
+        // digits/dot, then an optional k/m suffix.
+        let left = &prefix[..rel];
+        let lb = left.as_bytes();
+        let mut end = lb.len();
+        while end > 0 && lb[end - 1] == b' ' {
+            end -= 1;
+        }
+        if end == 0 {
+            search_from = rel;
+            continue;
+        }
+        // Optional k/m suffix.
+        let mut digits_end = end;
+        if matches!(lb[digits_end - 1], b'k' | b'K' | b'm' | b'M') {
+            digits_end -= 1;
+        }
+        let mut digits_start = digits_end;
+        while digits_start > 0
+            && (lb[digits_start - 1].is_ascii_digit() || lb[digits_start - 1] == b'.')
+        {
+            digits_start -= 1;
+        }
+        if digits_start == digits_end {
+            search_from = rel;
+            continue;
+        }
+        let used_str = &left[digits_start..end];
+        if parse_compact_number(used_str).is_none() {
+            search_from = rel;
+            continue;
+        }
+        // Reject if there is non-whitespace content
+        // between the USED number's start and the previous
+        // token boundary — `24.2k/200k` is fine, but
+        // `m/n` prose (e.g. `2024/2025`) shouldn't
+        // match. The USED is preceded by either a
+        // whitespace, a non-digit-or-k/m character, or
+        // the start of the line.
+        if digits_start > 0 {
+            let prev = lb[digits_start - 1];
+            let ok = prev == b' '
+                || prev == b'\t'
+                || !(prev.is_ascii_digit()
+                    || prev == b'.'
+                    || matches!(prev, b'k' | b'K' | b'm' | b'M'));
+            if !ok {
+                search_from = rel;
+                continue;
+            }
+        }
+        found = Some((used_str, right));
+        break;
+    }
+    let (used_str, total_str) = found?;
+    Some((pct, used_str, total_str))
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -785,5 +1036,108 @@ mod tests {
         let snap = feed_all(&mut p, bytes).expect("snapshot");
         assert_eq!(snap.used_tokens, Some(87_432));
         assert_eq!(snap.total_tokens, Some(200_000));
+    }
+
+    // §Context-window Claude Code 2.1+ regression: the canonical
+    // `/context` headline is `24.2k/200k tokens (12%)` — no
+    // `Used:` label, compact k/m notation, no thousands separator.
+    // The fixture captured from a real claude process lives in
+    // `tests/fixtures/context_modal_real.bin`. The clean-text
+    // projection (ANSI stripped) is `context_modal_clean.bin`.
+    #[test]
+    fn feed_recognizes_compact_k_m_headline() {
+        let mut p = ContextParser::new();
+        let bytes = b"24.2k/200k tokens (12%)\n";
+        let snap = feed_all(&mut p, bytes).expect("snapshot");
+        assert_eq!(snap.used_tokens, Some(24_200));
+        assert_eq!(snap.total_tokens, Some(200_000));
+        assert_eq!(snap.window_tokens, Some(200_000));
+        assert_eq!(snap.used_pct, Some(12.0));
+    }
+
+    #[test]
+    fn feed_recognizes_free_space_label() {
+        // Claude Code 2.1+ uses "Free space" rather than the
+        // legacy "Free".
+        let mut p = ContextParser::new();
+        let bytes = b"Free space: 142.8k (71.4%)\n";
+        let snap = feed_all(&mut p, bytes).expect("snapshot");
+        assert_eq!(snap.free_pct, Some(71.4));
+    }
+
+    #[test]
+    fn feed_recognizes_compact_category_rows() {
+        let mut p = ContextParser::new();
+        let bytes = b"System prompt: 2.9k tokens (1.4%)\nSystem tools: 16.9k tokens (8.4%)\n";
+        let snap = feed_all(&mut p, bytes).expect("snapshot");
+        let cats = snap.categories.expect("categories map");
+        assert_eq!(cats["system_prompt"], json!(2_900));
+        assert_eq!(cats["system_tools"], json!(16_900));
+    }
+
+    #[test]
+    fn parse_compact_number_handles_forms() {
+        assert_eq!(parse_compact_number("24.2k"), Some(24_200));
+        assert_eq!(parse_compact_number("200k"), Some(200_000));
+        assert_eq!(parse_compact_number("1.5m"), Some(1_500_000));
+        assert_eq!(parse_compact_number("164"), Some(164));
+        assert_eq!(parse_compact_number("33k"), Some(33_000));
+        assert_eq!(parse_compact_number("~360"), Some(360));
+        assert_eq!(parse_compact_number(""), None);
+        assert_eq!(parse_compact_number("xyz"), None);
+    }
+
+    /// End-to-end regression: feed the actual bytes captured from
+    /// a real `claude` invocation (with ANSI stripped) and assert
+    /// the parser surfaces the headline `used_tokens` /
+    /// `total_tokens` / `used_pct` plus the primary category
+    /// counts. This is the test that would have caught the
+    /// `Used:`-keyword-only parser. The fixture lives at
+    /// `tests/fixtures/context_modal_clean.bin` and was
+    /// generated by `bin/capture_context_modal.rs`.
+    #[test]
+    fn feed_real_captured_modal_bytes() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/context_modal_clean.bin");
+        if !path.exists() {
+            // Skip silently when the fixture is absent (e.g.
+            // downstream forks). The capture tool regenerates it.
+            eprintln!("skipping: fixture {} not present", path.display());
+            return;
+        }
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let mut p = ContextParser::new();
+        // Feed in 256-byte chunks to exercise the cross-chunk
+        // path, mirroring how the broadcast delivers bytes.
+        for chunk in bytes.chunks(256) {
+            let _ = p.feed(chunk);
+        }
+        let snap = p.flush().expect("flush emits partial state");
+        assert_eq!(
+            snap.used_pct,
+            Some(12.0),
+            "headline percentage must come from the compact form"
+        );
+        assert_eq!(
+            snap.total_tokens,
+            Some(200_000),
+            "headline total must come from the compact form"
+        );
+        assert_eq!(
+            snap.used_tokens,
+            Some(24_200),
+            "headline used must come from the compact form"
+        );
+        let cats = snap.categories.expect("categories map");
+        assert_eq!(
+            cats["system_prompt"],
+            json!(2_900),
+            "system_prompt category must be parsed from compact row"
+        );
+        assert_eq!(
+            cats["system_tools"],
+            json!(16_900),
+            "system_tools category must be parsed from compact row"
+        );
     }
 }

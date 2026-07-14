@@ -1,0 +1,97 @@
+Script started on 2026-07-14 07:42:45+00:00 [COMMAND="claude --dangerously-skip-permissions" <not executed on terminal>]
+
+7[r8[?25h[?25l[?2004h[?1004h[?2031h[<u[>1u[>4;2m]0;✳ Claude Code[38;5;174m ▐[48;5;16m▛███▜[49m▌[12G[39m[1mClaude[19GCode[24G[22m[38;5;246mv2.1.195[39m
+[38;5;174m▝▜[48;5;16m█████[49m▛▘[12G[38;5;246mMiniMax-M3[23Gwith[28Ghigh[33Geffort[40G·[42GAPI[46GUsage[52GBilling[39m
+[38;5;174m [3G▘▘[6G▝▝[12G[38;5;246m/workdir[39m
+
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────[39m
+❯ [7m [27m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;5;211m⏵⏵[6Gbypass[13Gpermissions[25Gon[38;5;246m (shift+tab[39Gto[42Gcycle)[49G·[51G←[53Gfor[57Gagents[39m
+[63G[38;5;246m●[65Ghigh[70G·[72G/effort[39m
+[2C[4A[>0q[c[2D[4B[6A[38;5;246m  ⎿  SessionStart:startup hook error[1B  ⎿  Failed with non-blocking status code: Error: hook shim request failed: [39m[K[1B   [6G[38;5;246merror sending request for url (http://127.0.0.1:7777/hook/SessionStart)[1B[39m[K[1B[38;5;244m────────────────────────────────────────────────────────────────────────────────[1B[39m❯ [7m [63G[27m[K
+[38;5;244m────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;5;211m⏵⏵[6Gbypass[13Gpermissions[25Gon[38;5;246m (shift+tab[39Gto[42Gcycle)[49G·[51G←[53Gfor[57Gagents[39m
+[63G[38;5;246m●[65Ghigh[70G·[72G/effort[39m
+[2C[4A(B[<u[>1u[>4;2m]0;⠂ Claude Code[2D[4B[5A[48;5;237m[38;5;239m❯ [38;5;231m/context[39m                                                                      [1B[49m[K[1B[38;5;174m*[39m [38;5;174mJitterbugging… [39m[K[2C[1B[K[1B[38;5;244m────────────────────────────────────────────────────────────────────────────────[39m
+[38;5;246m❯ [39m[7m [27m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;5;211m⏵⏵[6Gbypass[13Gpermissions[25Gon[38;5;246m (shift+tab[39Gto[42Gcycle)[49G·[51Gesc[55Gto[58Ginterrupt[68G·[70G←[72Gfor[76Gag…[39m
+[63G[38;5;246m●[65Ghigh[70G·[72G/effort[39m
+[2C[4A[2D[4B[7A[38;5;174m✢[39m
+
+
+
+
+
+
+[2C[4A[2D[4B[7A[38;5;174m·[39m
+
+
+
+
+
+
+[2C[4A[2D[4B[7A[38;5;174m✢[39m
+
+
+
+
+
+
+[2C[4A[2D[4B[7A[38;5;174m*[39m
+
+
+
+
+
+
+[2C[4A]0;⠐ Claude Code[2D[4B[7A[38;5;174m✶[39m
+
+
+
+
+
+
+[2C[4A]0;✳ Claude Code[2D[4B[11C[9A[K[1B[38;5;246m  ⎿  [39m[1mContext Usage[1B[22m [3G   [38;5;244m⛁ [38;5;246m⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ [38;5;174m⛁ [28G[38;5;246mMiniMax-M3[5C[1B[38;5;220m⛁ [38;5;140m⛀ [38;5;246m⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ [28G24.2k/200k tokens (12%)[1B[39m     [38;5;246m⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ [39m[K[1B   [6G[38;5;246m⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ [28G[3mEstimated usage by category[1B[23m[39m     [38;5;246m⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ [39m  [38;5;244m⛁[39m System prompt: [38;5;246m2.9k tokens (1.4%)[39m[K[2C[1B   [38;5;246m⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ [39m  [38;5;246m⛁[39m System tools: [38;5;246m16.9k tokens (8.4%)[39m[K[5C[1B[38;5;246m⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ [28G[38;5;174m⛁[30G[39mMemory[37Gfiles:[44G[38;5;246m2.8k tokens (1.4%)[63G[39m[K
+[6G[38;5;246m⛶[8G⛶[10G⛶[12G⛶[14G⛶[16G⛶[18G⛶[20G⛶[22G⛶[24G⛶[28G[38;5;220m⛁[30G[39mSkills:[38G[38;5;246m1.5k[43Gtokens[50G(0.7%)[39m
+[6G[38;5;246m⛶[8G⛶[10G⛶[12G⛝[14G⛝[16G⛝[18G⛝[20G⛝[22G⛝[24G⛝[28G[38;5;140m⛁[30G[39mMessages:[40G[38;5;246m164[44Gtokens[51G(0.1%)[39m
+[6G[38;5;246m⛝[8G⛝[10G⛝[12G⛝[14G⛝[16G⛝[18G⛝[20G⛝[22G⛝[24G⛝[28G⛶[30G[39mFree[35Gspace:[42G[38;5;246m142.8k[49G(71.4%)[39m
+[28G[38;5;246m⛝[30GAutocompact[42Gbuffer:[50G33k[54Gtokens[61G(16.5%)[39m
+
+[6G[1mAuto-compact[19Gwindow:[27G[22m[38;5;246m200k[32Gtokens[39m
+
+[6G[1mMemory[13Gfiles[22m[38;5;246m ·[21G/memory[39m
+[6G[38;5;246m├[8G[39mCLAUDE.md:[19G[38;5;246m2.3k[24Gtokens[39m
+[6G[38;5;246m└[8G[39m~/.claude/projects/-workdir/memory/MEMORY.md:[54G[38;5;246m544[58Gtokens[39m
+
+[6G[1mSkills[22m[38;5;246m ·[15G/skills[39m
+
+[6G[38;5;246mBuilt-in[39m
+[6G[38;5;246m├[8G[39mclaude-api:[20G[38;5;246m~360[25Gtokens[39m
+[6G[38;5;246m├[8G[39mupdate-config:[23G[38;5;246m~240[28Gtokens[39m
+[6G[38;5;246m├[8G[39mdeep-research:[23G[38;5;246m~160[28Gtokens[39m
+[6G[38;5;246m├[8G[39mrun:[13G[38;5;246m~120[18Gtokens[39m
+[6G[38;5;246m├[8G[39mcode-review:[21G[38;5;246m~120[26Gtokens[39m
+[6G[38;5;246m├[8G[39mloop:[14G[38;5;246m~100[19Gtokens[39m
+[6G[38;5;246m├[8G[39mverify:[16G[38;5;246m~90[20Gtokens[39m
+[6G[38;5;246m├[8G[39mkeybindings-help:[26G[38;5;246m~80[30Gtokens[39m
+[6G[38;5;246m├[8G[39mfewer-permission-prompts:[34G[38;5;246m~60[38Gtokens[39m
+[6G[38;5;246m├[8G[39msimplify:[18G[38;5;246m~60[22Gtokens[39m
+[6G[38;5;246m├[8G[39msecurity-review:[25G[38;5;246m~30[29Gtokens[39m
+[6G[38;5;246m├[8G[39mreview:[16G[38;5;246m~30[20Gtokens[39m
+[6G[38;5;246m└[8G[39minit:[14G[38;5;246m~20[18Gtokens[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────[39m
+❯ [7m [27m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────[39m
+[3G[38;5;211m⏵⏵[6Gbypass[13Gpermissions[25Gon[38;5;246m (shift+tab[39Gto[42Gcycle)[49G·[51G←[53Gfor[57Gagents[39m
+[63G[38;5;246m●[65Ghigh[70G·[72G/effort[39m
+[2C[4A[2D[4B[2C[1A[38;5;246mtmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf[72Gand re…[39m
+[2C[4A[2D[4B[2C[2A[38;5;246mPress Ctrl-D again to exit[39m[K
+
+[2C[4A[2D[4B[2C[2A[38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · ← for agents[39m
+
+[2C[4A
+Script done on 2026-07-14 07:43:02+00:00 [COMMAND_EXIT_CODE="0"]

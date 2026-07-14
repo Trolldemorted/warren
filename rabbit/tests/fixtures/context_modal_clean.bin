@@ -1,0 +1,97 @@
+Script started on 2026-07-14 07:42:45+00:00 [COMMAND="claude --dangerously-skip-permissions" <not executed on terminal>]
+
+ ▐▛███▜▌ClaudeCodev2.1.195
+▝▜█████▛▘MiniMax-M3withhigheffort·APIUsageBilling
+ ▘▘▝▝/workdir
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯  
+────────────────────────────────────────────────────────────────────────────────
+⏵⏵bypasspermissionson (shift+tabtocycle)·←foragents
+●high·/effort
+  ⎿  SessionStart:startup hook error  ⎿  Failed with non-blocking status code: Error: hook shim request failed:    error sending request for url (http://127.0.0.1:7777/hook/SessionStart)────────────────────────────────────────────────────────────────────────────────❯  
+────────────────────────────────────────────────────────────────────────────────
+⏵⏵bypasspermissionson (shift+tabtocycle)·←foragents
+●high·/effort
+B❯ /context                                                                      * Jitterbugging… ────────────────────────────────────────────────────────────────────────────────
+❯  
+────────────────────────────────────────────────────────────────────────────────
+⏵⏵bypasspermissionson (shift+tabtocycle)·esctointerrupt·←forag…
+●high·/effort
+✢
+
+
+
+
+
+
+·
+
+
+
+
+
+
+✢
+
+
+
+
+
+
+*
+
+
+
+
+
+
+✶
+
+
+
+
+
+
+  ⎿  Context Usage    ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ MiniMax-M3⛁ ⛀ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ 24.2k/200k tokens (12%)     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶    ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ Estimated usage by category     ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System prompt: 2.9k tokens (1.4%)   ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶   ⛁ System tools: 16.9k tokens (8.4%)⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛶ ⛁Memoryfiles:2.8k tokens (1.4%)
+⛶⛶⛶⛶⛶⛶⛶⛶⛶⛶⛁Skills:1.5ktokens(0.7%)
+⛶⛶⛶⛝⛝⛝⛝⛝⛝⛝⛁Messages:164tokens(0.1%)
+⛝⛝⛝⛝⛝⛝⛝⛝⛝⛝⛶Freespace:142.8k(71.4%)
+⛝Autocompactbuffer:33ktokens(16.5%)
+
+Auto-compactwindow:200ktokens
+
+Memoryfiles ·/memory
+├CLAUDE.md:2.3ktokens
+└~/.claude/projects/-workdir/memory/MEMORY.md:544tokens
+
+Skills ·/skills
+
+Built-in
+├claude-api:~360tokens
+├update-config:~240tokens
+├deep-research:~160tokens
+├run:~120tokens
+├code-review:~120tokens
+├loop:~100tokens
+├verify:~90tokens
+├keybindings-help:~80tokens
+├fewer-permission-prompts:~60tokens
+├simplify:~60tokens
+├security-review:~30tokens
+├review:~30tokens
+└init:~20tokens
+
+────────────────────────────────────────────────────────────────────────────────
+❯  
+────────────────────────────────────────────────────────────────────────────────
+⏵⏵bypasspermissionson (shift+tabtocycle)·←foragents
+●high·/effort
+tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.confand re…
+Press Ctrl-D again to exit
+
+⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+
+
+Script done on 2026-07-14 07:43:02+00:00 [COMMAND_EXIT_CODE="0"]

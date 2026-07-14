@@ -200,14 +200,22 @@ async fn ack_trims_ring_so_acked_events_are_not_replayed() {
     // surfaces on event_rx we know the Ack has been processed (ring trimmed).
     send_env(&mut c1, EnvelopeBody::Ack { ack_seq: b.seq }).await;
     send_env(&mut c1, EnvelopeBody::Interrupt).await;
-    match tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
-        .await
-        .expect("timed out waiting for marker")
-        .expect("event channel closed")
-    {
-        LinkEvent::Text(env) => assert!(matches!(env.body, EnvelopeBody::Interrupt)),
-        LinkEvent::Binary { .. } => panic!("expected the text marker, got binary"),
-    }
+    // The link emits `Connected` once per WS handshake, which here fires
+    // before the test waits for the Interrupt marker. Skip past any
+    // `Connected` (and any spurious follow-on variant) until the marker
+    // surfaces, applying the same 5s budget end-to-end.
+    let marker = loop {
+        match tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("timed out waiting for marker")
+            .expect("event channel closed")
+        {
+            LinkEvent::Text(env) => break env,
+            LinkEvent::Binary { .. } => panic!("expected the text marker, got binary"),
+            LinkEvent::Connected => continue,
+        }
+    };
+    assert!(matches!(marker.body, EnvelopeBody::Interrupt));
 
     // A third meta event, sent after the Ack was processed, stays un-acked.
     cmd_tx.send(LinkCmd::SendMeta(log_line())).await.unwrap();

@@ -121,21 +121,29 @@ async fn snapshot_request_arrives_as_text_event_with_chan_byte() {
     )
     .await;
 
-    let got = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
-        .await
-        .expect("timed out waiting for the inbound snapshot request")
-        .expect("event channel closed");
-    match got {
-        LinkEvent::Text(env) => match env.body {
-            EnvelopeBody::SnapshotRequest { chan } => {
-                assert_eq!(
-                    chan, TERM_CHAN_CLAUDE,
-                    "channel byte must survive the wire intact"
-                );
-            }
-            other => panic!("expected SnapshotRequest, got {other:?}"),
-        },
-        LinkEvent::Binary { .. } => panic!("snapshot request arrived as binary"),
+    // The link emits `Connected` once per WS handshake, which here fires
+    // before the test waits for the SnapshotRequest. Skip past any
+    // `Connected` (and any spurious follow-on variant) until the request
+    // surfaces, applying the same 5s budget end-to-end.
+    let got_body = loop {
+        match tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("timed out waiting for the inbound snapshot request")
+            .expect("event channel closed")
+        {
+            LinkEvent::Text(env) => break env.body,
+            LinkEvent::Binary { .. } => panic!("snapshot request arrived as binary"),
+            LinkEvent::Connected => continue,
+        }
+    };
+    match got_body {
+        EnvelopeBody::SnapshotRequest { chan } => {
+            assert_eq!(
+                chan, TERM_CHAN_CLAUDE,
+                "channel byte must survive the wire intact"
+            );
+        }
+        other => panic!("expected SnapshotRequest, got {other:?}"),
     }
 
     // Silence the unused-sender lint by holding the cmd_tx alive until the
