@@ -697,19 +697,40 @@ fn match_all_categories(line: &str) -> Vec<CategoryMatch> {
 
 /// Match free-space labels: `Free space: 142.8k (71.4%)` (modern
 /// Claude TUI), the compact-render `Freespace:142.8k(71.4%)`,
+/// Match free-space labels: `Free space: 142.8k (71.4%)` (modern
+/// Claude TUI), the compact-render `Freespace:142.8k(71.4%)`,
 /// or the legacy `Free: 56%`.
+///
+/// The label may be preceded by box-drawing / bar-chart glyphs
+/// in the cleaned line, so we search for the label substring
+/// rather than requiring `line.starts_with(label)`. The
+/// character immediately following the label must be a
+/// separator (`:`, space, or end-of-line) — without that
+/// guard, a stray `Free` substring (e.g. inside another word)
+/// would claim the line.
 fn match_free_space(line: &str) -> Option<f64> {
-    if let Some(rest) = strip_label(line, "Free space") {
-        return parse_pct(rest.trim());
-    }
-    if let Some(rest) = strip_label(line, "Freespace") {
-        return parse_pct(rest.trim());
-    }
-    if let Some(rest) = strip_label(line, "Free") {
+    for label in FREE_SPACE_LABELS {
+        let Some(rel) = line.find(label) else {
+            continue;
+        };
+        let after_rel = rel + label.len();
+        if after_rel < line.len() {
+            let next = line.as_bytes()[after_rel];
+            if next != b':' && next != b' ' {
+                continue;
+            }
+        }
+        let after = &line[after_rel..];
+        let rest = after
+            .strip_prefix(':')
+            .or_else(|| after.strip_prefix(' '))
+            .unwrap_or("");
         return parse_pct(rest.trim());
     }
     None
 }
+
+const FREE_SPACE_LABELS: &[&str] = &["Free space", "Freespace", "Free"];
 
 /// Match a `(P%)` alone on a line — narrow-terminal headline-only
 /// form. Must be the entire content (after trim).
@@ -1169,6 +1190,20 @@ mod tests {
         let bytes = b"Context\nFree: 56%\n";
         let snap = feed_all(&mut p, bytes).expect("snapshot");
         assert_eq!(snap.free_pct, Some(56.0));
+    }
+
+    /// Regression: the legacy `Free space` label missing on a
+    /// compact-render `Freespace` line used to fall through the
+    /// `?` in `match_free_space`'s loop (the first label mismatch
+    /// bailed out of the whole function). Verify the compact
+    /// form sets `free_pct` even though `Free space` is the
+    /// first label probed.
+    #[test]
+    fn feed_recognizes_compact_renders_freespace_label() {
+        let mut p = ContextParser::new();
+        let bytes = "Context\n⏝⏝⏝⏝⏝⏝⏝⏝⏝⏝⏶Freespace:142.8k(71.4%)\n".as_bytes();
+        let snap = feed_all(&mut p, bytes).expect("snapshot");
+        assert_eq!(snap.free_pct, Some(71.4));
     }
 
     #[test]
