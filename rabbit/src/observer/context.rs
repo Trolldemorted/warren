@@ -33,9 +33,32 @@
 //!
 //! Feeding the same byte sequence twice returns the same result.
 //!
+//! ## Architecture
+//!
+//! The parser is layered so each interesting decision is a small,
+//! pure function with a tiny signature:
+//!
+//! - **Layer 1 (ESC stripping)** lives in
+//!   [`crate::observer::text::ansi::strip_ansi_bytes`]. Pure.
+//! - **Layer 2 (line classification)** maps a single cleaned line
+//!   to a [`LineKind`] via [`classify_line`]. Pure.
+//! - **Layer 3 (snapshot reducer)** folds one [`LineKind`] onto
+//!   an existing [`ContextSnapshot`] via [`apply_to_snapshot`].
+//!   Pure.
+//! - **Layer 4 (stateful boundary)** is [`ContextParser`] itself,
+//!   which owns `line_buf` and `trail` for cross-chunk correctness
+//!   and is the only place state lives.
+//!
+//! Adding a new modal shape means writing one new `match_*`
+//! function, adding it to [`classify_line`], adding a new
+//! [`LineKind`] arm, and adding tests. The 100+ LOC `parse_line`
+//! previously responsible for every modal shape is gone.
+//!
 //! [`flush`]: ContextParser::flush
 
 use serde_json::{json, Map, Value};
+
+use crate::observer::text::ansi::strip_ansi_bytes;
 
 /// Context-window usage snapshot parsed from a single `/context`
 /// overlay. All numeric fields are `Option` so the UI can render
@@ -318,191 +341,497 @@ impl ContextParser {
     // --- line parsing ---
 
     fn parse_line(&mut self, raw: &[u8]) {
-        let s = strip_ansi_bytes(raw);
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
+        // Layer 1 (strip ANSI) → Layer 2 (classify) → Layer 3 (reduce).
+        // See the module doc + LineKind docs for the layered contract.
+        let line = strip_ansi_bytes(raw);
+        let kinds = classify_line(&line);
+        if kinds.is_empty() {
             return;
         }
-        // §Context-window: check the compact headline shape
-        // BEFORE the section-header check, because the real
-        // Claude modal paints `Context Usage` and the
-        // bar chart + headline on the SAME visual line —
-        // `Context Usage    ⎁ ⎁ 24.2k/200k tokens (12%)     ⎶ ⎶
-        // Estimated usage by category`. A line that starts
-        // with `Context` is therefore the headline line, not
-        // just a section header. The legacy form below is
-        // preserved for older builds. The headline match
-        // does NOT return — terminal capture joins visual
-        // rows with CR-only, so the same parser line may
-        // also contain the per-category rows that follow
-        // the headline on screen. We fall through to the
-        // category-label loop after populating the
-        // headline fields.
-        let mut headline_matched = false;
-        if let Some((pct, used_str, total_str)) = parse_compact_headline(trimmed) {
-            if self.used_tokens.is_none() {
-                if let Some(n) = parse_compact_number(used_str) {
-                    self.used_tokens = Some(n);
+        // Roll current state into a snapshot so first-wins merge
+        // is honored across all the LineKinds this line yielded.
+        let mut snap = ContextSnapshot {
+            used_tokens: self.used_tokens,
+            total_tokens: self.total_tokens,
+            used_pct: self.used_pct,
+            free_pct: self.free_pct,
+            window_tokens: self.window_tokens,
+            categories: if self.categories_map.is_empty() {
+                None
+            } else {
+                Some(Value::Object(self.categories_map.clone()))
+            },
+            scrape_incomplete: false,
+        };
+        for kind in kinds {
+            if matches!(kind, LineKind::SectionHeader) {
+                self.section = Section::Context;
+            }
+            apply_to_snapshot(&mut snap, kind);
+        }
+        self.used_tokens = snap.used_tokens;
+        self.total_tokens = snap.total_tokens;
+        self.used_pct = snap.used_pct;
+        self.free_pct = snap.free_pct;
+        self.window_tokens = snap.window_tokens;
+        if let Some(Value::Object(obj)) = snap.categories {
+            self.categories_map = obj;
+        }
+    }
+}
+
+// ----- Layer 2 / Layer 3: classification + reducer -----
+
+/// §Parse-layer-2 / a single cleaned modal line's semantic
+/// shape. Output of [`classify_line`], input to
+/// [`apply_to_snapshot`]. Keeping the seven arms explicit (vs.
+/// stuffing the data into a six-tuple or a struct with optional
+/// fields) gives a clean match in [`apply_to_snapshot`] and
+/// makes the test surface per-arm trivial — one test per
+/// variant.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LineKind {
+    /// Claude Code 2.1+ modal headline: `24.2k/200k tokens (12%)`.
+    /// Compact k/m notation, no `Used:` label. The `pct` may be
+    /// `None` when the line has no trailing `(P%)` (rare but
+    /// possible on truncated renders).
+    HeadlineCompact {
+        used: u64,
+        total: u64,
+        pct: Option<f64>,
+    },
+    /// Legacy modal headline: `Used: 87,432 / 200,000 tokens (44%)`
+    /// (with optional comma/grouping and optional `tokens`
+    /// literal). The `total` and `window` may be `None` when the
+    /// line is a partial commit (e.g. `Used: 87,4` mid-stream with
+    /// the slash arriving in the next chunk). `window` is set to
+    /// the K/M-expanded form of `total` when the total carries a
+    /// `K`/`M` suffix (e.g. `200K` → `total=200, window=200_000`).
+    HeadlineLegacy {
+        used: Option<u64>,
+        total: Option<u64>,
+        window: Option<u64>,
+        pct: Option<f64>,
+    },
+    /// Per-category row: `System prompt: 2.9k tokens (1.4%)`.
+    /// The `pct` may be `None` if the row omits the percentage
+    /// (e.g. truncated render).
+    Category {
+        name: String,
+        tokens: u64,
+        pct: Option<f64>,
+    },
+    /// Free-space label: `Free space: 142.8k (71.4%)` or the
+    /// legacy `Free: 56%`. The percentage is mandatory — if
+    /// there's no usable percentage the matcher returns
+    /// `Ignored`.
+    FreeSpace { pct: f64 },
+    /// `(44%)` alone on a line — narrow-terminal headline-only
+    /// form.
+    StandalonePct { pct: f64 },
+    /// `Context Usage` (or `/context`) alone on a line — the
+    /// modal opened. No data commit; just resets internal
+    /// section state to `Context` so subsequent category rows
+    /// are accepted.
+    SectionHeader,
+}
+
+/// §Parse-layer-2 / dispatch a single cleaned modal line to a
+/// (possibly empty) list of [`LineKind`]s. Pure: depends only
+/// on the input text.
+///
+/// The headline forms, free-space, and standalone-pct matchers
+/// are first-wins (at most one match per line). The category
+/// matcher scans the whole line for every recognised label —
+/// Claude's modal paints all category rows on the same visual
+/// line (separated by `⏶` bar-chart glyphs, not `\n`), so a
+/// single line can legitimately surface `System prompt`,
+/// `System tools`, `Memoryfiles`, `Skills`, `Messages`,
+/// `Freespace`, `Autocompact buffer`, … in one pass.
+///
+/// Order of arms matters:
+///
+/// - **Headlines first.** `24.2k/200k tokens (12%)` is matched
+///   before the category scanner so it writes
+///   `used/total/used_pct` rather than getting eaten as a row.
+/// - **Free-space before category.** `Free space: …` contains
+///   the substring `"Free space"` (also a CATEGORY_LABEL); the
+///   free-space matcher must claim it first or `free_pct` is
+///   never populated.
+/// - **Section-header last.** A `Context Usage` row resets
+///   state but doesn't surface data, so it's emitted only if
+///   no data-bearing matcher fired.
+pub(crate) fn classify_line(line: &str) -> Vec<LineKind> {
+    let trimmed = line.trim();
+    let mut out = Vec::new();
+    if trimmed.is_empty() {
+        return out;
+    }
+    if let Some((used, total, pct)) = match_headline_compact(trimmed) {
+        out.push(LineKind::HeadlineCompact { used, total, pct });
+    }
+    if let Some(h) = match_headline_legacy(trimmed) {
+        out.push(LineKind::HeadlineLegacy {
+            used: h.used,
+            total: h.total,
+            window: h.window,
+            pct: h.pct,
+        });
+    }
+    if let Some(pct) = match_free_space(trimmed) {
+        out.push(LineKind::FreeSpace { pct });
+    }
+    // Categories: scan the whole line for every label, since
+    // the modal paints multiple category rows on one visual
+    // line.
+    for cat in match_all_categories(trimmed) {
+        out.push(LineKind::Category {
+            name: cat.name,
+            tokens: cat.tokens,
+            pct: cat.pct,
+        });
+    }
+    if let Some(pct) = match_standalone_pct(trimmed) {
+        out.push(LineKind::StandalonePct { pct });
+    }
+    if matches_section_header(trimmed) {
+        out.push(LineKind::SectionHeader);
+    }
+    out
+}
+
+struct CategoryMatch {
+    name: String,
+    tokens: u64,
+    pct: Option<f64>,
+}
+
+/// Match Claude Code 2.1+ compact headline like
+/// `24.2k/200k tokens (12%)`. Scans the whole line for the
+/// `<num>/<num> tokens (P%)` shape because the real modal paints
+/// the bar chart + headline on the same visual row as section
+/// text + bar glyphs. Returns `(used, total, pct)`; `pct` is
+/// `None` if no `(P%)` suffix.
+fn match_headline_compact(line: &str) -> Option<(u64, u64, Option<f64>)> {
+    let parsed = parse_compact_headline(line)?;
+    let (_, used_str, total_str) = parsed;
+    let used = parse_compact_number(used_str)?;
+    let total = parse_compact_number(total_str)?;
+    // The compact headline parser returned the pct as `Option<f64>`
+    // implicitly via the `(P%)` parsing inside parse_compact_headline.
+    // Re-derive it for the LineKind payload.
+    let pct = parse_pct_for_compact(line);
+    Some((used, total, pct))
+}
+
+/// Match legacy modal headline like
+/// `Used: 87,432 / 200,000 tokens (44%)` (or
+/// `Used 87,432 / 200,000 (44%)` — colon optional,
+/// Parsed `Used:` headline values. Each numeric is
+/// `Option`-wrapped so a *partial* commit (e.g. `Used: 87,4`
+/// arriving across a chunk boundary before the `/<total>` part
+/// arrives) can populate just `used` without overwriting empty
+/// slots with garbage. `window` is the K/M-expanded form of
+/// `total` (e.g. `200K` → `total=200, window=200_000`) — the
+/// original parser preserved this distinction even though it's
+/// semantically odd, and an existing test pins the contract.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LegacyHeadline {
+    used: Option<u64>,
+    total: Option<u64>,
+    window: Option<u64>,
+    pct: Option<f64>,
+}
+
+/// `tokens` literal optional, `,` thousand-separators
+/// optional).
+fn match_headline_legacy(line: &str) -> Option<LegacyHeadline> {
+    // Strip a leading "Used" label if present.
+    let after_label = if let Some(rest) = strip_label(line, "Used") {
+        rest.trim()
+    } else if line.to_ascii_lowercase().starts_with("used ") {
+        &line[4..]
+    } else {
+        return None;
+    };
+    if after_label.is_empty() {
+        return None;
+    }
+    // Pull out the trailing "(P%)" if present.
+    let (without_pct, pct) = if let Some(open) = after_label.find('(') {
+        let close_rel = after_label[open..].find(')');
+        let pct_str = close_rel
+            .map(|c| &after_label[open + 1..open + c])
+            .unwrap_or("");
+        let pct = parse_pct(pct_str.trim());
+        let without = after_label[..open].trim();
+        (without.to_string(), pct)
+    } else {
+        (after_label.trim().to_string(), None)
+    };
+    // Full headline: split on `/`. Both halves may end with
+    // `tokens`. The total may also carry a K/M suffix
+    // (`200K`, `1M`) which the original parser treated as a
+    // window label distinct from the raw integer.
+    if let Some(slash_rel) = without_pct.find('/') {
+        let used_str = without_pct[..slash_rel]
+            .trim()
+            .trim_end_matches("tokens")
+            .trim();
+        let total_str = without_pct[slash_rel + 1..]
+            .trim()
+            .trim_end_matches("tokens")
+            .trim();
+        let used = parse_token_int(used_str.as_bytes())?;
+        let total = parse_token_int(total_str.as_bytes())?;
+        let window = parse_window_label(total_str).unwrap_or(total);
+        return Some(LegacyHeadline {
+            used: Some(used),
+            total: Some(total),
+            window: Some(window),
+            pct,
+        });
+    }
+    // Partial commit: `Used: <digits>` with the `/<total>`
+    // half not yet arrived. Surface the used side so a
+    // cross-chunk straddle doesn't lose the value the parser
+    // already saw.
+    let used = parse_token_int(without_pct.as_bytes())?;
+    Some(LegacyHeadline {
+        used: Some(used),
+        total: None,
+        window: None,
+        pct,
+    })
+}
+
+/// Match every per-category row on a single line. Returns
+/// multiple [`CategoryMatch`]es because Claude's modal paints
+/// all category rows on the same visual line — separated by
+/// `⏶` bar-chart glyphs and spaces, not `\n`. Walks the line
+/// forward label-by-label: after each match, advances past the
+/// percentage's closing `)` (or past the `tokens` literal if
+/// no percentage is present) before searching for the next
+/// label.
+///
+/// Each label requires a separator (`:`, space, or end of
+/// line) immediately after it. The strict check prevents the
+/// shorter `"Memory"` label from greedily matching
+/// `"Memoryfiles:..."` — the real Claude TUI renders the
+/// compact form with no space, so we list both forms in
+/// [`CATEGORY_LABELS`] and let each form claim its own row.
+fn match_all_categories(line: &str) -> Vec<CategoryMatch> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while cursor < line.len() {
+        // Find the earliest label occurrence at-or-after
+        // `cursor`. When two labels start at the same byte
+        // (e.g. `Memory` vs `Memoryfiles`), the LONGER label
+        // wins so the strict-separator check below doesn't
+        // reject the compact-render form on a `:` boundary
+        // just because its shorter prefix sat there first.
+        let mut best: Option<(usize, &str)> = None;
+        for label in CATEGORY_LABELS {
+            let haystack = &line[cursor..];
+            if let Some(rel) = haystack.find(label) {
+                let abs = cursor + rel;
+                let pick = match best {
+                    None => true,
+                    Some((best_abs, best_label)) => {
+                        abs < best_abs || (abs == best_abs && label.len() > best_label.len())
+                    }
+                };
+                if pick {
+                    best = Some((abs, label));
                 }
             }
-            if self.total_tokens.is_none() {
-                if let Some(n) = parse_compact_number(total_str) {
-                    self.total_tokens = Some(n);
+        }
+        let Some((abs, label)) = best else {
+            break;
+        };
+        let after_rel = abs + label.len();
+        // Require a separator immediately after the label.
+        if after_rel < line.len() {
+            let next = line.as_bytes()[after_rel];
+            if next != b':' && next != b' ' {
+                cursor = abs + 1;
+                continue;
+            }
+        }
+        let after = &line[after_rel..];
+        let body = after
+            .strip_prefix(':')
+            .or_else(|| after.strip_prefix(' '))
+            .unwrap_or("");
+        // Scope token + pct extraction to this row only — the
+        // line may carry several category rows glued together
+        // by bar-chart glyphs, and a naive parse_pct over the
+        // full body would find the LAST `(P%)` group rather
+        // than the one that belongs to the current row.
+        let row_end = body.find(')').map(|c| c + 1).unwrap_or(body.len());
+        let row = &body[..row_end];
+        let tokens_str = row.trim_start();
+        let Some(tokens) = parse_compact_token_count(tokens_str) else {
+            // Failed to parse — advance one byte and try again
+            // so we don't get stuck on a misfire.
+            cursor = abs + 1;
+            continue;
+        };
+        let pct = parse_pct(row);
+        out.push(CategoryMatch {
+            name: label.to_string(),
+            tokens,
+            pct,
+        });
+        // Advance past the row: jump to just after the
+        // percentage's closing `)` if present, otherwise past
+        // the body. Either way the next iteration starts at a
+        // boundary that can't overlap the row we just
+        // consumed.
+        // `body` starts at absolute offset `after_rel + 1`
+        // (one separator byte was stripped).
+        cursor = after_rel + 1 + row_end;
+    }
+    out
+}
+
+/// Match free-space labels: `Free space: 142.8k (71.4%)` (modern
+/// Claude TUI), the compact-render `Freespace:142.8k(71.4%)`,
+/// or the legacy `Free: 56%`.
+fn match_free_space(line: &str) -> Option<f64> {
+    if let Some(rest) = strip_label(line, "Free space") {
+        return parse_pct(rest.trim());
+    }
+    if let Some(rest) = strip_label(line, "Freespace") {
+        return parse_pct(rest.trim());
+    }
+    if let Some(rest) = strip_label(line, "Free") {
+        return parse_pct(rest.trim());
+    }
+    None
+}
+
+/// Match a `(P%)` alone on a line — narrow-terminal headline-only
+/// form. Must be the entire content (after trim).
+fn match_standalone_pct(line: &str) -> Option<f64> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        parse_pct(inner)
+    } else {
+        None
+    }
+}
+
+/// Match `Context Usage` (with or without leading `⏵ ` glyph
+/// residue) or `/context` alone on a line. Returns true when
+/// the line is recognizably the modal-header marker.
+fn matches_section_header(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("Context") || trimmed.starts_with("/context")
+}
+
+/// §Parse-layer-3 / fold a single classified line onto a
+/// snapshot. First-wins semantics: any `Some` field already
+/// populated is preserved; new values populate empty slots.
+/// Mutates `snap` in place. Pure apart from the mutation — no
+/// I/O, no global state.
+pub(crate) fn apply_to_snapshot(snap: &mut ContextSnapshot, kind: LineKind) {
+    use LineKind::*;
+    match kind {
+        HeadlineCompact { used, total, pct } => {
+            if snap.used_tokens.is_none() {
+                snap.used_tokens = Some(used);
+            }
+            if snap.total_tokens.is_none() {
+                snap.total_tokens = Some(total);
+            }
+            if snap.window_tokens.is_none() {
+                snap.window_tokens = Some(total);
+            }
+            if let Some(p) = pct {
+                if snap.used_pct.is_none() {
+                    snap.used_pct = Some(p);
                 }
             }
-            if self.window_tokens.is_none() {
-                if let Some(n) = parse_compact_number(total_str) {
-                    self.window_tokens = Some(n);
+        }
+        HeadlineLegacy {
+            used,
+            total,
+            window,
+            pct,
+        } => {
+            // Legacy form: each numeric is Option-wrapped so a
+            // partial commit (only `used` populated, `/<total>`
+            // still pending across a chunk boundary) doesn't
+            // stamp a 0 into the total/window slots.
+            if let Some(u) = used {
+                if snap.used_tokens.is_none() {
+                    snap.used_tokens = Some(u);
+                }
+            }
+            if let Some(t) = total {
+                if snap.total_tokens.is_none() {
+                    snap.total_tokens = Some(t);
+                }
+            }
+            if let Some(w) = window {
+                if snap.window_tokens.is_none() {
+                    snap.window_tokens = Some(w);
                 }
             }
             if let Some(p) = pct {
-                if self.used_pct.is_none() {
-                    self.used_pct = Some(p);
-                }
-            }
-            headline_matched = true;
-        }
-        if headline_matched {
-            // Mark the section context — the rest of the
-            // line may also contain `System prompt:` /
-            // `Tools:` category rows.
-            self.section = Section::Context;
-        }
-
-        // Section headers. Skip if the headline match already
-        // ran — that line is the headline line, not just a
-        // section header, and we want to fall through to the
-        // category-label loop below.
-        if !headline_matched && (trimmed.starts_with("/context") || trimmed.starts_with("Context"))
-        {
-            self.section = Section::Context;
-            return;
-        }
-
-        // "Used: N / M tokens (P%)" or any of the variants.
-        if let Some(rest) = strip_label(trimmed, "Used") {
-            self.parse_used_line(rest);
-            return;
-        }
-
-        // "Free space: 142.8k (71.4%)" — Claude Code 2.1+ uses
-        // "Free space" rather than the legacy "Free".
-        if let Some(rest) = strip_label(trimmed, "Free space") {
-            if let Some(pct) = parse_pct(rest) {
-                if self.free_pct.is_none() {
-                    self.free_pct = Some(pct);
-                }
-            }
-            return;
-        }
-
-        // "Free: P%"
-        if let Some(rest) = strip_label(trimmed, "Free") {
-            if let Some(pct) = parse_pct(rest) {
-                if self.free_pct.is_none() {
-                    self.free_pct = Some(pct);
-                }
-            }
-            return;
-        }
-
-        // Standalone "(P%)" after a Context header — some terminal
-        // widths render only the percentage without the
-        // `Used: ... / ...` line.
-        if trimmed.starts_with('(') && trimmed.ends_with(')') {
-            let inner = &trimmed[1..trimmed.len() - 1];
-            if let Some(pct) = parse_pct(inner) {
-                if self.used_pct.is_none() {
-                    self.used_pct = Some(pct);
-                }
-            }
-            return;
-        }
-
-        // Per-category rows. Scan for ANY occurrence of a
-        // category label in the line, not just at the
-        // start — Claude TUI bundles multiple visual rows on
-        // one parser line (CR-only line terminators are
-        // stripped to LF, so the headline row and the
-        // per-category rows below it share a single `\n`-
-        // delimited line). First-wins merge keeps already-
-        // populated values.
-        for label in CATEGORY_LABELS {
-            if let Some(rel) = trimmed.find(label) {
-                let after = &trimmed[rel + label.len()..];
-                let rest = after
-                    .strip_prefix(':')
-                    .or_else(|| after.strip_prefix(' '))
-                    .or_else(|| after.strip_prefix("  "));
-                if let Some(rest) = rest {
-                    let key = normalize_category_key(label);
-                    if let Some(n) = parse_compact_token_count(rest.trim()) {
-                        self.categories_map.entry(key).or_insert(json!(n));
-                    } else if let Some(n) = parse_token_int(rest.trim().as_bytes()) {
-                        self.categories_map.entry(key).or_insert(json!(n));
-                    } else if !rest.trim().is_empty() {
-                        self.categories_map.entry(key).or_insert(json!(rest.trim()));
-                    }
+                if snap.used_pct.is_none() {
+                    snap.used_pct = Some(p);
                 }
             }
         }
+        Category { name, tokens, pct } => {
+            let key = normalize_category_key(&name);
+            let map = snap
+                .categories
+                .get_or_insert_with(|| Value::Object(Map::new()));
+            if let Value::Object(obj) = map {
+                obj.entry(key).or_insert(json!(tokens));
+            }
+            // Per-category percentages aren't surfaced on the
+            // wire today; we keep the field available for a
+            // future "expand categories" affordance.
+            let _ = pct;
+        }
+        FreeSpace { pct } => {
+            if snap.free_pct.is_none() {
+                snap.free_pct = Some(pct);
+            }
+        }
+        StandalonePct { pct } => {
+            if snap.used_pct.is_none() {
+                snap.used_pct = Some(pct);
+            }
+        }
+        SectionHeader => {}
     }
+}
 
-    fn parse_used_line(&mut self, rest: &str) {
-        // Pull out the trailing "(P%)" if present.
-        let (without_pct, pct) = if let Some(open) = rest.find('(') {
-            let close = rest[open..].find(')').map(|c| open + c);
-            let pct_str = rest
-                .get(open + 1..close.unwrap_or(rest.len()))
-                .unwrap_or("");
-            let pct = parse_pct(pct_str.trim());
-            let without = rest[..open].trim();
-            (without.to_string(), pct)
-        } else {
-            (rest.trim().to_string(), None)
-        };
-
-        // Split on "/" — left side is used, right side is total.
-        let parts: Vec<&str> = without_pct.splitn(2, '/').collect();
-        if parts.len() == 2 {
-            let used_str = parts[0].trim().trim_end_matches("tokens").trim();
-            let total_str = parts[1].trim().trim_end_matches("tokens").trim();
-            if self.used_tokens.is_none() {
-                if let Some(n) = parse_token_int(used_str.as_bytes()) {
-                    self.used_tokens = Some(n);
-                }
-            }
-            if self.total_tokens.is_none() {
-                if let Some(n) = parse_token_int(total_str.as_bytes()) {
-                    self.total_tokens = Some(n);
-                }
-                if let Some(window) = parse_window_label(total_str) {
-                    if self.window_tokens.is_none() {
-                        self.window_tokens = Some(window);
-                    }
-                }
-            }
-        } else {
-            // No slash — try to set just used_tokens from the
-            // digits in the line.
-            if self.used_tokens.is_none() {
-                if let Some(n) = parse_token_int(parts[0].trim().as_bytes()) {
-                    self.used_tokens = Some(n);
-                }
-            }
-        }
-
-        if let Some(pct) = pct {
-            if self.used_pct.is_none() {
-                self.used_pct = Some(pct);
-            }
-        }
+/// §Parse-layer-2 helper / extract the trailing `(P%)` from
+/// a compact-headline line if present. Used by
+/// [`match_headline_compact`] to populate the `pct` field on
+/// the [`LineKind::HeadlineCompact`] arm.
+fn parse_pct_for_compact(line: &str) -> Option<f64> {
+    let tokens_suffix = " tokens";
+    let idx = line.find(tokens_suffix)?;
+    let tail = line[idx + tokens_suffix.len()..].trim_start();
+    if tail.starts_with('(') {
+        tail.find(')').and_then(|close| parse_pct(&tail[1..close]))
+    } else {
+        None
     }
 }
 
 // ----- constants -----
 
 const CATEGORY_LABELS: &[&str] = &[
+    // Spaced forms (legacy modal text):
     "System prompt",
     "System tools",
     "Tools",
@@ -517,6 +846,14 @@ const CATEGORY_LABELS: &[&str] = &[
     "Auto-compact buffer",
     "Auto-compact window",
     "Free",
+    // Compact-render forms emitted by Claude Code 2.1+ when
+    // the modal is painted tightly. The strict-separator check
+    // in [`match_category`] keeps the `"Memory"` label from
+    // greedily matching `"Memoryfiles:..."` — each compact form
+    // has to claim its own line.
+    "Memoryfiles",
+    "Freespace",
+    "Autocompactbuffer",
 ];
 
 // ----- free fns -----
@@ -566,41 +903,46 @@ fn parse_pct(s: &str) -> Option<f64> {
     // embeds the percentage inside parens after a compact
     // token count. When the input ends in `)`, pull the
     // inner digits-and-dot string from the trailing `(...)`.
-    // If the input does NOT end in `)`, the caller has
-    // already stripped the outer parens — just trim `%`
-    // and parse.
-    let s = if s.ends_with(')') {
-        if let Some(open) = s.rfind('(') {
-            &s[open + 1..s.len() - 1]
-        } else {
-            s
-        }
-    } else {
-        s
-    };
-    let s = s.trim().trim_end_matches('%').trim();
-    s.parse().ok()
+    if s.ends_with(')') {
+        let open = s.rfind('(')?;
+        let inner = &s[open + 1..s.len() - 1];
+        return inner.trim().trim_end_matches('%').trim().parse().ok();
+    }
+    // Otherwise the caller has already stripped the outer
+    // parens and the input should carry a literal `%`
+    // suffix. Without one, the input is a token count (e.g.
+    // `1234` or `16.9k`), not a percentage — return None so
+    // the caller doesn't mistake a token count for a pct.
+    if !s.contains('%') {
+        return None;
+    }
+    s.trim_end_matches('%').trim().parse().ok()
 }
 
+/// §Context-window: detect the optional `Nk` / `Nm` window-label
+/// suffix on a total like `200K` or `1M`. Returns the expanded
+/// integer (`k` → ×1_000, `m` → ×1_000_000). Returns `None` when
+/// the total is plain digits (no suffix) — in that case the
+/// caller should use the raw total as the window value.
+#[allow(dead_code)]
 fn parse_window_label(s: &str) -> Option<u64> {
-    // Look for a token like `200K` or `1M` and convert.
-    let mut chars = s.chars().peekable();
-    let mut digits = String::new();
-    while let Some(&c) = chars.peek() {
-        if c.is_ascii_digit() {
-            digits.push(c);
-            chars.next();
-        } else {
-            break;
-        }
+    let s = s.trim().trim_start_matches('~').trim();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+        i += 1;
     }
-    let suffix = chars.next()?;
-    let base: u64 = digits.parse().ok()?;
-    match suffix {
-        'K' | 'k' => Some(base.saturating_mul(1_000)),
-        'M' | 'm' => Some(base.saturating_mul(1_000_000)),
-        _ => None,
+    if i == 0 {
+        return None;
     }
+    let (num_str, suffix) = s.split_at(i);
+    let num: f64 = num_str.parse().ok()?;
+    let multiplier: f64 = match suffix.trim().to_ascii_lowercase().as_str() {
+        "k" => 1_000.0,
+        "m" => 1_000_000.0,
+        _ => return None,
+    };
+    Some((num * multiplier).round() as u64)
 }
 
 /// §Context-window: parse a compact token-count form like
@@ -638,11 +980,35 @@ fn parse_compact_number(s: &str) -> Option<u64> {
 /// the right side of a category line. Returns the integer
 /// token count, ignoring any trailing `(P%)` and any leading
 /// `~` (approximate-count prefix used for per-file rows).
+///
+/// The modern Claude TUI renders category rows tightly —
+/// `33ktokens(16.5%)` — so we cannot rely on a whitespace
+/// boundary between the number and the literal `tokens`. We
+/// walk the leading run of digits/dots and accept an optional
+/// single `k`/`m` suffix character; everything after that
+/// (including the `tokens` literal and the trailing `(P%)`)
+/// is ignored.
 fn parse_compact_token_count(s: &str) -> Option<u64> {
-    let s = s.trim();
-    // Take the first whitespace-delimited token (e.g. `2.9k`).
-    let first = s.split_whitespace().next()?;
-    parse_compact_number(first)
+    let s = s.trim().trim_start_matches('~');
+    if s.is_empty() {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+        i += 1;
+    }
+    if i == 0 {
+        return None;
+    }
+    let (num_str, suffix_start) = s.split_at(i);
+    let num: f64 = num_str.parse().ok()?;
+    let multiplier: f64 = match suffix_start.chars().next() {
+        Some('k') | Some('K') => 1_000.0,
+        Some('m') | Some('M') => 1_000_000.0,
+        _ => 1.0,
+    };
+    Some((num * multiplier).round() as u64)
 }
 
 /// §Context-window: detect the canonical Claude TUI `/context`
@@ -759,63 +1125,6 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-fn strip_ansi_bytes(buf: &[u8]) -> String {
-    let mut out = String::with_capacity(buf.len());
-    let bytes: Vec<u8> = buf.to_vec();
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == 0x1b {
-            if i + 1 >= bytes.len() {
-                break;
-            }
-            match bytes[i + 1] {
-                b'[' => {
-                    i += 2;
-                    let start = i;
-                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                        i += 1;
-                    }
-                    if i < bytes.len() {
-                        i += 1;
-                    } else {
-                        i = start;
-                    }
-                }
-                b']' => {
-                    i += 2;
-                    while i < bytes.len() && bytes[i] != 0x07 && bytes[i] != 0x1b {
-                        i += 1;
-                    }
-                    if i < bytes.len() && bytes[i] == 0x1b {
-                        i += 1;
-                    }
-                    if i < bytes.len() && bytes[i] == 0x07 {
-                        i += 1;
-                    }
-                }
-                _ => {
-                    i += 2;
-                }
-            }
-        } else if b.is_ascii_graphic() || b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
-            out.push(b as char);
-            i += 1;
-        } else if b >= 0x80 {
-            let start = i;
-            while i < bytes.len() && bytes[i] >= 0x80 {
-                i += 1;
-            }
-            if let Ok(s) = std::str::from_utf8(&bytes[start..i]) {
-                out.push_str(s);
-            }
-        } else {
-            i += 1;
-        }
-    }
-    out
 }
 
 // ----- tests -----
@@ -1213,5 +1522,365 @@ mod tests {
             json!(16_900),
             "system_tools category must be parsed from the same row"
         );
+    }
+
+    // ---- Layer 2 / classify_line arms ----
+    //
+    // classify_line now returns Vec<LineKind> because Claude's
+    // modal paints several category rows on the same visual
+    // line (separated by bar-chart glyphs, not \n). Tests
+    // that expect a single-kind classification therefore
+    // assert `kinds[0]`; tests that expect multi-match assert
+    // the whole Vec.
+
+    fn first_kind(line: &str) -> Option<LineKind> {
+        let kinds = classify_line(line);
+        kinds.into_iter().next()
+    }
+
+    #[test]
+    fn classify_headline_compact_extracts_24k_200k_12pct() {
+        let kinds = classify_line("24.2k/200k tokens (12%)");
+        assert_eq!(
+            kinds.first(),
+            Some(&LineKind::HeadlineCompact {
+                used: 24_200,
+                total: 200_000,
+                pct: Some(12.0),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_headline_compact_handles_decimal_k_suffix() {
+        let kinds = classify_line("1.5k/200k tokens (1%)");
+        assert_eq!(
+            kinds.first(),
+            Some(&LineKind::HeadlineCompact {
+                used: 1_500,
+                total: 200_000,
+                pct: Some(1.0),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_headline_compact_handles_m_suffix() {
+        let kinds = classify_line("1.5m/2m tokens (75%)");
+        assert_eq!(
+            kinds.first(),
+            Some(&LineKind::HeadlineCompact {
+                used: 1_500_000,
+                total: 2_000_000,
+                pct: Some(75.0),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_headline_compact_with_no_pct_when_label_omitted() {
+        let kinds = classify_line("24.2k/200k tokens");
+        assert_eq!(
+            kinds.first(),
+            Some(&LineKind::HeadlineCompact {
+                used: 24_200,
+                total: 200_000,
+                pct: None,
+            })
+        );
+    }
+
+    #[test]
+    fn classify_headline_legacy_with_commas() {
+        let kinds = classify_line("Used: 87,432 / 200,000 tokens (44%)");
+        assert_eq!(
+            kinds.first(),
+            Some(&LineKind::HeadlineLegacy {
+                used: Some(87_432),
+                total: Some(200_000),
+                window: Some(200_000),
+                pct: Some(44.0),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_headline_legacy_without_tokens_literal() {
+        let kinds = classify_line("Used: 87432 / 200000 (44%)");
+        assert_eq!(
+            kinds.first(),
+            Some(&LineKind::HeadlineLegacy {
+                used: Some(87_432),
+                total: Some(200_000),
+                window: Some(200_000),
+                pct: Some(44.0),
+            })
+        );
+    }
+
+    #[test]
+    fn classify_category_system_prompt() {
+        let kinds = classify_line("System prompt: 1234");
+        assert_eq!(
+            kinds.first(),
+            Some(&LineKind::Category {
+                name: "System prompt".to_string(),
+                tokens: 1234,
+                pct: None,
+            })
+        );
+    }
+
+    #[test]
+    fn classify_category_compact_render_merges_with_neighbors() {
+        // The real Claude modal paints several category rows on
+        // the same visual line — they should ALL be extracted
+        // from one classify_line call.
+        let kinds = classify_line(
+            "System prompt: 2.9k tokens (1.4%)   System tools: 16.9k tokens (8.4%)\
+             Memoryfiles:2.8k tokens (1.4%)",
+        );
+        assert_eq!(
+            kinds.len(),
+            3,
+            "expected three Category kinds, got {kinds:?}"
+        );
+        assert_eq!(
+            kinds[0],
+            LineKind::Category {
+                name: "System prompt".to_string(),
+                tokens: 2_900,
+                pct: Some(1.4),
+            }
+        );
+        assert_eq!(
+            kinds[1],
+            LineKind::Category {
+                name: "System tools".to_string(),
+                tokens: 16_900,
+                pct: Some(8.4),
+            }
+        );
+        assert_eq!(
+            kinds[2],
+            LineKind::Category {
+                name: "Memoryfiles".to_string(),
+                tokens: 2_800,
+                pct: Some(1.4),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_free_space_with_k_value_and_parenthesized_pct() {
+        let kinds = classify_line("Free space: 142.8k (71.4%)");
+        assert_eq!(kinds.first(), Some(&LineKind::FreeSpace { pct: 71.4 }));
+    }
+
+    #[test]
+    fn classify_free_legacy_short_form() {
+        let kinds = classify_line("Free: 56%");
+        assert_eq!(kinds.first(), Some(&LineKind::FreeSpace { pct: 56.0 }));
+    }
+
+    #[test]
+    fn classify_standalone_pct_round_trip() {
+        let kinds = classify_line("(44%)");
+        assert_eq!(kinds.first(), Some(&LineKind::StandalonePct { pct: 44.0 }));
+    }
+
+    #[test]
+    fn classify_section_header_context_usage_alone() {
+        let kinds = classify_line("Context Usage");
+        assert_eq!(kinds.first(), Some(&LineKind::SectionHeader));
+    }
+
+    #[test]
+    fn classify_returns_empty_vec_for_unrelated_line() {
+        // classify_line now returns Vec<LineKind> rather than a
+        // single Ignored variant — an unrelated line just
+        // produces an empty Vec.
+        assert!(classify_line("hello world").is_empty());
+        assert!(classify_line("").is_empty());
+        assert!(classify_line("   ").is_empty());
+    }
+
+    // ---- Layer 3 / apply_to_snapshot reducer semantics ----
+
+    #[test]
+    fn apply_headline_first_wins_does_not_overwrite_set_used_tokens() {
+        let mut snap = ContextSnapshot {
+            used_tokens: Some(100),
+            ..Default::default()
+        };
+        apply_to_snapshot(
+            &mut snap,
+            LineKind::HeadlineCompact {
+                used: 200,
+                total: 999,
+                pct: Some(99.0),
+            },
+        );
+        assert_eq!(snap.used_tokens, Some(100));
+        assert_eq!(snap.total_tokens, Some(999));
+        assert_eq!(snap.used_pct, Some(99.0));
+    }
+
+    #[test]
+    fn apply_two_categories_carry_distinct_keys() {
+        let mut snap = ContextSnapshot::default();
+        apply_to_snapshot(
+            &mut snap,
+            LineKind::Category {
+                name: "System prompt".to_string(),
+                tokens: 1234,
+                pct: None,
+            },
+        );
+        apply_to_snapshot(
+            &mut snap,
+            LineKind::Category {
+                name: "Tools".to_string(),
+                tokens: 5678,
+                pct: None,
+            },
+        );
+        let cats = snap.categories.expect("categories map");
+        assert_eq!(cats["system_prompt"], json!(1234));
+        assert_eq!(cats["tools"], json!(5678));
+    }
+
+    #[test]
+    fn apply_category_with_existing_key_does_not_overwrite() {
+        let mut snap = ContextSnapshot::default();
+        apply_to_snapshot(
+            &mut snap,
+            LineKind::Category {
+                name: "Tools".to_string(),
+                tokens: 100,
+                pct: None,
+            },
+        );
+        apply_to_snapshot(
+            &mut snap,
+            LineKind::Category {
+                name: "Tools".to_string(),
+                tokens: 999,
+                pct: None,
+            },
+        );
+        let cats = snap.categories.expect("categories map");
+        assert_eq!(cats["tools"], json!(100));
+    }
+
+    #[test]
+    fn apply_freespace_does_not_overwrite_pct_already_set() {
+        let mut snap = ContextSnapshot {
+            free_pct: Some(50.0),
+            ..Default::default()
+        };
+        apply_to_snapshot(&mut snap, LineKind::FreeSpace { pct: 99.0 });
+        assert_eq!(snap.free_pct, Some(50.0));
+    }
+
+    #[test]
+    fn apply_section_header_is_noop() {
+        let mut snap = ContextSnapshot::default();
+        apply_to_snapshot(&mut snap, LineKind::SectionHeader);
+        assert!(snap.is_empty());
+    }
+
+    // ---- Layer 4 / chunk boundary ----
+
+    #[test]
+    fn feed_idempotent_when_refed_same_chunk_twice() {
+        let mut p = ContextParser::new();
+        let chunk = b"Context\n24.2k/200k tokens (12%)\n";
+        let snap1 = feed_all(&mut p, chunk).expect("first feed");
+        let snap2 = feed_all(&mut p, chunk).expect("second feed");
+        assert_eq!(snap1.used_tokens, snap2.used_tokens);
+        assert_eq!(snap1.total_tokens, snap2.total_tokens);
+        assert_eq!(snap1.used_pct, snap2.used_pct);
+    }
+
+    #[test]
+    fn feed_commutative_for_disjoint_chunks() {
+        // `feed(a ++ b)` and `feed(a); feed(b)` should produce
+        // the same snapshot when neither `a` nor `b` ends
+        // mid-line. The byte-level split inside one line would
+        // require cross-chunk reassembly; this test only
+        // asserts the new-line-aligned split case.
+        let a: &[u8] = b"Context\n24.2k/200k tokens (12%)\n";
+        let b: &[u8] = b"Free space: 142.8k (71.4%)\n";
+        let mut merged = a.to_vec();
+        merged.extend_from_slice(b);
+        let mut p1 = ContextParser::new();
+        let snap1 = feed_all(&mut p1, &merged).expect("merged feed");
+        let mut p2 = ContextParser::new();
+        let _ = feed_all(&mut p2, a);
+        let snap2 = feed_all(&mut p2, b).expect("split feed");
+        assert_eq!(snap1.used_tokens, snap2.used_tokens);
+        assert_eq!(snap1.total_tokens, snap2.total_tokens);
+        assert_eq!(snap1.used_pct, snap2.used_pct);
+        assert_eq!(snap1.free_pct, snap2.free_pct);
+    }
+
+    #[test]
+    fn feed_does_not_panic_on_random_bytes() {
+        // Fuzz-style sweep over a handful of varied byte
+        // sequences. The parser must never panic on any of
+        // them; we only assert that it terminates and produces
+        // a parseable snapshot.
+        let seeds: &[&[u8]] = &[
+            b"",
+            b"\n",
+            b"\x1b[?1049l",
+            b"\x1b]0;title\x07",
+            b"\xe2\x9b\xb6\xe2\x9b\x81", // ⏶⏁ bar-chart glyphs
+            b"Used: 87,432 / 200,000 tokens (44%)",
+            b"System prompt: 2.9k tokens (1.4%)",
+            b"\x1b[31mUsed: 100\x1b[0m / 200 (50%)",
+            b"foo bar baz\n",
+            b"((((((((((",
+            b"//////////",
+            b"$$$$$$$$$$",
+            b"\xff\xfe\xfd\xfc",
+            b"0\x1b[1m\x1b[31m",
+        ];
+        for bytes in seeds {
+            let mut p = ContextParser::new();
+            for chunk in bytes.chunks(7) {
+                let _ = p.feed(chunk);
+            }
+            let _ = p.flush();
+        }
+    }
+
+    #[test]
+    fn feed_incomplete_escape_at_chunk_tail_is_carried_over() {
+        // Chunk ends with `ESC [` but no final byte — the
+        // stripper keeps the ESC bytes for the next chunk's
+        // prefix. We only assert the parser doesn't crash and
+        // surfaces *some* snapshot when the next chunk
+        // completes the sequence.
+        let mut p = ContextParser::new();
+        let _ = p.feed(b"Context\n\x1b[");
+        let snap = p
+            .feed(b"31m24.2k/200k tokens (12%)\x1b[0m\n")
+            .or_else(|| p.flush())
+            .expect("second chunk completes the escape");
+        assert_eq!(snap.used_tokens, Some(24_200));
+        assert_eq!(snap.total_tokens, Some(200_000));
+        assert_eq!(snap.used_pct, Some(12.0));
+    }
+
+    // ---- Final cross-check: line-mode edge cases ----
+
+    #[test]
+    fn first_kind_helper_returns_none_for_empty_vec() {
+        // Helper for the new Vec return type — empty input
+        // must yield None for the first-kind convenience.
+        assert!(first_kind("").is_none());
+        assert!(first_kind("unrelated prose").is_none());
     }
 }

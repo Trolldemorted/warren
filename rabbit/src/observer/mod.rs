@@ -2,6 +2,7 @@ pub mod context;
 pub mod hooks;
 pub mod limits;
 pub mod state;
+pub mod text;
 pub mod transcript;
 
 use parking_lot::RwLock;
