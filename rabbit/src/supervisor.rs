@@ -3415,4 +3415,123 @@ mod tests {
         assert!(!inc, "fully-populated parse is not incomplete");
         assert!(abort, "writer preemption flips scrape_aborted");
     }
+
+    // §Context-window end-to-end: drives `run_context_scrape`
+    // against a fake TUI that emits a synthetic `/context` modal
+    // payload. This is the contract the live UI button relies on
+    // — if the parser regresses OR if the supervisor's
+    // subscribe-then-write / writer.sequence / drain_one_window
+    // choreography leaks frames, this test fails. Synthesizes a
+    // minimal modal: compact headline, two category rows, free
+    // space with the compact-render `Freespace` form (no space)
+    // that was the original bug. Assertion is strict: every
+    // primary field must populate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn run_context_scrape_populates_all_fields_on_captured_modal() {
+        use crate::pty::Pty;
+        use crate::pty_writer::spawn_pty_writer;
+        use std::io::Read;
+
+        // Fixture: a minimal but realistic /context modal in the
+        // compact-render form Claude Code 2.1+ uses. Bytes include
+        // ANSI escapes (CSI G cursor positioning, SGR colors, OSC
+        // window title reset) so the stripper + classifier hit the
+        // same code paths as a live capture.
+        let modal = b"\
+\x1b]0;title\x07\
+Context\n\
+\x1b[38;5;246m~\x1b[39m 24.2k/200k tokens (12%)\n\
+\x1b[38;5;246m~\x1b[39m System prompt: 2.9k tokens (1.4%)\n\
+\x1b[38;5;246m~\x1b[39m System tools: 16.9k tokens (8.4%)\n\
+\x1b[38;5;246m~~~\x1b[39m Freespace:142.8k(71.4%)\n";
+
+        // Write the fixture to a tempfile so `cat` can emit it. Use
+        // a deterministic path under /tmp so the shell command we
+        // build is straightforward.
+        let fixture_path = std::env::temp_dir().join("rabbit_run_context_scrape_fixture.bin");
+        std::fs::write(&fixture_path, modal).expect("write fixture");
+
+        let shell_arg = format!("cat {}", fixture_path.display());
+        let pty =
+            Pty::spawn("/bin/sh", &["-c".into(), shell_arg], "/tmp", 120, 40, 0).expect("spawn sh");
+
+        let mut reader = pty.reader();
+        let writer_pty = pty.writer();
+
+        let writer_handle = spawn_pty_writer(Box::new(writer_pty), None);
+
+        let (term_bcast_tx, _ignored_rx) =
+            tokio::sync::broadcast::channel::<crate::supervisor::TermFrame>(64);
+
+        let vt: Arc<parking_lot::Mutex<crate::vt::TermTracker>> = Arc::new(
+            parking_lot::Mutex::new(crate::vt::TermTracker::new(120, 40, 5_000)),
+        );
+        let next_seq: Arc<std::sync::atomic::AtomicU64> =
+            Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+        let bcast_for_reader = term_bcast_tx.clone();
+        let vt_for_reader = vt.clone();
+        let next_seq_for_reader = next_seq.clone();
+        let reader_join = std::thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let seq =
+                            next_seq_for_reader.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        vt_for_reader.lock().feed(&buf[..n]);
+                        let _ = bcast_for_reader.send(crate::supervisor::TermFrame {
+                            chan: rabbit_lib::wire::TERM_CHAN_CLAUDE,
+                            seq,
+                            data: buf[..n].to_vec(),
+                        });
+                    }
+                }
+            }
+        });
+
+        let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<LinkCmd>(8);
+
+        let (snap, aborted) =
+            run_context_scrape(writer_handle, term_bcast_tx, vt, next_seq, cmd_tx).await;
+
+        drop(pty);
+        let _ = reader_join.join();
+        let _ = std::fs::remove_file(&fixture_path);
+
+        assert!(
+            !aborted,
+            "writer was not interrupted, aborted must be false"
+        );
+        assert_eq!(
+            snap.used_tokens,
+            Some(24200),
+            "headline compact form must populate used_tokens"
+        );
+        assert_eq!(
+            snap.total_tokens,
+            Some(200000),
+            "headline compact form must populate total_tokens"
+        );
+        assert_eq!(
+            snap.used_pct,
+            Some(12.0),
+            "headline compact form must populate used_pct"
+        );
+        assert_eq!(
+            snap.free_pct,
+            Some(71.4),
+            "Freespace (compact-render, no space) must populate free_pct"
+        );
+        assert!(
+            snap.categories
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .map(|o| o.contains_key("system_prompt") && o.contains_key("system_tools"))
+                .unwrap_or(false),
+            "category rows must populate categories map; got: {:?}",
+            snap.categories
+        );
+    }
 }
