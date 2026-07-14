@@ -147,7 +147,20 @@ pub struct ContextParser {
     trail: Vec<u8>,
 }
 
-const LINE_MAX: usize = 256;
+/// Maximum size of a single parser line buffer, in bytes.
+///
+/// A single `/context` modal row in the live Claude TUI byte stream is
+/// dramatically longer than the parser's logical content because each
+/// bar-chart glyph + label is rendered through cursor-positioning +
+/// color SGR escapes. Empirically (Claude Code 2.x on a 120-col
+/// terminal) one modal row reaches ~1 KB on the wire and the headline
+/// row crosses 900 bytes. A 256-byte cap clips mid-row, dropping the
+/// `Context Usage    <bar>   <used>/<total> tokens (<pct>%)` headline
+/// before the parser ever sees it — which is why a too-small cap
+/// manifests as a silent "scrape returned no data" hint. 4096
+/// comfortably accommodates any plausible width without unbounded
+/// growth from a misbehaving source.
+const LINE_MAX: usize = 4096;
 
 /// Maximum number of trailing bytes retained across `feed` calls.
 const TRAIL_MAX: usize = 32;
@@ -1138,6 +1151,67 @@ mod tests {
             cats["system_tools"],
             json!(16_900),
             "system_tools category must be parsed from compact row"
+        );
+    }
+
+    /// Regression for the silent "scrape returned no data" bug:
+    /// feed the **raw** (ANSI escapes + cursor-positioning bytes
+    /// intact) modal capture in production-sized chunks and
+    /// confirm the parser still surfaces the headline + category
+    /// rows. The clean-text fixture passes the headline parser
+    /// even at a too-small `LINE_MAX`, but the raw fixture's
+    /// 941-byte headline row (cursor positioning SGR escapes
+    /// inflate every bar-chart glyph) clipped at 256 bytes
+    /// silently loses the `24.2k/200k tokens (12%)` run and the
+    /// `Snake prompt: 2.9k tokens (1.4%)` category. If this test
+    /// ever fails, the modal byte stream has either grown past
+    /// `LINE_MAX` or the parser has regressed to a
+    /// `Used:`-keyword-only shape.
+    #[test]
+    fn feed_raw_captured_modal_bytes_at_production_chunk_size() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/context_modal_real.bin");
+        if !path.exists() {
+            eprintln!("skipping: fixture {} not present", path.display());
+            return;
+        }
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let mut p = ContextParser::new();
+        // Production broadcast frames vary in size — feed in 128-byte
+        // chunks (on the small side of typical) so we exercise the
+        // cross-chunk reassembly path the way the supervisor's
+        // `drain_one_window` does.
+        for chunk in bytes.chunks(128) {
+            let _ = p.feed(chunk);
+        }
+        let snap = p.flush().expect("flush emits partial state");
+        assert_eq!(
+            snap.used_pct,
+            Some(12.0),
+            "headline percentage must come from the raw compact-form row, \
+             which is ~941 bytes on the wire"
+        );
+        assert_eq!(
+            snap.total_tokens,
+            Some(200_000),
+            "headline total must come from the raw compact-form row"
+        );
+        assert_eq!(
+            snap.used_tokens,
+            Some(24_200),
+            "headline used must come from the raw compact-form row"
+        );
+        let cats = snap.categories.expect("categories map");
+        assert_eq!(
+            cats["system_prompt"],
+            json!(2_900),
+            "system_prompt category must be parsed from a row that includes \
+             full bar-chart SGR escapes (not the clean projection)"
+        );
+        assert_eq!(
+            cats["system_tools"],
+            json!(16_900),
+            "system_tools category must be parsed from the same row"
         );
     }
 }
