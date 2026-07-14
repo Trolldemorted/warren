@@ -170,40 +170,38 @@ pub async fn run(config: Config) -> Result<()> {
     // instead of starting two parallel scrapers competing for the
     // broadcast receiver and the writer actor's FIFO.
     //
-    // Implementation: a `watch::Sender`/`watch::Receiver` pair
-    // carries the result. The first UsageCheck creates the pair,
-    // stashes the receiver behind an `Arc<Mutex<...>>` slot here,
-    // and spawns the scrape task with the sender. Subsequent
-    // UsageChecks during the scrape see `Some` and clone the Arc'd
-    // receiver — they `changed().await` on the SAME channel and
-    // publish the same result envelope. The scrape task clears
-    // the slot back to `None` AFTER sending, so the third
-    // UsageCheck (after the scrape finishes) starts a fresh scrape.
+    // Implementation: the slot holds a `ScrapeWaiter<T>` carrying
+    // a `Notify` and a `Mutex<Option<T>>`. The first UsageCheck
+    // creates the waiter, stashes it behind an `Arc<Mutex<...>>`
+    // slot, and spawns the scrape task with the waiter. Subsequent
+    // UsageChecks during the scrape see `Some` and clone the
+    // waiter — each waiter independently observes the result via
+    // `await_scrape` (early-return check, then `notified()`).
     //
-    // `watch::Receiver` is `Clone`-able BUT its `changed()` future
-    // isn't — so we wrap in `Arc<tokio::sync::Mutex<Receiver>>`
-    // to share a single underlying receiver across all coalesced
-    // waiters. Each waiter locks the mutex, awaits `changed()`,
-    // then borrows the result.
+    // We previously used a `watch::channel` pair for this, but
+    // tokio's `watch::Receiver::changed()` tracks a per-receiver
+    // "seen" state. Wrapping the receiver in `Arc<Mutex<>>` forced
+    // every coalesced waiter through a single receiver instance,
+    // so once the first waiter consumed the change notification
+    // every subsequent waiter blocked until the next send. `Notify`
+    // + cached result has per-call independence and the early-return
+    // check covers the race where the scrape completes between the
+    // slot-lock and the waiter's `notified()`.
     //
     // `tokio::sync::Mutex` is fine here: the critical section is a
     // few clones + a maybe-spawn, and the outer loop is
     // single-threaded anyway. No contention with the writer actor
     // (which uses its own mpsc).
-    type SharedScrapeReceiver =
-        Arc<tokio::sync::Mutex<tokio::sync::watch::Receiver<(UsageLimits, bool)>>>;
-    let current_scrape: Arc<tokio::sync::Mutex<Option<SharedScrapeReceiver>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    type UsageScrapeSlot = Arc<tokio::sync::Mutex<Option<ScrapeWaiter<(UsageLimits, bool)>>>>;
+    let current_scrape: UsageScrapeSlot = Arc::new(tokio::sync::Mutex::new(None));
 
     // §Context-window: parallel coalescing slot for `/context`
     // scrapes. Two clicks within a single scrape window share ONE
     // scrape instead of starting two parallel scrapers competing
     // for the broadcast receiver and the writer actor's FIFO.
     // Mirrors the `current_scrape` slot above.
-    type SharedContextReceiver =
-        Arc<tokio::sync::Mutex<tokio::sync::watch::Receiver<(ContextSnapshot, bool)>>>;
-    let current_context_scrape: Arc<tokio::sync::Mutex<Option<SharedContextReceiver>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    type ContextScrapeSlot = Arc<tokio::sync::Mutex<Option<ScrapeWaiter<(ContextSnapshot, bool)>>>>;
+    let current_context_scrape: ContextScrapeSlot = Arc::new(tokio::sync::Mutex::new(None));
     // §Context-window / §A.7: handle to the live PTY reader's seq
     // watermark. Updated by each `spawn_run_one` so the outer loop's
     // `/context` arm can pass it to `run_context_scrape` for the
@@ -344,59 +342,64 @@ pub async fn run(config: Config) -> Result<()> {
                             // duplicates see the same
                             // partial-vs-complete classification.
                             if let Some(active) = &active {
-                                let receiver = {
+                                let waiter = {
                                     let mut g = current_scrape.lock().await;
-                                    if let Some(rx) = g.as_ref() {
-                                        rx.clone()
+                                    if let Some(w) = g.as_ref() {
+                                        w.clone()
                                     } else {
                                         // First UsageCheck in the
-                                        // window: create the
-                                        // watch pair, store the
-                                        // receiver, spawn the
-                                        // scrape with the sender.
-                                        // Extract just the
+                                        // window: build a coalescing
+                                        // waiter, stash it in the
+                                        // slot, spawn the scrape
+                                        // task. Extract just the
                                         // writer + broadcast (the
                                         // only things the scrape
                                         // task needs) — avoids
                                         // cloning the whole
                                         // `ActiveSession`.
-                                        let (tx, rx) = tokio::sync::watch::channel(
-                                            (UsageLimits::default(), false),
-                                        );
-                                        let rx = Arc::new(tokio::sync::Mutex::new(rx));
-                                        *g = Some(rx.clone());
+                                        let w = ScrapeWaiter {
+                                            notify: Arc::new(
+                                                tokio::sync::Notify::new(),
+                                            ),
+                                            result: Arc::new(
+                                                tokio::sync::Mutex::new(None),
+                                            ),
+                                        };
+                                        *g = Some(w.clone());
                                         let writer_for_scrape = active.writer.clone();
                                         let bcast_for_scrape = active.term_bcast_tx.clone();
                                         let current_scrape_for_task = current_scrape.clone();
+                                        let w_for_task = w.clone();
                                         tokio::spawn(async move {
                                             let (limits, aborted) =
                                                 run_usage_scrape(writer_for_scrape, bcast_for_scrape)
                                                     .await;
-                                            // Send BEFORE clearing the
+                                            // Publish the result
+                                            // BEFORE clearing the
                                             // slot so a third
                                             // UsageCheck arriving
                                             // during this brief gap
                                             // sees `Some` and joins
                                             // the just-finished
                                             // scrape (gets the same
-                                            // result envelope) rather
-                                            // than starting a wasted
-                                            // fresh scrape.
-                                            let _ = tx.send((limits, aborted));
+                                            // result envelope)
+                                            // rather than starting
+                                            // a wasted fresh
+                                            // scrape. The early-
+                                            // return check in
+                                            // `await_scrape` covers
+                                            // the gap where a
+                                            // late-arriving waiter
+                                            // already missed the
+                                            // notify.
+                                            *w_for_task.result.lock().await = Some((limits, aborted));
+                                            w_for_task.notify.notify_waiters();
                                             *current_scrape_for_task.lock().await = None;
                                         });
-                                        rx
+                                        w
                                     }
                                 };
-                                // Lock the shared receiver, await a
-                                // change since the last seen value
-                                // (initially the default, so the
-                                // scrape's `tx.send` is what wakes
-                                // us), then borrow the result.
-                                let mut rx = receiver.lock().await;
-                                let _ = rx.changed().await;
-                                let (limits, aborted) = rx.borrow().clone();
-                                drop(rx);
+                                let (limits, aborted) = await_scrape(&waiter).await;
                                 let scrape_incomplete =
                                     !limits.is_empty() && !limits.all_populated();
                                 let snap = UsageSnapshot {
@@ -435,22 +438,25 @@ pub async fn run(config: Config) -> Result<()> {
                             // counters keep updating independently
                             // of the modal scrape.
                             if let Some(active) = &active {
-                                let receiver = {
+                                let waiter = {
                                     let mut g = current_context_scrape.lock().await;
-                                    if let Some(rx) = g.as_ref() {
-                                        rx.clone()
+                                    if let Some(w) = g.as_ref() {
+                                        w.clone()
                                     } else {
                                         // First ContextCheck in the
-                                        // window: create the watch
-                                        // pair, store the receiver,
-                                        // spawn the scrape with the
-                                        // sender.
-                                        let (tx, rx) = tokio::sync::watch::channel(
-                                            (ContextSnapshot::default(), false),
-                                        );
-                                        let rx =
-                                            Arc::new(tokio::sync::Mutex::new(rx));
-                                        *g = Some(rx.clone());
+                                        // window: build a coalescing
+                                        // waiter, stash it in the
+                                        // slot, spawn the scrape
+                                        // task.
+                                        let w = ScrapeWaiter {
+                                            notify: Arc::new(
+                                                tokio::sync::Notify::new(),
+                                            ),
+                                            result: Arc::new(
+                                                tokio::sync::Mutex::new(None),
+                                            ),
+                                        };
+                                        *g = Some(w.clone());
                                         let writer_for_scrape =
                                             active.writer.clone();
                                         let bcast_for_scrape =
@@ -468,6 +474,7 @@ pub async fn run(config: Config) -> Result<()> {
                                             cmd_tx.clone();
                                         let current_for_task =
                                             current_context_scrape.clone();
+                                        let w_for_task = w.clone();
                                         tokio::spawn(async move {
                                             let (snap, aborted) = run_context_scrape(
                                                 writer_for_scrape,
@@ -477,22 +484,28 @@ pub async fn run(config: Config) -> Result<()> {
                                                 cmd_tx_for_scrape,
                                             )
                                             .await;
-                                            // Send BEFORE clearing
-                                            // the slot so a third
+                                            // Publish the result
+                                            // BEFORE clearing the
+                                            // slot so a third
                                             // ContextCheck arriving
                                             // during this brief gap
                                             // sees `Some` and joins
-                                            // the just-finished scrape.
-                                            let _ = tx.send((snap, aborted));
+                                            // the just-finished
+                                            // scrape. The
+                                            // early-return check in
+                                            // `await_scrape` covers
+                                            // the gap where a
+                                            // late-arriving waiter
+                                            // already missed the
+                                            // notify.
+                                            *w_for_task.result.lock().await = Some((snap, aborted));
+                                            w_for_task.notify.notify_waiters();
                                             *current_for_task.lock().await = None;
                                         });
-                                        rx
+                                        w
                                     }
                                 };
-                                let mut rx = receiver.lock().await;
-                                let _ = rx.changed().await;
-                                let (snap, aborted) = rx.borrow().clone();
-                                drop(rx);
+                                let (snap, aborted) = await_scrape(&waiter).await;
                                 let scrape_incomplete =
                                     !snap.is_empty() && !snap.all_populated();
                                 let scrape_empty = snap.is_empty();
@@ -530,6 +543,12 @@ pub async fn run(config: Config) -> Result<()> {
                                 combined.ctx_scrape_incomplete =
                                     scrape_incomplete || scrape_empty;
                                 combined.scrape_aborted = aborted;
+                                // Cache the modal-enriched snapshot
+                                // so subsequent transcript ticks
+                                // (which carry `ctx_* = None`) don't
+                                // clobber these values when
+                                // `record_usage` merges on top.
+                                crate::observer::record_usage(combined.clone());
                                 crate::dispatch::send_or_warn(
                                     "LinkCmd::SendMeta(Usage+context)",
                                     &cmd_tx,
@@ -803,8 +822,40 @@ fn spawn_transcript_relay(
     });
     tokio::spawn(async move {
         while let Some(update) = urx.recv().await {
+            // §Cross-crate merge: a transcript tick fires on every
+            // successful JSONL parse, which can race against a
+            // freshly-published `ContextCheck` response. The
+            // transcript-derived snapshot has `ctx_* = None` and
+            // `ctx_scrape_incomplete = false`; publishing it raw
+            // would clobber the modal values the operator just
+            // asked for. `record_usage` already merged into
+            // LATEST_USAGE before we got here, but the mpsc channel
+            // carries the ORIGINAL snapshot — overlay on the way
+            // out so the wire envelope the browser receives is
+            // consistent with what the modal scrape published.
+            let mut snap = update.usage;
+            let cached = crate::observer::latest_usage();
+            if snap.ctx_used_tokens.is_none() {
+                snap.ctx_used_tokens = cached.ctx_used_tokens;
+            }
+            if snap.ctx_total_tokens.is_none() {
+                snap.ctx_total_tokens = cached.ctx_total_tokens;
+            }
+            if snap.ctx_used_pct.is_none() {
+                snap.ctx_used_pct = cached.ctx_used_pct;
+            }
+            if snap.ctx_free_pct.is_none() {
+                snap.ctx_free_pct = cached.ctx_free_pct;
+            }
+            if snap.ctx_window_tokens.is_none() {
+                snap.ctx_window_tokens = cached.ctx_window_tokens;
+            }
+            if snap.ctx_categories.is_none() {
+                snap.ctx_categories = cached.ctx_categories;
+            }
+            snap.ctx_scrape_incomplete |= cached.ctx_scrape_incomplete;
             let _ = cmd_tx
-                .send(LinkCmd::SendMeta(EnvelopeBody::Usage(update.usage)))
+                .send(LinkCmd::SendMeta(EnvelopeBody::Usage(snap)))
                 .await;
         }
     });
@@ -1845,14 +1896,20 @@ async fn run_context_scrape(
     use tokio::time::Duration;
 
     // §Context-window: `/context` paints faster than `/usage` —
-    // the modal is single-page and has no scroll rounds. 1100ms
-    // accommodates a slow PTY round-trip on a busy host while
-    // still feeling snappy to the operator (well under the
-    // 2.5 s button-disabled window the UI sets). The broadcast
+    // the modal is single-page and has no scroll rounds. We
+    // budget 2500ms (matching the button-disabled window the UI
+    // sets) so a slow host OR a `claude` mid-tool-call has time
+    // to flush the slash through the input buffer and render the
+    // modal before the parser gives up. The previous 1100ms
+    // value was snappier on idle but left operators seeing
+    // "scrape returned no data" any time `/context` was
+    // dispatched while Claude was busy; that hint is unhelpful
+    // because the modal genuinely was about to paint, the
+    // parser just stopped waiting first. The broadcast
     // subscriber is created before the slash is written so the
     // modal-paint frames aren't pre-empted by a stale-buffer
     // bug; see the subscribe-then-write note below.
-    const INITIAL_BUDGET: Duration = Duration::from_millis(1100);
+    const INITIAL_BUDGET: Duration = Duration::from_millis(2500);
     const TICK: Duration = Duration::from_millis(100);
     // §Context-window: settle window between dismiss and the
     // restore-snapshot. Lets the modal fully unrender before we
@@ -2167,6 +2224,42 @@ pub async fn send_state(
 
 struct BufShim<'a> {
     out: &'a mut Vec<u8>,
+}
+
+/// Per-scrape coalescing primitive used by both `UsageCheck` and
+/// `ContextCheck` arms. The scrape task writes the result into
+/// `result` and calls `notify.notify_waiters()`; coalesced waiters
+/// observe it via `await_scrape`.
+///
+/// Each waiter has its own `notified()` future (per-call
+/// independence) and reads the cached result on entry, so the
+/// scrape-result is delivered correctly whether the waiter arrives
+/// BEFORE the producer publishes (subscribes to `notified()` and
+/// wakes on `notify_waiters`) OR AFTER (early-return from the
+/// cached `Option`). The previous `watch::channel` design
+/// collapsed all coalesced waiters onto a single receiver whose
+/// `changed()` consumed the notification once, blocking every
+/// later waiter until the next send.
+#[derive(Clone)]
+struct ScrapeWaiter<T> {
+    notify: Arc<tokio::sync::Notify>,
+    result: Arc<tokio::sync::Mutex<Option<T>>>,
+}
+
+async fn await_scrape<T: Clone>(waiter: &ScrapeWaiter<T>) -> T {
+    {
+        let g = waiter.result.lock().await;
+        if let Some(v) = g.as_ref() {
+            return v.clone();
+        }
+    }
+    waiter.notify.notified().await;
+    waiter
+        .result
+        .lock()
+        .await
+        .clone()
+        .expect("scrape producer promised to publish a result before notify_waiters")
 }
 
 /// Drop oldest chunks from `buf` until its total byte length is `<= cap`.
@@ -3669,5 +3762,131 @@ Context\n\
             "free_pct must populate (this is the bug from earlier)"
         );
         assert!(snap.categories.is_some(), "categories must populate");
+    }
+
+    // §Context-window coalescing regression: when two `ContextCheck`
+    // envelopes arrive within a single scrape window, both must
+    // observe the same scrape result. The original implementation
+    // wrapped a `tokio::sync::watch::Receiver` in `Arc<Mutex<>>` and
+    // called `rx.changed().await` on it from each waiter. Watch's
+    // "seen" state is tracked per-receiver-instance, so once the
+    // first waiter called `changed()` and marked the value seen, the
+    // second waiter's `changed()` blocked until the next send —
+    // i.e. forever. The fix replaces watch with `Notify` +
+    // `Mutex<Option<T>>`; each waiter independently observes via
+    // `notified()` and reads the cached result. This test pins that
+    // contract: two concurrent waiters both get the result within a
+    // bounded time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn context_scrape_coalescing_two_waiters_both_observe_result() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::Duration;
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+        let waiter = ScrapeWaiter::<(ContextSnapshot, bool)> {
+            notify: Arc::new(tokio::sync::Notify::new()),
+            result: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        // Pretend scrape that returns a populated snapshot.
+        let producer = {
+            let waiter = waiter.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let snap = ContextSnapshot {
+                    used_tokens: Some(100 + id),
+                    total_tokens: Some(200_000),
+                    used_pct: Some(0.05),
+                    free_pct: Some(95.0),
+                    window_tokens: Some(200_000),
+                    categories: None,
+                    scrape_incomplete: false,
+                };
+                *waiter.result.lock().await = Some((snap, false));
+                waiter.notify.notify_waiters();
+            })
+        };
+
+        // Two concurrent waiters. Both must observe the populated
+        // snapshot, not block forever.
+        let w1 = waiter.clone();
+        let w2 = waiter.clone();
+        let h1 = tokio::spawn(async move { await_scrape(&w1).await });
+        let h2 = tokio::spawn(async move { await_scrape(&w2).await });
+
+        let r1 = tokio::time::timeout(Duration::from_secs(2), h1)
+            .await
+            .expect("waiter 1 timed out — coalescing regression")
+            .expect("waiter 1 panicked");
+        let r2 = tokio::time::timeout(Duration::from_secs(2), h2)
+            .await
+            .expect("waiter 2 timed out — coalescing regression")
+            .expect("waiter 2 panicked");
+        producer.await.unwrap();
+
+        let expected_used = 100 + id;
+        assert_eq!(
+            r1.0.used_tokens,
+            Some(expected_used),
+            "waiter 1 must see the populated snapshot"
+        );
+        assert_eq!(
+            r2.0.used_tokens,
+            Some(expected_used),
+            "waiter 2 must see the populated snapshot (this is the regression)"
+        );
+        assert!(!r1.1, "waiter 1 must see aborted=false");
+        assert!(!r2.1, "waiter 2 must see aborted=false");
+    }
+
+    // §Context-window coalescing race regression: the scrape may
+    // complete BEFORE the second waiter calls `notified()`. Watch
+    // channels drop notifications for receivers that subscribe after
+    // the send; `Notify` does too unless the waiter checks the
+    // cached result first. This test pins that contract: a waiter
+    // arriving AFTER notify_waiters() still observes the result via
+    // the early-return check, without blocking.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn context_scrape_coalescing_late_waiter_observes_via_cache() {
+        use std::time::Duration;
+
+        let waiter = ScrapeWaiter::<(ContextSnapshot, bool)> {
+            notify: Arc::new(tokio::sync::Notify::new()),
+            result: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        // Pre-fill the cache and notify BEFORE the waiter arrives.
+        // Simulates the race where the scrape completes and clears
+        // the slot in the same scheduler tick the operator's second
+        // click tries to join.
+        {
+            let snap = ContextSnapshot {
+                used_tokens: Some(42),
+                total_tokens: Some(200_000),
+                used_pct: Some(0.02),
+                free_pct: Some(98.0),
+                window_tokens: Some(200_000),
+                categories: None,
+                scrape_incomplete: false,
+            };
+            *waiter.result.lock().await = Some((snap, false));
+            waiter.notify.notify_waiters();
+        }
+
+        let w = waiter.clone();
+        let r = tokio::time::timeout(
+            Duration::from_secs(2),
+            async move { await_scrape(&w).await },
+        )
+        .await
+        .expect("late waiter timed out — early-return check regression");
+        assert_eq!(
+            r.0.used_tokens,
+            Some(42),
+            "late waiter must observe the cached result"
+        );
+        assert!(!r.1, "late waiter must see aborted=false");
     }
 }
