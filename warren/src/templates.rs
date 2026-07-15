@@ -17,6 +17,10 @@ pub struct AgentsTemplate {
     pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
+    /// `?reload=1|true` on the request URL — the page re-renders the
+    /// auto-reload checkbox checked and the inline script starts a
+    /// 5-second `location.reload()` interval. Defaults to false.
+    pub reload: bool,
     /// One row per agent, bundling the persisted model with the two
     /// live-derived columns (status + action items). Parallel
     /// `Vec<...>` fields would force Askama's indexing dance; a single

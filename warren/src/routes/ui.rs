@@ -11,7 +11,7 @@ use crate::templates::{
 use crate::{auth, AppState};
 use askama::Template;
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -212,10 +212,24 @@ struct AgentForm {
     prompt: String,
 }
 
-async fn agents_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Deserialize, Default)]
+struct AgentsPageQuery {
+    /// `?reload=1|true` enables the auto-reload checkbox on the
+    /// agents page; the inline script starts a 5s `location.reload()`
+    /// when present. Anything else (or absent) renders the box
+    /// unchecked and the page does not auto-reload.
+    reload: Option<String>,
+}
+
+async fn agents_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<AgentsPageQuery>,
+) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
+    let reload = matches!(q.reload.as_deref(), Some("1") | Some("true"));
     match crate::db_ops::list_agents(&state.db).await {
         Ok(agents) => {
             // Per-row enrichment: look up live state from the rabbit-lib
@@ -253,6 +267,7 @@ async fn agents_page(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 title: Some("Agents"),
                 nav: Some("agents"),
                 flash: None,
+                reload,
                 rows,
             };
             render(t)

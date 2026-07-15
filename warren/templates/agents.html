@@ -2,7 +2,13 @@
 {% block body %}
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">Agents</h1>
-  <a href="/admin/agents/new" class="btn btn-primary">New agent</a>
+  <div class="d-flex align-items-center gap-3">
+    <div class="form-check mb-0">
+      <input type="checkbox" class="form-check-input" id="auto-reload" name="auto-reload" value="true" {% if reload %}checked{% endif %}>
+      <label class="form-check-label" for="auto-reload">Reload every 5s</label>
+    </div>
+    <a href="/admin/agents/new" class="btn btn-primary">New agent</a>
+  </div>
 </div>
 {% if rows.is_empty() %}
   <p class="text-muted">No agents yet.</p>
@@ -77,4 +83,20 @@
 </div>
 {% endfor %}
 {% endif %}
+<script>
+(() => {
+  const cb = document.getElementById('auto-reload');
+  const params = new URLSearchParams(location.search);
+  let timer = null;
+  const start = () => { if (!timer) timer = setInterval(() => location.reload(), 5000); };
+  const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+  const syncUrl = () => {
+    const url = new URL(location.href);
+    if (cb.checked) url.searchParams.set('reload', '1'); else url.searchParams.delete('reload');
+    history.replaceState(null, '', url);
+  };
+  cb.addEventListener('change', () => { syncUrl(); cb.checked ? start() : stop(); });
+  if (params.get('reload') === '1' || params.get('reload') === 'true') start();
+})();
+</script>
 {% endblock %}
