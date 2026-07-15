@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// embedders can call it directly.
 ///
 /// `tui_size` is the static grid size advertised to the rabbit after
-/// the hello. `None` falls back to (120, 40) — the same default warren
+/// the hello. `None` falls back to (160, 50) — the same default warren
 /// uses when `TUI_WIDTH` / `TUI_HEIGHT` env vars are unset.
 pub async fn handle_session(
     store: Arc<dyn SessionStore>,
@@ -35,7 +35,7 @@ pub async fn handle_session(
         entry.value_mut().install_cmd_tx(cmd_tx.clone());
     }
 
-    let (tui_cols, tui_rows) = tui_size.unwrap_or((120, 40));
+    let (tui_cols, tui_rows) = tui_size.unwrap_or((160, 50));
     actor::run(
         store,
         handle_for_actor,

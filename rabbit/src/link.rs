@@ -27,8 +27,8 @@ const BACKOFF_BASE: Duration = Duration::from_millis(250);
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 /// Default grid if warren never sends a `TuiConfig` envelope. Matches
 /// warren's own `TUI_WIDTH` / `TUI_HEIGHT` defaults.
-const DEFAULT_TUI_COLS: u16 = 120;
-const DEFAULT_TUI_ROWS: u16 = 40;
+const DEFAULT_TUI_COLS: u16 = 160;
+const DEFAULT_TUI_ROWS: u16 = 50;
 
 pub enum LinkEvent {
     /// Emitted by the link right after a successful WS handshake + Hello
@@ -534,11 +534,11 @@ mod tests {
 
     /// §Simplify TUI sizing: with no `TuiConfig` ever shipped (e.g. a
     /// server pre-dating the new envelope), `term_size()` returns the
-    /// (120, 40) default — matches warren's own `TUI_WIDTH`/`TUI_HEIGHT`
+    /// (160, 50) default — matches warren's own `TUI_WIDTH`/`TUI_HEIGHT`
     /// defaults so the PTY is born at the right size even if the WS
     /// upgrade race goes the wrong way.
     #[test]
-    fn term_size_defaults_to_120_40_before_tui_config() {
+    fn term_size_defaults_to_160_50_before_tui_config() {
         let (_cmd_tx, cmd_rx) = mpsc::channel::<LinkCmd>(1);
         let (event_tx, _event_rx) = mpsc::channel::<LinkEvent>(1);
         let ring = Arc::new(MetaRing::new(262_144));
@@ -558,8 +558,8 @@ mod tests {
         assert_eq!(
             link.term_size(),
             TermSize {
-                cols: 120,
-                rows: 40
+                cols: 160,
+                rows: 50
             }
         );
     }

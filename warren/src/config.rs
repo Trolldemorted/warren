@@ -27,7 +27,7 @@ pub struct Config {
     pub static_dir: PathBuf,
     pub docs_dir: PathBuf,
     /// Static terminal grid size. Read from `TUI_WIDTH` / `TUI_HEIGHT`
-    /// at startup, defaults to 120 × 40. Warren is the source of truth:
+    /// at startup, defaults to 160 × 50. Warren is the source of truth:
     /// the value threads into the xterm.js template (so every browser
     /// renders the same grid) and into a `TuiConfig` envelope sent over
     /// the rabbit→warren WS so the spawned PTY winsize matches.
@@ -62,13 +62,13 @@ impl Config {
             docs_dir,
             tui_cols: clamp_tui(
                 env::var("TUI_WIDTH").ok().as_deref(),
-                120,
+                160,
                 TUI_COLS_MIN,
                 TUI_COLS_MAX,
             ),
             tui_rows: clamp_tui(
                 env::var("TUI_HEIGHT").ok().as_deref(),
-                40,
+                50,
                 TUI_ROWS_MIN,
                 TUI_ROWS_MAX,
             ),
@@ -95,8 +95,8 @@ impl Config {
             docs_dir,
             // Migrations don't render templates, but the field is required
             // by the struct. Use defaults — they are never observed.
-            tui_cols: 120,
-            tui_rows: 40,
+            tui_cols: 160,
+            tui_rows: 50,
         })
     }
 }
@@ -111,7 +111,7 @@ mod tests {
     fn parse_tui_width() -> u16 {
         clamp_tui(
             env::var("TUI_WIDTH").ok().as_deref(),
-            120,
+            160,
             TUI_COLS_MIN,
             TUI_COLS_MAX,
         )
@@ -120,7 +120,7 @@ mod tests {
     fn parse_tui_height() -> u16 {
         clamp_tui(
             env::var("TUI_HEIGHT").ok().as_deref(),
-            40,
+            50,
             TUI_ROWS_MIN,
             TUI_ROWS_MAX,
         )
@@ -132,14 +132,14 @@ mod tests {
         // single test (the others use unscoped vars) and accept the
         // race — `cargo test` runs tests in parallel and the env is
         // shared. We avoid `set_var` here and only check that the
-        // defaults land at 120/40 when neither var is set. Other
+        // defaults land at 160/50 when neither var is set. Other
         // tests assert the clamping bounds.
         let saved_w = env::var("TUI_WIDTH").ok();
         let saved_h = env::var("TUI_HEIGHT").ok();
         env::remove_var("TUI_WIDTH");
         env::remove_var("TUI_HEIGHT");
-        assert_eq!(parse_tui_width(), 120);
-        assert_eq!(parse_tui_height(), 40);
+        assert_eq!(parse_tui_width(), 160);
+        assert_eq!(parse_tui_height(), 50);
         if let Some(v) = saved_w {
             env::set_var("TUI_WIDTH", v);
         }
@@ -161,7 +161,7 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(
-                clamp_tui(Some(input), 120, TUI_COLS_MIN, TUI_COLS_MAX),
+                clamp_tui(Some(input), 160, TUI_COLS_MIN, TUI_COLS_MAX),
                 *expected,
                 "input {input} should clamp to {expected}"
             );
@@ -174,13 +174,13 @@ mod tests {
             ("0", TUI_ROWS_MIN),
             ("4", TUI_ROWS_MIN),
             ("5", 5),
-            ("40", 40),
+            ("50", 50),
             ("200", TUI_ROWS_MAX),
             ("999", TUI_ROWS_MAX),
         ];
         for (input, expected) in cases {
             assert_eq!(
-                clamp_tui(Some(input), 40, TUI_ROWS_MIN, TUI_ROWS_MAX),
+                clamp_tui(Some(input), 50, TUI_ROWS_MIN, TUI_ROWS_MAX),
                 *expected,
                 "input {input} should clamp to {expected}"
             );
@@ -190,10 +190,10 @@ mod tests {
     #[test]
     fn clamp_tui_garbage_falls_back_to_default() {
         assert_eq!(
-            clamp_tui(Some("not a number"), 120, TUI_COLS_MIN, TUI_COLS_MAX),
-            120
+            clamp_tui(Some("not a number"), 160, TUI_COLS_MIN, TUI_COLS_MAX),
+            160
         );
-        assert_eq!(clamp_tui(Some(""), 40, TUI_ROWS_MIN, TUI_ROWS_MAX), 40);
-        assert_eq!(clamp_tui(Some("-1"), 120, TUI_COLS_MIN, TUI_COLS_MAX), 120);
+        assert_eq!(clamp_tui(Some(""), 50, TUI_ROWS_MIN, TUI_ROWS_MAX), 50);
+        assert_eq!(clamp_tui(Some("-1"), 160, TUI_COLS_MIN, TUI_COLS_MAX), 160);
     }
 }

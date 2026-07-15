@@ -8,16 +8,41 @@
   grid-template-columns: minmax(0, 1fr) 18rem;
   gap: 1rem;
   margin-top: 1rem;
+  /* §Fill the viewport below the fixed navbar (4.5rem from base.html).
+     Caps the page at one screen so wheel scroll stays inside the
+     terminal wrap / sidebar and can't push the whole layout off-screen. */
+  height: calc(100vh - 4.5rem);
 }
 .claude-grid .term-wrap {
   background: #0d1117;
   border-radius: .375rem;
   padding: .5rem;
   position: relative;
+  /* `min-height: 0` lets a flex/grid child shrink below its content's
+     intrinsic size — without it, the xterm canvas forces the wrap past
+     the grid's `calc(100vh - 4.5rem)` cap. */
+  min-height: 0;
+  /* Center the canvas horizontally when there's room, fall back to
+     left-align when the wrap is narrower than the canvas (so the
+     scrollbar lands on the right edge instead of the left). `safe
+     center` is the keyword that avoids the "centered but truncated"
+     footgun on narrow viewports. */
+  display: flex;
+  justify-content: safe center;
+  align-items: flex-start;
 }
 .claude-grid #term {
-  width: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.claude-grid .tui-dim {
+  position: absolute;
+  top: .65rem;
+  right: .85rem;
+  font-family: ui-monospace, monospace;
+  font-size: .75rem;
+  color: rgba(201, 209, 217, .35);
+  pointer-events: none;
+  user-select: none;
 }
 .claude-grid .offline-overlay {
   position: absolute;
@@ -36,6 +61,14 @@
 .claude-grid.disconnected .offline-overlay { display: flex; }
 .claude-grid .status { font-family: ui-monospace, monospace; }
 button.action { width: 100%; margin-bottom: .25rem; }
+
+/* Sidebar scrolls independently of the terminal so a tall panel
+   stack (Status + Usage + Context + Actions) can't push the page
+   beyond the viewport. */
+aside {
+  overflow-y: auto;
+  min-height: 0;
+}
 
 /* §D prompt-rejection banner. Driven by `prompt_rejected` meta events from
    rabbit (EnvelopeBody::PromptRejected). Distinct from `Log { warn }` so
@@ -148,6 +181,10 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 <div class="claude-grid {% if !connected %}disconnected{% endif %}" id="claude-grid">
   <div class="term-wrap">
     <div id="term"></div>
+    {# Grid-size badge. Marks the dark chrome around the canvas as
+       deliberate viewport, not a broken layout, and tells the operator
+       what TUI size warren is presenting. #}
+    <div class="tui-dim">{{ tui_cols }} × {{ tui_rows }}</div>
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its terminal</div>
   </div>
   <div id="prompt-rejected-banner" role="status" aria-live="polite"></div>
@@ -248,7 +285,7 @@ const viewerMode = new URLSearchParams(location.search).get('viewer') === 'true'
 if (viewerMode) document.body.classList.add('viewer-mode');
 
 // Static TUI grid size. Set from warren config (TUI_WIDTH/TUI_HEIGHT
-// env vars, default 120 × 40) and rendered into the template by Askama.
+// env vars, default 160 × 50) and rendered into the template by Askama.
 // The same size is sent to rabbit over the WS as a TuiConfig envelope
 // so the PTY winsize matches what the browser renders. See §Simplify
 // TUI sizing in the plan.
