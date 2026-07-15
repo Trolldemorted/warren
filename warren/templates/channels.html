@@ -18,6 +18,7 @@
       <th></th>
       <th>To</th>
       <th>Description</th>
+      <th>State</th>
       <th>Created</th>
       <th></th>
     </tr>
@@ -29,6 +30,13 @@
       <td class="text-muted">→</td>
       <td><code>{{ c.receiver_class }}</code>{% if let Some(k) = c.receiver_kind %}/<code>{{ k }}</code>{% else %}/<span class="text-muted">*</span>{% endif %}</td>
       <td>{{ c.description }}</td>
+      <td>
+        {% if c.enabled %}
+          <span class="badge bg-success">Enabled</span>
+        {% else %}
+          <span class="badge bg-secondary">Disabled</span>
+        {% endif %}
+      </td>
       <td><small class="text-muted">{{ c.created_at }}</small></td>
       <td class="text-end">
         <a class="btn btn-sm btn-outline-secondary" href="/admin/channels/{{ c.id }}/edit">Edit</a>

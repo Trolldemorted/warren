@@ -21,6 +21,8 @@ pub struct Model {
     pub requires_request_approval: bool,
     #[sea_orm(default_value = "true")]
     pub requires_response_approval: bool,
+    #[sea_orm(default_value = "true")]
+    pub enabled: bool,
     #[sea_orm(default_expr = "Expr::cust(\"now()\")")]
     pub created_at: ChronoDateTimeUtc,
 }

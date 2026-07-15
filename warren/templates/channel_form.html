@@ -59,6 +59,10 @@
     <input type="checkbox" class="form-check-input" id="requires_response_approval" name="requires_response_approval" value="true" {% if requires_response_approval %}checked{% endif %}>
     <label class="form-check-label" for="requires_response_approval">Require admin approval of responses</label>
   </div>
+  <div class="mb-3 form-check">
+    <input type="checkbox" class="form-check-input" id="enabled" name="enabled" value="true" {% if enabled %}checked{% endif %}>
+    <label class="form-check-label" for="enabled">Enabled (agents can use this channel)</label>
+  </div>
   <button type="submit" class="btn btn-primary">Save</button>
   <a href="/admin/channels" class="btn btn-link">Cancel</a>
 </form>

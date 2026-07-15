@@ -766,6 +766,12 @@ struct ChannelForm {
     requires_request_approval: bool,
     #[serde(default)]
     requires_response_approval: bool,
+    /// Missing field → unchecked → disabled. The form template renders
+    /// the box checked when `enabled` is true, so existing rows round-
+    /// trip correctly and a user that disables a channel submits the
+    /// form without the field.
+    #[serde(default)]
+    enabled: bool,
 }
 
 async fn channels_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -808,6 +814,7 @@ async fn channel_new_page(State(state): State<AppState>, headers: HeaderMap) -> 
         selected_receiver_kind: None,
         requires_request_approval: true,
         requires_response_approval: true,
+        enabled: true,
     })
 }
 
@@ -834,6 +841,7 @@ async fn channel_create(
         description: form.description,
         requires_request_approval: form.requires_request_approval,
         requires_response_approval: form.requires_response_approval,
+        enabled: form.enabled,
     };
     match crate::db_ops::create_channel(&state.db, &new).await {
         Ok(_) => Redirect::to("/admin/channels").into_response(),
@@ -869,6 +877,7 @@ async fn channel_edit_page(
                 selected_receiver_kind: channel.receiver_kind.clone(),
                 requires_request_approval: channel.requires_request_approval,
                 requires_response_approval: channel.requires_response_approval,
+                enabled: channel.enabled,
             };
             render(t)
         }
@@ -901,6 +910,7 @@ async fn channel_update(
         description: Some(form.description),
         requires_request_approval: Some(form.requires_request_approval),
         requires_response_approval: Some(form.requires_response_approval),
+        enabled: Some(form.enabled),
     };
     match crate::db_ops::update_channel(&state.db, id, &patch).await {
         Ok(_) => Redirect::to("/admin/channels").into_response(),

@@ -73,6 +73,24 @@ components:
         receiver_class: { type: string }
         receiver_kind: { type: string, nullable: true }
         description: { type: string }
+        requires_request_approval:
+          type: boolean
+          description: |
+            When true, outgoing requests through this channel must be
+            approved by an admin before agents see them in their inbox.
+            Defaults to true.
+        requires_response_approval:
+          type: boolean
+          description: |
+            When true, an agent's response must be approved by an admin
+            before the original sender sees it. Defaults to true.
+        enabled:
+          type: boolean
+          description: |
+            When false, the channel is invisible to agents: it does not
+            appear in `available_channels` and routing through it is
+            rejected. Admins can still see and toggle it. Defaults to
+            true.
         created_at: { type: string, format: date-time }
       required: [id, sender_class, sender_kind, receiver_class, receiver_kind, description, created_at]
     ChannelNew:
@@ -83,18 +101,45 @@ components:
         receiver_class: { type: string }
         receiver_kind: { type: string, nullable: true }
         description: { type: string }
+        requires_request_approval:
+          type: boolean
+          default: true
+          description: |
+            Outgoing requests require admin approval. Defaults to true
+            when omitted.
+        requires_response_approval:
+          type: boolean
+          default: true
+          description: |
+            Responses require admin approval. Defaults to true when
+            omitted.
+        enabled:
+          type: boolean
+          default: true
+          description: |
+            Whether agents may use this channel. Defaults to true when
+            omitted.
       required: [sender_class, receiver_class, description]
     ChannelPatch:
       type: object
       description: |
         All fields optional. Pass `null` for sender_kind/receiver_kind to clear
-        (set to "any kind").
+        (set to "any kind"). Other fields, when present, replace the
+        current value.
       properties:
         sender_class: { type: string }
         sender_kind: { type: string, nullable: true }
         receiver_class: { type: string }
         receiver_kind: { type: string, nullable: true }
         description: { type: string }
+        requires_request_approval: { type: boolean }
+        requires_response_approval: { type: boolean }
+        enabled:
+          type: boolean
+          description: |
+            Set false to hide the channel from agents; set true to
+            re-enable. Agents cannot route traffic through a disabled
+            channel even if they hold its id.
     LoginReq:
       type: object
       properties:

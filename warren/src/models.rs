@@ -102,6 +102,8 @@ pub struct ChannelNew {
     pub requires_request_approval: bool,
     #[serde(default = "default_true")]
     pub requires_response_approval: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -120,6 +122,8 @@ pub struct ChannelPatch {
     pub requires_request_approval: Option<bool>,
     #[serde(default)]
     pub requires_response_approval: Option<bool>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 fn default_true() -> bool {

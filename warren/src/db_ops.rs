@@ -652,6 +652,7 @@ pub async fn create_channel(db: &Db, new: &ChannelNew) -> AppResult<channel::Mod
         description: Set(new.description.clone()),
         requires_request_approval: Set(new.requires_request_approval),
         requires_response_approval: Set(new.requires_response_approval),
+        enabled: Set(new.enabled),
         ..Default::default()
     };
     match am.insert(db).await {
@@ -687,6 +688,9 @@ pub async fn update_channel(db: &Db, id: Uuid, patch: &ChannelPatch) -> AppResul
     if let Some(b) = patch.requires_response_approval {
         am.requires_response_approval = Set(b);
     }
+    if let Some(e) = patch.enabled {
+        am.enabled = Set(e);
+    }
     match am.update(db).await {
         Ok(_) => Ok(()),
         Err(e) => Err(map_unique_conflict(e, "channel already exists")),
@@ -706,14 +710,18 @@ pub async fn delete_channel(db: &Db, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-/// All channels where (sender_class, sender_kind) allow this agent to send.
-/// NULL sender_kind on the channel = any kind of that class.
+/// All enabled channels where (sender_class, sender_kind) allow this
+/// agent to send. NULL sender_kind on the channel = any kind of that
+/// class. Disabled channels are invisible to agents — they neither see
+/// them in `available_channels` nor can they route traffic through
+/// `channel_authorizes`.
 pub async fn channels_for_sender(
     db: &Db,
     class: &str,
     kind: Option<&str>,
 ) -> AppResult<Vec<channel::Model>> {
     let mut q = channel::Entity::find()
+        .filter(channel::Column::Enabled.eq(true))
         .filter(channel::Column::SenderClass.eq(class.to_string()))
         .order_by_asc(channel::Column::CreatedAt);
     q = match kind {
@@ -727,11 +735,11 @@ pub async fn channels_for_sender(
     Ok(q.all(db).await?)
 }
 
-/// Returns Ok(()) iff the channel allows
+/// Returns Ok(()) iff the channel is enabled and allows
 /// `(sender_class, sender_kind) → (target_class, target_kind)`.
-/// Returns Err(NotFound) if the channel doesn't exist; Err(Forbidden) if the
-/// sender side doesn't match; Err(BadRequest) if the receiver side doesn't
-/// match the target.
+/// Returns Err(NotFound) if the channel doesn't exist; Err(Forbidden)
+/// if the channel is disabled or the sender side doesn't match;
+/// Err(BadRequest) if the receiver side doesn't match the target.
 pub async fn channel_authorizes(
     db: &Db,
     channel_id: Uuid,
@@ -743,6 +751,9 @@ pub async fn channel_authorizes(
     let ch = get_channel(db, channel_id)
         .await?
         .ok_or(AppError::NotFound)?;
+    if !ch.enabled {
+        return Err(AppError::Forbidden);
+    }
     let sender_ok = ch.sender_class == sender_class
         && (ch.sender_kind.is_none() || ch.sender_kind.as_deref() == sender_kind);
     if !sender_ok {
