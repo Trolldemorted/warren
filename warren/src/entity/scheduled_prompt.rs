@@ -46,6 +46,7 @@ pub struct Model {
     /// `agent_id`; the scheduler's pre-fire gate counts the target
     /// agent's unblocked forgejo items unless `ignore_pending_forgejo_work`.
     /// Existing rows have `scope='team'` after the migration.
+    #[sea_orm(default_value = "team")]
     pub scope: String,
     /// Specific agent address; only set when `scope='agent'`. A CHECK
     /// constraint enforces the inverse (target_class NULL) and the
@@ -57,6 +58,7 @@ pub struct Model {
     /// unblocked forgejo items at fire time. When true, the schedule
     /// fires regardless of forgejo-item count. Has no effect for
     /// team-scope rows.
+    #[sea_orm(default_value = "false")]
     pub ignore_pending_forgejo_work: bool,
 }
 
