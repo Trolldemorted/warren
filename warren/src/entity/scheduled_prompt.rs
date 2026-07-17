@@ -14,13 +14,17 @@ pub struct Model {
     pub name: String,
     pub prompt_text: String,
     pub interval_seconds: i64,
+    #[sea_orm(default_value = "true")]
     pub enabled: bool,
+    #[sea_orm(default_value = "false")]
     pub ignore_inbox_state: bool,
     /// Whole-percent headroom to keep clear of the limit. Validation
     /// enforces 0..=100 in the API/UI; stored as `i32` so the
     /// `DeriveEntityModel` `Eq` bound is satisfied (floats are not
     /// `Eq`).
+    #[sea_orm(default_value = "0")]
     pub weekly_safety_buffer_pct: i32,
+    #[sea_orm(default_value = "0")]
     pub session_safety_buffer_pct: i32,
     pub last_fired_at: Option<ChronoDateTimeUtc>,
     pub last_finished_at: Option<ChronoDateTimeUtc>,

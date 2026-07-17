@@ -1,12 +1,16 @@
-name: Schema drift
+name: CI integration
 
 on:
   push:
     branches: [master]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  entity-matches-migrations:
+  integration:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -21,7 +25,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
+      DATABASE_URL: postgres://postgres@127.0.0.1:5432/warren?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -37,8 +41,17 @@ jobs:
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
-      - name: Build warren binary
-        run: cargo build -p warren --bin warren
+      - name: Build
+        run: cargo build --workspace
 
-      - name: Run schema-drift test
+      - name: Schema drift (empty DB)
         run: cargo test -p warren --test schema_drift -- --ignored --nocapture
+
+      - name: Schema drift (populated DB)
+        run: cargo test -p warren --test schema_drift_populated -- --ignored --nocapture
+
+      - name: OpenAPI drift
+        run: cargo test -p warren --test openapi_drift -- --nocapture
+
+      - name: Warren test suite
+        run: cargo test -p warren -- --test-threads=1
