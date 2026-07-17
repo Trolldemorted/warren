@@ -6,7 +6,7 @@ use crate::models::{
     ScheduledPromptPatch,
 };
 use crate::templates::{
-    format_interval, outcome_badge, AgentClaudeTemplate, AgentFormTemplate, AgentRow,
+    format_interval, outcome_badge, AgentClaudeTemplate, AgentFormTemplate, AgentOption, AgentRow,
     AgentShellTemplate, AgentsTemplate, ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate,
     CommsRow, CommsTemplate, Flash, LoginTemplate, MigrationsTemplate, ScheduledPromptFormTemplate,
     ScheduledPromptRow, ScheduledPromptRunRow, ScheduledPromptsTemplate,
@@ -399,54 +399,23 @@ async fn agents_page(
                 .await
                 .map(|rs| rs.len() as u64)
                 .unwrap_or(0);
-                // Fetch forgejo unblocked-assigned counts across all
-                // configs for this agent. Each config may have a
-                // different `base_url`, `owner`, `repo`, and
-                // `forgejo_username`, so we iterate. Per-config
-                // failures (auth, rate limit, transient network) are
-                // logged and counted as zero — never failing the whole
-                // row, so one broken repo can't blank the dashboard.
+                // Forgejo unblocked-assigned counts across all of this
+                // agent's configs. The shared helper iterates configs,
+                // skips ones with empty forgejo_username, and tolerates
+                // per-config errors (logged inside) — one broken repo
+                // must not blank the dashboard.
                 //
                 // NB: this runs on every render. With the "Reload every
                 // 5s" auto-refresh, a 50-agent fleet is 50 renderings /
                 // 10 s, each doing K (config) × (1 issue list + N
                 // issue-dependency lookups) HTTP calls. If that ever
                 // becomes a hot path, memoize on (config_id, fetched_at)
-                // with a short TTL — see `forgejo::fetch_unblocked_assigned`.
-                let configs = crate::db_ops::list_forgejo_configs_for_agent(&state.db, a.id)
-                    .await
-                    .unwrap_or_default();
-                let mut forgejo_issues = 0u64;
-                let mut forgejo_prs = 0u64;
-                for cfg in &configs {
-                    if cfg.forgejo_username.trim().is_empty() {
-                        continue;
-                    }
-                    match crate::forgejo::fetch_unblocked_assigned(
-                        &cfg.base_url,
-                        &cfg.owner,
-                        &cfg.repo,
-                        &cfg.access_token,
-                        &cfg.forgejo_username,
-                    )
-                    .await
-                    {
-                        Ok((iss, prs)) => {
-                            forgejo_issues += iss.len() as u64;
-                            forgejo_prs += prs.len() as u64;
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "agents_page: forgejo cfg {} ({}@{}/{}) fetch failed: {e}",
-                                cfg.id,
-                                cfg.forgejo_username,
-                                cfg.owner,
-                                cfg.repo
-                            );
-                            log::debug!("agents_page: forgejo cfg {} detail: {e:?}", cfg.id);
-                        }
-                    }
-                }
+                // with a short TTL — see
+                // `forgejo::count_unblocked_assigned_for_agent`.
+                let (forgejo_issues, forgejo_prs) =
+                    crate::forgejo::count_unblocked_assigned_for_agent(&state.db, a.id)
+                        .await
+                        .unwrap_or((0, 0));
                 rows.push(AgentRow {
                     agent: a,
                     status,
@@ -1205,6 +1174,27 @@ async fn load_class_kinds(db: &crate::db::Db) -> AppResult<(Vec<String>, Vec<Str
     Ok((classes, kinds))
 }
 
+/// Sibling of `load_class_kinds` that also pulls the agent list for
+/// the scheduled-prompt form's agent-scope dropdown. The existing
+/// channel form keeps the lighter `(classes, kinds)` shape so it
+/// isn't disturbed by this addition.
+async fn load_class_kinds_agents(
+    db: &crate::db::Db,
+) -> AppResult<(Vec<String>, Vec<String>, Vec<AgentOption>)> {
+    let (classes, kinds) = load_class_kinds(db).await?;
+    let agents = crate::db_ops::list_agents(db)
+        .await?
+        .into_iter()
+        .map(|a| AgentOption {
+            id: a.id.to_string(),
+            name: a.name,
+            class: a.class,
+            kind: a.kind.unwrap_or_default(),
+        })
+        .collect();
+    Ok((classes, kinds, agents))
+}
+
 fn validate_channel_form(
     form: &ChannelForm,
     classes: &[String],
@@ -1306,13 +1296,17 @@ async fn agent_shell_page(
 
 #[derive(Deserialize)]
 struct ScheduledPromptForm {
+    scope: Option<String>,
     target_class: String,
     target_kind: String,
+    /// Raw agent selector; either an agent id (uuid string) or empty.
+    agent_id: String,
     name: String,
     prompt_text: String,
     interval_seconds: String,
     enabled: Option<String>,
     ignore_inbox_state: Option<String>,
+    ignore_pending_forgejo_work: Option<String>,
     weekly_safety_buffer_pct: String,
     session_safety_buffer_pct: String,
     context_clear_threshold_pct: String,
@@ -1325,8 +1319,66 @@ fn scheduled_prompt_form_checkbox(s: Option<String>) -> bool {
 fn parse_scheduled_prompt_form(
     form: ScheduledPromptForm,
 ) -> Result<ScheduledPromptFormParsed, AppError> {
-    if form.target_class.trim().is_empty() {
-        return Err(AppError::BadRequest("target_class required".into()));
+    let scope = form
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("team");
+    if scope != "team" && scope != "agent" {
+        return Err(AppError::BadRequest(
+            "scope must be 'team' or 'agent'".into(),
+        ));
+    }
+    let target_class_trimmed = form.target_class.trim().to_string();
+    let target_class_opt = if target_class_trimmed.is_empty() {
+        None
+    } else {
+        Some(target_class_trimmed)
+    };
+    let target_kind_trimmed = form.target_kind.trim().to_string();
+    let target_kind_opt = if target_kind_trimmed.is_empty() {
+        None
+    } else {
+        Some(target_kind_trimmed)
+    };
+    let agent_id =
+        {
+            let t = form.agent_id.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(Uuid::parse_str(t).map_err(|_| {
+                    AppError::BadRequest(format!("agent_id '{t}' is not a valid uuid"))
+                })?)
+            }
+        };
+    match scope {
+        "team" => {
+            if target_class_opt.is_none() {
+                return Err(AppError::BadRequest(
+                    "target_class required for team scope".into(),
+                ));
+            }
+            if agent_id.is_some() {
+                return Err(AppError::BadRequest(
+                    "agent_id must be empty for team scope".into(),
+                ));
+            }
+        }
+        "agent" => {
+            if agent_id.is_none() {
+                return Err(AppError::BadRequest(
+                    "agent_id required for agent scope".into(),
+                ));
+            }
+            if target_class_opt.is_some() || target_kind_opt.is_some() {
+                return Err(AppError::BadRequest(
+                    "target_class/target_kind must be empty for agent scope".into(),
+                ));
+            }
+        }
+        _ => unreachable!(),
     }
     if form.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
@@ -1379,20 +1431,18 @@ fn parse_scheduled_prompt_form(
         Some(v)
     };
     Ok(ScheduledPromptFormParsed {
-        target_class: form.target_class.trim().to_string(),
-        target_kind: {
-            let t = form.target_kind.trim();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t.to_string())
-            }
-        },
+        scope: scope.to_string(),
+        target_class: target_class_opt,
+        target_kind: target_kind_opt,
+        agent_id,
         name: form.name.trim().to_string(),
         prompt_text: form.prompt_text,
         interval_seconds,
         enabled: scheduled_prompt_form_checkbox(form.enabled),
         ignore_inbox_state: scheduled_prompt_form_checkbox(form.ignore_inbox_state),
+        ignore_pending_forgejo_work: scheduled_prompt_form_checkbox(
+            form.ignore_pending_forgejo_work,
+        ),
         weekly_safety_buffer_pct,
         session_safety_buffer_pct,
         context_clear_threshold_pct,
@@ -1400,13 +1450,16 @@ fn parse_scheduled_prompt_form(
 }
 
 struct ScheduledPromptFormParsed {
-    target_class: String,
+    scope: String,
+    target_class: Option<String>,
     target_kind: Option<String>,
+    agent_id: Option<Uuid>,
     name: String,
     prompt_text: String,
     interval_seconds: i64,
     enabled: bool,
     ignore_inbox_state: bool,
+    ignore_pending_forgejo_work: bool,
     weekly_safety_buffer_pct: i32,
     session_safety_buffer_pct: i32,
     context_clear_threshold_pct: Option<i32>,
@@ -1430,9 +1483,31 @@ async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMa
                 Err(_) => None,
             };
         let last_outcome_badge = last_outcome.as_deref().map(outcome_badge);
+        // Resolve the agent's display name for agent-scoped rows so
+        // the index page can render `agent:<name>` instead of a raw
+        // uuid. A missing agent means the FK ON DELETE CASCADE already
+        // cleared the schedule, so this is best-effort and falls back
+        // to the bare id.
+        let (agent_name, target_class, target_kind_display) = match p.agent_id {
+            Some(aid) => {
+                let name = crate::db_ops::get_agent(&state.db, aid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|a| a.name)
+                    .unwrap_or_else(|| aid.to_string());
+                (Some(name), String::new(), "any".to_string())
+            }
+            None => (
+                None,
+                p.target_class.clone().unwrap_or_default(),
+                p.target_kind.clone().unwrap_or_else(|| "any".to_string()),
+            ),
+        };
         rows.push(ScheduledPromptRow {
-            target_class: p.target_class.clone(),
-            target_kind_display: p.target_kind.clone().unwrap_or_else(|| "any".to_string()),
+            target_class,
+            target_kind_display,
+            agent_name,
             prompt: p,
             interval_display,
             last_outcome,
@@ -1451,7 +1526,7 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let (classes, kinds) = match load_class_kinds(&state.db).await {
+    let (classes, kinds, agents) = match load_class_kinds_agents(&state.db).await {
         Ok(v) => v,
         Err(e) => return err_page(e),
     };
@@ -1463,13 +1538,17 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
         form_action: "/admin/scheduled-prompts".into(),
         classes,
         kinds,
+        agents,
+        scope: "team".to_string(),
         target_class: String::new(),
         target_kind: String::new(),
+        agent_id: None,
         name: String::new(),
         prompt_text: String::new(),
         interval_seconds: 3600,
         enabled: true,
         ignore_inbox_state: false,
+        ignore_pending_forgejo_work: false,
         weekly_safety_buffer_pct: 0,
         session_safety_buffer_pct: 0,
         context_clear_threshold_pct: None,
@@ -1490,13 +1569,16 @@ async fn scheduled_prompt_create(
         Err(e) => return err_page(e),
     };
     let new = crate::models::ScheduledPromptNew {
+        scope: parsed.scope,
         target_class: parsed.target_class,
         target_kind: parsed.target_kind,
+        agent_id: parsed.agent_id,
         name: parsed.name,
         prompt_text: parsed.prompt_text,
         interval_seconds: parsed.interval_seconds,
         enabled: parsed.enabled,
         ignore_inbox_state: parsed.ignore_inbox_state,
+        ignore_pending_forgejo_work: parsed.ignore_pending_forgejo_work,
         weekly_safety_buffer_pct: parsed.weekly_safety_buffer_pct,
         session_safety_buffer_pct: parsed.session_safety_buffer_pct,
         context_clear_threshold_pct: parsed.context_clear_threshold_pct,
@@ -1515,7 +1597,7 @@ async fn scheduled_prompt_edit_page(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let (classes, kinds) = match load_class_kinds(&state.db).await {
+    let (classes, kinds, agents) = match load_class_kinds_agents(&state.db).await {
         Ok(v) => v,
         Err(e) => return err_page(e),
     };
@@ -1540,13 +1622,17 @@ async fn scheduled_prompt_edit_page(
                 form_action: format!("/admin/scheduled-prompts/{id}"),
                 classes,
                 kinds,
-                target_class: p.target_class.clone(),
+                agents,
+                scope: p.scope.clone(),
+                target_class: p.target_class.clone().unwrap_or_default(),
                 target_kind: p.target_kind.clone().unwrap_or_default(),
+                agent_id: p.agent_id,
                 name: p.name,
                 prompt_text: p.prompt_text,
                 interval_seconds: p.interval_seconds,
                 enabled: p.enabled,
                 ignore_inbox_state: p.ignore_inbox_state,
+                ignore_pending_forgejo_work: p.ignore_pending_forgejo_work,
                 weekly_safety_buffer_pct: p.weekly_safety_buffer_pct,
                 session_safety_buffer_pct: p.session_safety_buffer_pct,
                 context_clear_threshold_pct: p.context_clear_threshold_pct,
@@ -1572,6 +1658,7 @@ async fn scheduled_prompt_update(
         Err(e) => return err_page(e),
     };
     let patch = ScheduledPromptPatch {
+        scope: None,
         name: Some(parsed.name),
         prompt_text: Some(parsed.prompt_text),
         interval_seconds: Some(parsed.interval_seconds),
@@ -1580,6 +1667,7 @@ async fn scheduled_prompt_update(
         weekly_safety_buffer_pct: Some(parsed.weekly_safety_buffer_pct),
         session_safety_buffer_pct: Some(parsed.session_safety_buffer_pct),
         context_clear_threshold_pct: parsed.context_clear_threshold_pct,
+        ignore_pending_forgejo_work: Some(parsed.ignore_pending_forgejo_work),
     };
     match crate::db_ops::update_scheduled_prompt(&state.db, id, &patch).await {
         Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),

@@ -592,8 +592,44 @@ fn validate_channel_new(n: &ChannelNew) -> AppResult<()> {
 }
 
 fn validate_scheduled_prompt_new(n: &ScheduledPromptNew) -> AppResult<()> {
-    if n.target_class.trim().is_empty() {
-        return Err(AppError::BadRequest("target_class required".into()));
+    // Scope gate — must be one of the two known strings and the
+    // address fields must match the scope (mutual exclusion).
+    match n.scope.as_str() {
+        "team" => {
+            let class = n
+                .target_class
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    AppError::BadRequest("target_class required for team scope".into())
+                })?;
+            if class.is_empty() {
+                return Err(AppError::BadRequest("target_class required".into()));
+            }
+            if n.agent_id.is_some() {
+                return Err(AppError::BadRequest(
+                    "agent_id must be null for team scope".into(),
+                ));
+            }
+        }
+        "agent" => {
+            if n.agent_id.is_none() {
+                return Err(AppError::BadRequest(
+                    "agent_id required for agent scope".into(),
+                ));
+            }
+            if n.target_class.is_some() || n.target_kind.is_some() {
+                return Err(AppError::BadRequest(
+                    "target_class/target_kind must be null for agent scope".into(),
+                ));
+            }
+        }
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "unknown scope '{other}' (expected 'team' or 'agent')"
+            )));
+        }
     }
     if n.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
@@ -625,6 +661,16 @@ fn validate_scheduled_prompt_new(n: &ScheduledPromptNew) -> AppResult<()> {
 }
 
 fn validate_scheduled_prompt_patch(p: &ScheduledPromptPatch) -> AppResult<()> {
+    // Scope is intentionally not mutable through the patch path —
+    // retargeting between team/agent would orphan the run-history
+    // rows bound to the previous address. The UI never sends it.
+    if let Some(s) = &p.scope {
+        if s != "team" && s != "agent" {
+            return Err(AppError::BadRequest(format!(
+                "unknown scope '{s}' (expected 'team' or 'agent')"
+            )));
+        }
+    }
     if let Some(n) = &p.name {
         if n.trim().is_empty() {
             return Err(AppError::BadRequest("name required".into()));
@@ -702,10 +748,16 @@ async fn api_create_scheduled_prompt(
     Json(mut new): Json<ScheduledPromptNew>,
 ) -> AppResult<Json<scheduled_prompt::Model>> {
     ctx.require_admin()?;
-    if new.target_class.trim().is_empty() {
-        return Err(AppError::BadRequest("target_class required".into()));
+    // Trim incoming string fields; empty strings become None so the
+    // validators can reason about Option-only semantics.
+    if let Some(c) = &new.target_class {
+        let t = c.trim();
+        new.target_class = if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        };
     }
-    new.target_class = new.target_class.trim().to_string();
     if let Some(k) = &new.target_kind {
         let t = k.trim();
         new.target_kind = if t.is_empty() {
@@ -877,8 +929,11 @@ mod tests {
 
     fn ok_new() -> ScheduledPromptNew {
         ScheduledPromptNew {
-            target_class: "claude".into(),
+            scope: "team".into(),
+            target_class: Some("claude".into()),
             target_kind: None,
+            agent_id: None,
+            ignore_pending_forgejo_work: false,
             name: "schedule-x".into(),
             prompt_text: "say hi".into(),
             interval_seconds: 60,
@@ -917,8 +972,10 @@ mod tests {
 
     #[test]
     fn scheduled_prompt_patch_rejects_out_of_range_clear_threshold() {
-        let mut p = ScheduledPromptPatch::default();
-        p.context_clear_threshold_pct = Some(101);
+        let p = ScheduledPromptPatch {
+            context_clear_threshold_pct: Some(101),
+            ..Default::default()
+        };
         assert_bad_request_contains(
             validate_scheduled_prompt_patch(&p).unwrap_err(),
             "context_clear_threshold_pct must be 0..=100",
@@ -927,8 +984,10 @@ mod tests {
 
     #[test]
     fn scheduled_prompt_patch_ignores_clearing_threshold_via_none() {
-        let mut p = ScheduledPromptPatch::default();
-        p.context_clear_threshold_pct = Some(0);
+        let p = ScheduledPromptPatch {
+            context_clear_threshold_pct: Some(0),
+            ..Default::default()
+        };
         validate_scheduled_prompt_patch(&p).expect("Some(0) (disabled) must validate on patch");
     }
 }
@@ -1041,46 +1100,8 @@ async fn api_agent_action_items(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let configs = crate::db_ops::list_forgejo_configs_for_agent(&state.db, agent_id).await?;
-    let mut issues = Vec::new();
-    let mut pull_requests = Vec::new();
-
-    for cfg in &configs {
-        if cfg.forgejo_username.trim().is_empty() {
-            return Err(AppError::BadRequest(format!(
-                "forgejo_config {} has empty forgejo_username",
-                cfg.id
-            )));
-        }
-        match crate::forgejo::fetch_unblocked_assigned(
-            &cfg.base_url,
-            &cfg.owner,
-            &cfg.repo,
-            &cfg.access_token,
-            &cfg.forgejo_username,
-        )
-        .await
-        {
-            Ok((mut iss, mut prs)) => {
-                for item in &mut iss {
-                    item.config_id = cfg.id;
-                    item.host = cfg.base_url.clone();
-                }
-                for item in &mut prs {
-                    item.config_id = cfg.id;
-                    item.host = cfg.base_url.clone();
-                }
-                issues.append(&mut iss);
-                pull_requests.append(&mut prs);
-            }
-            Err(e) => {
-                log::error!("forgejo action_items cfg={}: {e}", cfg.id);
-                log::debug!("forgejo action_items cfg={} detail: {e:?}", cfg.id);
-            }
-        }
-    }
-    issues.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    pull_requests.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let (issues, pull_requests) =
+        crate::forgejo::unblocked_assigned_for_agent(&state.db, agent_id).await?;
     Ok(Json(ActionItemsResponse {
         issues,
         pull_requests,

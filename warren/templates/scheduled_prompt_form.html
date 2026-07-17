@@ -11,6 +11,22 @@
     <label class="form-label">Name</label>
     <input class="form-control" name="name" required value="{{ name }}">
   </div>
+  <fieldset class="mb-3">
+    <legend class="form-label">Address</legend>
+    <div class="form-check">
+      <input class="form-check-input" type="radio" name="scope" id="scope_team" value="team" {% if scope == "team" %}checked{% endif %}>
+      <label class="form-check-label" for="scope_team">
+        <strong>Team</strong> — any connected idle agent matching <code>(target_class, target_kind)</code>.
+      </label>
+    </div>
+    <div class="form-check">
+      <input class="form-check-input" type="radio" name="scope" id="scope_agent" value="agent" {% if scope == "agent" %}checked{% endif %}>
+      <label class="form-check-label" for="scope_agent">
+        <strong>Agent</strong> — one specific agent; fires when it has unblocked forgejo items.
+      </label>
+    </div>
+  </fieldset>
+  {% if scope == "team" %}
   <div class="row">
     <div class="col-md-6 mb-3">
       <label class="form-label">Target class</label>
@@ -28,6 +44,20 @@
       <small class="text-muted">Optional. <code>any</code> matches agents with NULL kind.</small>
     </div>
   </div>
+  {% else %}
+  <div class="mb-3">
+    <label class="form-label">Agent</label>
+    {% if agents.is_empty() %}
+      <div class="alert alert-warning mb-0">No agents registered.</div>
+    {% else %}
+      <select class="form-select" name="agent_id" required>
+        <option value="" disabled {% if agent_id.is_none() %}selected{% endif %}>Select…</option>
+        {% for a in agents %}<option value="{{ a.id }}" {% if let Some(id) = agent_id %}{% if id.to_string() == a.id.as_str() %}selected{% endif %}{% endif %}>{{ a.name }} ({{ a.class }}{% if a.kind.is_empty() %}{% else %}:{{ a.kind }}{% endif %})</option>{% endfor %}
+      </select>
+      <small class="text-muted">Fires when this agent has unblocked forgejo items (unless "Ignore pending forgejo work" is on).</small>
+    {% endif %}
+  </div>
+  {% endif %}
   <div class="mb-3">
     <label class="form-label">Prompt text</label>
     <textarea name="prompt_text" class="form-control" rows="4" required>{{ prompt_text }}</textarea>
@@ -41,10 +71,17 @@
     <input type="checkbox" class="form-check-input" id="enabled" name="enabled" value="true" {% if enabled %}checked{% endif %}>
     <label class="form-check-label" for="enabled">Enabled</label>
   </div>
+  {% if scope == "team" %}
   <div class="mb-3 form-check">
     <input type="checkbox" class="form-check-input" id="ignore_inbox_state" name="ignore_inbox_state" value="true" {% if ignore_inbox_state %}checked{% endif %}>
     <label class="form-check-label" for="ignore_inbox_state">Ignore inbox state (fire even when no actionable requests)</label>
   </div>
+  {% else %}
+  <div class="mb-3 form-check">
+    <input type="checkbox" class="form-check-input" id="ignore_pending_forgejo_work" name="ignore_pending_forgejo_work" value="true" {% if ignore_pending_forgejo_work %}checked{% endif %}>
+    <label class="form-check-label" for="ignore_pending_forgejo_work">Ignore pending forgejo work (fire even when no unblocked forgejo items)</label>
+  </div>
+  {% endif %}
   <div class="row">
     <div class="col-md-6 mb-3">
       <label class="form-label">Weekly safety buffer (%)</label>

@@ -196,19 +196,37 @@ pub struct ScheduledPromptsTemplate {
     pub rows: Vec<ScheduledPromptRow>,
 }
 
-/// One row of the scheduled-prompts index, bundling the model with
-/// a `target_class:target_kind` display string (e.g. `"claude:opus"`
-/// or `"claude:any"`), a display-formatted interval string, and a
-/// precomputed Bootstrap badge class for the most-recent run's
-/// `outcome` (Askama can't call free functions, so we compute the
-/// class once in the handler).
+/// One row of the scheduled-prompts index. The address display is
+/// pre-resolved by the handler:
+///   - team scope → `target_class:target_kind_display` (e.g. `claude:opus`).
+///   - agent scope → `agent_name` (the linked agent's display name;
+///     falls back to the raw uuid at the handler if the FK was deleted).
+///
+/// The badge class for the most-recent run's `outcome` is also
+/// precomputed — Askama can't call free functions.
+///
+/// All string-shaped fields are pre-rendered to `String` so Askama's
+/// `Display` bound on `MarkupDisplay::new(&field)` doesn't have to
+/// recurse through `Option<String>` (which the derive macro is not
+/// always able to satisfy for arbitrary structs).
 pub struct ScheduledPromptRow {
     pub prompt: crate::entity::scheduled_prompt::Model,
     pub target_class: String,
     pub target_kind_display: String,
+    pub agent_name: Option<String>,
     pub interval_display: String,
     pub last_outcome: Option<String>,
     pub last_outcome_badge: Option<String>,
+}
+
+/// Per-agent entry in the form's `<select>` for the agent scope.
+/// `id` is the agent's uuid, `kind` is empty when the agent has no
+/// kind (UI shows "(any kind)").
+pub struct AgentOption {
+    pub id: String,
+    pub name: String,
+    pub class: String,
+    pub kind: String,
 }
 
 #[derive(Template)]
@@ -221,15 +239,22 @@ pub struct ScheduledPromptFormTemplate {
     pub form_action: String,
     pub classes: Vec<String>,
     pub kinds: Vec<String>,
+    pub agents: Vec<AgentOption>,
+    pub scope: String,
     /// Pre-rendered strings so Askama doesn't have to deref or compare
-    /// `Option<String>` values against the option lists.
+    /// `Option<String>` values against the option lists. Empty when
+    /// the row is agent-scoped.
     pub target_class: String,
     pub target_kind: String,
+    /// Pre-selected agent for agent-scope rows. `None` for team-scope
+    /// rows and for new schedules.
+    pub agent_id: Option<uuid::Uuid>,
     pub name: String,
     pub prompt_text: String,
     pub interval_seconds: i64,
     pub enabled: bool,
     pub ignore_inbox_state: bool,
+    pub ignore_pending_forgejo_work: bool,
     pub weekly_safety_buffer_pct: i32,
     pub session_safety_buffer_pct: i32,
     pub context_clear_threshold_pct: Option<i32>,

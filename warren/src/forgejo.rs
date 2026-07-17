@@ -4,6 +4,7 @@ use forgejo_api::{Auth, Forgejo};
 use url::Url;
 use uuid::Uuid;
 
+use crate::db::Db;
 use crate::error::{AppError, AppResult};
 use crate::models::ActionItem;
 
@@ -23,10 +24,10 @@ fn deps_have_open(deps: &[Issue]) -> bool {
         .any(|d| matches!(d.state, Some(StateType::Open)))
 }
 
-fn issue_to_item(owner: &str, repo: &str, issue: Issue) -> ActionItem {
+fn issue_to_item(config_id: Uuid, host: &str, owner: &str, repo: &str, issue: Issue) -> ActionItem {
     ActionItem {
-        config_id: Uuid::nil(),
-        host: String::new(),
+        config_id,
+        host: host.to_string(),
         owner: owner.to_string(),
         repo: repo.to_string(),
         number: issue.number.unwrap_or(0),
@@ -43,7 +44,14 @@ fn issue_to_item(owner: &str, repo: &str, issue: Issue) -> ActionItem {
     }
 }
 
+/// Fetch one (host, owner, repo) triple's open items assigned to the
+/// given forgejo user, skipping any whose dependency list still has an
+/// open blocker. Returns `(issues, prs)`. Per-config errors propagate —
+/// callers iterate configs and decide whether to swallow them (the
+/// public surface below does).
 pub async fn fetch_unblocked_assigned(
+    config_id: Uuid,
+    host: &str,
     base_url: &str,
     owner: &str,
     repo: &str,
@@ -80,7 +88,7 @@ pub async fn fetch_unblocked_assigned(
             continue;
         }
         let is_pr = issue.pull_request.is_some();
-        let item = issue_to_item(owner, repo, issue);
+        let item = issue_to_item(config_id, host, owner, repo, issue);
         if is_pr {
             pr_items.push(item);
         } else {
@@ -88,6 +96,98 @@ pub async fn fetch_unblocked_assigned(
         }
     }
     Ok((issue_items, pr_items))
+}
+
+/// Per-config fetch with the same dependency-skip semantics as
+/// `fetch_unblocked_assigned`. Used by the shared aggregation helpers
+/// below and intentionally free-standing so its caller can pick
+/// what to do with an error (log it vs. fail the response).
+async fn fetch_unblocked_assigned_for_config(
+    config: &crate::entity::agent_forgejo_config::Model,
+) -> AppResult<(Vec<ActionItem>, Vec<ActionItem>)> {
+    fetch_unblocked_assigned(
+        config.id,
+        &config.base_url,
+        &config.base_url,
+        &config.owner,
+        &config.repo,
+        &config.access_token,
+        &config.forgejo_username,
+    )
+    .await
+}
+
+/// Fetch unblocked-assigned items across every forgejo config row
+/// belonging to a specific agent. Used by the per-agent
+/// `/api/agents/:id/action-items` endpoint. Per-config failures are
+/// logged and the config's items are dropped (consistent with the
+/// agents-page dashboard behavior — one broken repo must not blank
+/// the rest).
+pub async fn unblocked_assigned_for_agent(
+    db: &Db,
+    agent_id: Uuid,
+) -> AppResult<(Vec<ActionItem>, Vec<ActionItem>)> {
+    let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
+    let mut issues = Vec::new();
+    let mut pull_requests = Vec::new();
+    for cfg in &configs {
+        if cfg.forgejo_username.trim().is_empty() {
+            continue;
+        }
+        match fetch_unblocked_assigned_for_config(cfg).await {
+            Ok((mut iss, mut prs)) => {
+                issues.append(&mut iss);
+                pull_requests.append(&mut prs);
+            }
+            Err(e) => {
+                log::error!(
+                    "forgejo: cfg {} ({}@{}/{}) fetch failed: {e}",
+                    cfg.id,
+                    cfg.forgejo_username,
+                    cfg.owner,
+                    cfg.repo
+                );
+                log::debug!("forgejo: cfg {} detail: {e:?}", cfg.id);
+            }
+        }
+    }
+    issues.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+    pull_requests.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+    Ok((issues, pull_requests))
+}
+
+/// Count-only variant of `unblocked_assigned_for_agent`. The
+/// scheduler's pre-fire gate needs to know whether the target agent
+/// has *any* unblocked forgejo item — list materialization would be
+/// wasteful. Per-config errors are similarly swallowed (counted as
+/// zero) so a transient forgejo outage doesn't continuously skip the
+/// schedule.
+pub async fn count_unblocked_assigned_for_agent(db: &Db, agent_id: Uuid) -> AppResult<(u64, u64)> {
+    let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
+    let mut issues = 0u64;
+    let mut prs = 0u64;
+    for cfg in &configs {
+        if cfg.forgejo_username.trim().is_empty() {
+            continue;
+        }
+        match fetch_unblocked_assigned_for_config(cfg).await {
+            Ok((iss, pr)) => {
+                issues += iss.len() as u64;
+                prs += pr.len() as u64;
+            }
+            Err(e) => {
+                log::error!(
+                    "forgejo: cfg {} ({}@{}/{}) count failed: {e}",
+                    cfg.id,
+                    cfg.forgejo_username,
+                    cfg.owner,
+                    cfg.repo
+                );
+                log::debug!("forgejo: cfg {} detail: {e:?}", cfg.id);
+            }
+        }
+    }
+    Ok((issues, prs))
 }
 
 #[allow(dead_code)]

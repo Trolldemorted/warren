@@ -5,10 +5,12 @@
   <a href="/admin/scheduled-prompts/new" class="btn btn-primary">New schedule</a>
 </div>
 <p class="text-muted">
-  Schedules periodically fire a prompt against any connected idle agent matching
-  <code>(target_class, target_kind)</code> that has actionable inbox items (unless
-  <em>ignore inbox state</em> is set) and is within budget safety buffers.
-  Skipped runs still consume their slot.
+  Two address shapes: <strong>team</strong> schedules fire against any
+  connected idle agent matching <code>(target_class, target_kind)</code> with
+  actionable inbox items; <strong>agent</strong> schedules target one
+  specific agent and fire when it has unblocked forgejo items (unless
+  <em>ignore pending forgejo work</em> is set). Both honor the weekly /
+  session safety buffers below. Skipped runs still consume their slot.
 </p>
 {% if rows.is_empty() %}
   <p class="text-muted">No scheduled prompts yet.</p>
@@ -31,7 +33,15 @@
     {% for r in rows %}
     <tr>
       <td>{{ r.prompt.name }}</td>
-      <td><code>{{ r.target_class }}:{{ r.target_kind_display }}</code></td>
+      <td>
+        {% match r.agent_name %}
+          {% when Some with (name) %}
+            <span class="badge bg-info text-dark me-1">agent</span>
+            <a href="/admin/agents/{{ r.prompt.agent_id.as_ref().unwrap() }}/edit"><code>{{ name }}</code></a>
+          {% when None %}
+            <code>{{ r.target_class }}:{{ r.target_kind_display }}</code>
+        {% endmatch %}
+      </td>
       <td><code>{{ r.interval_display }}</code></td>
       <td>
         {% if r.prompt.enabled %}

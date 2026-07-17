@@ -359,6 +359,17 @@ components:
       required: [id, agent_id, seq, ts, kind, payload]
     ScheduledPrompt:
       type: object
+      description: |
+        A schedule that periodically fires a prompt. Use `scope` to pick
+        the address shape:
+          * `team` (default): any connected idle agent matching
+            `(target_class, target_kind)`. `agent_id` is null.
+          * `agent`: one specific `agent_id`. `target_class` and
+            `target_kind` are null. The scheduler's pre-fire gate counts
+            the target agent's unblocked forgejo items unless
+            `ignore_pending_forgejo_work` is true.
+        Scope and the address it implies are mutually exclusive (the
+        DB enforces this via a CHECK constraint).
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -366,6 +377,7 @@ components:
         interval_seconds: { type: integer, format: int64 }
         enabled: { type: boolean }
         ignore_inbox_state: { type: boolean }
+        ignore_pending_forgejo_work: { type: boolean }
         weekly_safety_buffer_pct:
           type: integer
           format: int32
@@ -381,30 +393,47 @@ components:
         next_fire_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-        target_class: { type: string }
+        scope:
+          type: string
+          enum: [team, agent]
+        target_class: { type: string, nullable: true }
         target_kind: { type: string, nullable: true }
-      required: [id, name, prompt_text, interval_seconds, enabled, ignore_inbox_state, weekly_safety_buffer_pct, session_safety_buffer_pct, created_at, updated_at, target_class]
+        agent_id: { type: string, format: uuid, nullable: true }
+      required: [id, name, prompt_text, interval_seconds, enabled, ignore_inbox_state, ignore_pending_forgejo_work, weekly_safety_buffer_pct, session_safety_buffer_pct, created_at, updated_at, scope]
     ScheduledPromptNew:
       type: object
+      description: |
+        Request shape for `POST /api/scheduled-prompts`. See
+        `ScheduledPrompt` for the scope/address invariant. The address
+        fields (`target_class`, `target_kind`, `agent_id`) are optional
+        and resolved by `scope`.
       properties:
-        target_class: { type: string }
+        scope: { type: string, enum: [team, agent], default: team }
+        target_class: { type: string, nullable: true }
         target_kind: { type: string, nullable: true }
+        agent_id: { type: string, format: uuid, nullable: true }
         name: { type: string }
         prompt_text: { type: string }
         interval_seconds: { type: integer, format: int64, minimum: 1 }
         enabled: { type: boolean, default: false }
         ignore_inbox_state: { type: boolean, default: false }
+        ignore_pending_forgejo_work: { type: boolean, default: false }
         weekly_safety_buffer_pct: { type: integer, format: int32, default: 0, minimum: 0, maximum: 100 }
         session_safety_buffer_pct: { type: integer, format: int32, default: 0, minimum: 0, maximum: 100 }
-      required: [target_class, name, prompt_text, interval_seconds]
+      required: [name, prompt_text, interval_seconds]
     ScheduledPromptPatch:
       type: object
+      description: |
+        Request shape for `PUT /api/scheduled-prompts/{id}`. Scope and
+        the address it implies are intentionally NOT patchable — the
+        address is set at creation.
       properties:
         name: { type: string }
         prompt_text: { type: string }
         interval_seconds: { type: integer, format: int64, minimum: 1 }
         enabled: { type: boolean }
         ignore_inbox_state: { type: boolean }
+        ignore_pending_forgejo_work: { type: boolean }
         weekly_safety_buffer_pct: { type: integer, format: int32, minimum: 0, maximum: 100 }
         session_safety_buffer_pct: { type: integer, format: int32, minimum: 0, maximum: 100 }
     ScheduledPromptRun:
@@ -428,6 +457,7 @@ components:
             - skipped_no_matching_agent
             - skipped_no_idle_agent
             - skipped_no_inbox
+            - skipped_no_forgejo_items
             - skipped_unsafe_scrape
             - skipped_weekly_budget
             - skipped_session_budget
@@ -436,6 +466,7 @@ components:
         outcome_error: { type: string, nullable: true }
         usage_weekly_pct: { type: integer, format: int32, nullable: true }
         usage_session_pct: { type: integer, format: int32, nullable: true }
+        usage_context_pct: { type: integer, format: int32, nullable: true }
       required: [id, scheduled_prompt_id, agent_id, fired_at, outcome]
     ScheduledPromptWithRuns:
       allOf:

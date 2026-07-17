@@ -103,18 +103,36 @@ pub async fn fire_prompt(
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
 
-    // (1) Pick a free agent. The schedule targets a class+kind pool,
-    // not a specific agent, so we walk candidate rows from the DB and
-    // check the live registry for an idle handle. No LRU / round-robin
-    // — "any free agent" is the contract; oldest-first ordering gives
-    // a deterministic choice for tests.
-    let chosen =
-        match pick_free_agent(&state, &prompt.target_class, prompt.target_kind.as_deref()).await? {
+    // (1) Resolve the target handle.
+    //
+    // Team scope: pick the first idle agent in the
+    // `(target_class, target_kind)` pool. Agent scope: resolve the
+    // exact agent, require it to be idle. Both branches return the
+    // chosen `(agent_id, handle)` pair, or `Err(...)` after recording
+    // a `skipped_no_*` run row.
+    let chosen = if prompt.scope == "agent" {
+        match pick_specific_agent(&state, prompt.agent_id).await? {
+            Some(c) => c,
+            None => {
+                let outcome = match prompt.agent_id {
+                    None => "skipped_no_matching_agent",
+                    Some(aid) => match db_ops::get_agent(&state.db, aid).await? {
+                        None => "skipped_no_matching_agent",
+                        Some(_) => "skipped_no_idle_agent",
+                    },
+                };
+                skip(&state, &prompt, outcome, (None, None, None), now).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        let target_class = prompt.target_class.as_deref().unwrap_or("");
+        match pick_free_agent(&state, target_class, prompt.target_kind.as_deref()).await? {
             Some(c) => c,
             None => {
                 let outcome = if db_ops::list_agents_by_class_kind(
                     &state.db,
-                    &prompt.target_class,
+                    target_class,
                     prompt.target_kind.as_deref(),
                 )
                 .await?
@@ -127,17 +145,38 @@ pub async fn fire_prompt(
                 skip(&state, &prompt, outcome, (None, None, None), now).await?;
                 return Ok(());
             }
-        };
+        }
+    };
     let (agent_id, handle) = chosen;
 
-    // (2) Inbox check on the schedule's address, not the chosen agent.
-    if !prompt.ignore_inbox_state {
-        let n = db_ops::count_inbox_by_target(
-            &state.db,
-            &prompt.target_class,
-            prompt.target_kind.as_deref(),
-        )
-        .await?;
+    // (2) Action-items gate, scoped to the schedule's address.
+    //   - Team scope: warren inbox count (existing semantics).
+    //   - Agent scope: count of unblocked forgejo items assigned to the
+    //     target agent. Bypassed when `ignore_pending_forgejo_work` is
+    //     set, mirroring `ignore_inbox_state` for team schedules.
+    if prompt.scope == "agent" {
+        if !prompt.ignore_pending_forgejo_work {
+            let (issues, prs) =
+                crate::forgejo::count_unblocked_assigned_for_agent(&state.db, agent_id)
+                    .await
+                    .unwrap_or((0, 0));
+            if issues + prs == 0 {
+                skip(
+                    &state,
+                    &prompt,
+                    "skipped_no_forgejo_items",
+                    (None, None, None),
+                    now,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    } else if !prompt.ignore_inbox_state {
+        let target_class = prompt.target_class.as_deref().unwrap_or("");
+        let n =
+            db_ops::count_inbox_by_target(&state.db, target_class, prompt.target_kind.as_deref())
+                .await?;
         if n == 0 {
             skip(&state, &prompt, "skipped_no_inbox", (None, None, None), now).await?;
             return Ok(());
@@ -289,6 +328,29 @@ async fn pick_free_agent(
         }
     }
     Ok(None)
+}
+
+/// Agent-scope variant: the address is a specific agent id. The
+/// agent must (a) still exist and (b) be registered and idle right
+/// now. A non-Idle registration or no registration at all returns
+/// `Ok(None)` and lets the caller disambiguate via `get_agent` for
+/// the `skipped_no_matching_agent` vs `skipped_no_idle_agent` log.
+async fn pick_specific_agent(
+    state: &Arc<AppState>,
+    agent_id: Option<Uuid>,
+) -> anyhow::Result<Option<(Uuid, AgentHandle)>> {
+    let Some(aid) = agent_id else {
+        return Ok(None);
+    };
+    let h = match state.live.registry.get(&aid) {
+        Some(h) => h,
+        None => return Ok(None),
+    };
+    if h.snapshot().state == AgentState::Idle {
+        Ok(Some((aid, h.clone())))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Record a non-firing tick (the agent pool was empty, the inbox was

@@ -837,21 +837,67 @@ pub async fn create_scheduled_prompt(
     db: &Db,
     new: &ScheduledPromptNew,
 ) -> AppResult<scheduled_prompt::Model> {
+    // Dispatch on `scope`. The validators in `routes::api` and the UI
+    // `parse_scheduled_prompt_form` already enforce the address
+    // invariant (exactly one of `target_class`, `agent_id` present);
+    // this function only narrows, validates the agent exists, and
+    // shapes the row.
+    let scope = new.scope.as_str();
+    let (target_class, target_kind, agent_id) = match scope {
+        "team" => {
+            let class = new
+                .target_class
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::BadRequest("target_class required for team scope".into()))?
+                .to_string();
+            let kind = new
+                .target_kind
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            if new.agent_id.is_some() {
+                return Err(AppError::BadRequest(
+                    "agent_id must be null for team scope".into(),
+                ));
+            }
+            (Some(class), kind, None)
+        }
+        "agent" => {
+            let id = new
+                .agent_id
+                .ok_or_else(|| AppError::BadRequest("agent_id required for agent scope".into()))?;
+            // The agent must still exist by the time we write the row —
+            // a deletion between form render and submit would
+            // otherwise produce an FK violation at the storage layer
+            // with no useful error.
+            crate::db_ops::get_agent(db, id).await?.ok_or_else(|| {
+                AppError::BadRequest(format!("agent {id} not found for agent scope"))
+            })?;
+            (None, None, Some(id))
+        }
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "unknown scope '{other}' (expected 'team' or 'agent')"
+            )));
+        }
+    };
     let am = scheduled_prompt::ActiveModel {
         id: Set(Uuid::new_v4()),
+        scope: Set(scope.to_string()),
+        target_class: Set(target_class),
+        target_kind: Set(target_kind),
+        agent_id: Set(agent_id),
         name: Set(new.name.clone()),
         prompt_text: Set(new.prompt_text.clone()),
         interval_seconds: Set(new.interval_seconds),
         enabled: Set(new.enabled),
         ignore_inbox_state: Set(new.ignore_inbox_state),
+        ignore_pending_forgejo_work: Set(new.ignore_pending_forgejo_work),
         weekly_safety_buffer_pct: Set(new.weekly_safety_buffer_pct),
         session_safety_buffer_pct: Set(new.session_safety_buffer_pct),
-        target_class: Set(new.target_class.trim().to_string()),
-        target_kind: Set(new
-            .target_kind
-            .as_deref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())),
         next_fire_at: Set(Some(chrono::Utc::now())),
         context_clear_threshold_pct: Set(new.context_clear_threshold_pct),
         ..Default::default()
@@ -869,6 +915,10 @@ pub async fn update_scheduled_prompt(
         .await?
         .ok_or(AppError::NotFound)?
         .into_active_model();
+    // Scope and address fields are intentionally NOT patchable — the
+    // pool/agent address is set at creation. Mutating it would silently
+    // orphan the previous agent's run-history rows. The UI/API forms
+    // never expose these on the patch path either.
     if let Some(n) = &patch.name {
         am.name = Set(n.clone());
     }
@@ -892,6 +942,9 @@ pub async fn update_scheduled_prompt(
     }
     if let Some(c) = patch.context_clear_threshold_pct {
         am.context_clear_threshold_pct = Set(Some(c));
+    }
+    if let Some(f) = patch.ignore_pending_forgejo_work {
+        am.ignore_pending_forgejo_work = Set(f);
     }
     am.updated_at = Set(chrono::Utc::now());
     am.update(db).await?;

@@ -132,9 +132,25 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScheduledPromptNew {
-    pub target_class: String,
+    /// `"team"` (default) keeps the historical `(target_class,
+    /// target_kind)` pool semantics. `"agent"` targets a specific
+    /// `agent_id`; the scheduler's pre-fire gate counts the target
+    /// agent's unblocked forgejo items unless `ignore_pending_forgejo_work`.
+    /// The address fields (`target_class`, `target_kind`, `agent_id`)
+    /// are mutually exclusive per scope — see the CHECK constraint and
+    /// the validators in `routes::api`.
+    #[serde(default = "default_team_scope")]
+    pub scope: String,
+    /// Required and non-null when `scope='team'`. Must be null when
+    /// `scope='agent'`.
+    #[serde(default)]
+    pub target_class: Option<String>,
     #[serde(default)]
     pub target_kind: Option<String>,
+    /// Required and non-null when `scope='agent'`. Must be null when
+    /// `scope='team'`.
+    #[serde(default)]
+    pub agent_id: Option<Uuid>,
     pub name: String,
     pub prompt_text: String,
     pub interval_seconds: i64,
@@ -148,10 +164,25 @@ pub struct ScheduledPromptNew {
     pub session_safety_buffer_pct: i32,
     #[serde(default)]
     pub context_clear_threshold_pct: Option<i32>,
+    /// Agent-scope only: when true the schedule fires regardless of
+    /// whether the target agent has unblocked forgejo items. Has no
+    /// effect for `scope='team'`.
+    #[serde(default)]
+    pub ignore_pending_forgejo_work: bool,
+}
+
+fn default_team_scope() -> String {
+    "team".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ScheduledPromptPatch {
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Pool address (`target_class`, `target_kind`, `agent_id`) is
+    /// intentionally not patchable — schedule scope/address is set
+    /// at creation. Mutating the run-history rows to retarget would
+    /// silently orphan the agent that previously owned them.
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -168,6 +199,8 @@ pub struct ScheduledPromptPatch {
     pub session_safety_buffer_pct: Option<i32>,
     #[serde(default)]
     pub context_clear_threshold_pct: Option<i32>,
+    #[serde(default)]
+    pub ignore_pending_forgejo_work: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

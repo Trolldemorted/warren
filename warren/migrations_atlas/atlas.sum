@@ -1,4 +1,4 @@
-h1:TnuW9IEtYb/dYVr4xHO+1gK0tQnoPA4FXFTz78G5X3A=
+h1:XaGDsb13on2x3ZA9WkBKk2d6Lsd4IlMRHZP/kTU73cA=
 20260629034416_init.sql h1:cdmFIlSMxS8no+Yi9WOSdN0SVh5VLEj5YwY/05mXB1g=
 20260629064124_channels.sql h1:h1P7CmYRyZakAcHEOIUzZJkpIhoyrFVcTSAdeY5naW4=
 20260629165624_acknowledged.sql h1:Xz74FG5dOGlXQ8K/fzCZ2XbwEQhq7BdpnfwV8IT/iRI=
@@ -14,3 +14,4 @@ h1:TnuW9IEtYb/dYVr4xHO+1gK0tQnoPA4FXFTz78G5X3A=
 20260713191055_add_context_clear_threshold.sql h1:Yj5z65k6tWRWT3q+5HJo4+6NUsf1M7qbI4YcRBD6/No=
 20260715052312_add_channel_enabled.sql h1:YAE+I37zOMCv36wdXSb6XT5/s73Sl+hY4jOgfZgVE0Y=
 20260716200823_add_agent_forgejo_configs.sql h1:epdc4rew37HBcaGY/7AqyyVf0GD4XjI1H5xx4zdrRI0=
+20260717222954_scheduled_prompts_scope_and_agent.sql h1:S6n5y/HUPy9j7uPnQz0iOivIEfHuKKh3zkHKudVLMHU=
