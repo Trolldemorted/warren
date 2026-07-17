@@ -20,10 +20,18 @@ pub enum AppError {
     Conflict(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("bad gateway: {0}")]
+    BadGateway(String),
     #[error("database error: {0}")]
     Db(#[from] sea_orm::DbErr),
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
+}
+
+impl From<forgejo_api::ForgejoError> for AppError {
+    fn from(e: forgejo_api::ForgejoError) -> Self {
+        AppError::BadGateway(e.to_string())
+    }
 }
 
 impl AppError {
@@ -95,6 +103,11 @@ impl IntoResponse for AppError {
             AppError::BadRequest(m) => (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": m, "code": "bad_request"})),
+            )
+                .into_response(),
+            AppError::BadGateway(m) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": m, "code": "bad_gateway"})),
             )
                 .into_response(),
         }

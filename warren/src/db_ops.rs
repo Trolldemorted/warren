@@ -1,9 +1,12 @@
 use crate::db::Db;
-use crate::entity::{agent, agent_event, channel, request, scheduled_prompt, scheduled_prompt_run};
+use crate::entity::{
+    agent, agent_event, agent_forgejo_config, channel, request, scheduled_prompt,
+    scheduled_prompt_run,
+};
 use crate::error::{map_unique_conflict, AppError, AppResult};
 use crate::models::{
-    AgentNew, AgentPatch, ChannelNew, ChannelPatch, RequestNew, ScheduledPromptNew,
-    ScheduledPromptPatch,
+    AgentForgejoConfigNew, AgentForgejoConfigPatch, AgentNew, AgentPatch, ChannelNew, ChannelPatch,
+    RequestNew, ScheduledPromptNew, ScheduledPromptPatch,
 };
 use sea_orm::sea_query::{Expr, IntoCondition, Order, Query};
 use sea_orm::{
@@ -1196,4 +1199,88 @@ pub async fn count_inbox_by_target(db: &Db, class: &str, kind: Option<&str>) -> 
         .await?
         .map(|r| r.count);
     Ok(row.unwrap_or(0).max(0) as u64)
+}
+
+// --- agent_forgejo_configs --------------------------------------------------
+
+pub async fn list_forgejo_configs_for_agent(
+    db: &Db,
+    agent_id: Uuid,
+) -> AppResult<Vec<agent_forgejo_config::Model>> {
+    Ok(agent_forgejo_config::Entity::find()
+        .filter(agent_forgejo_config::Column::AgentId.eq(agent_id))
+        .order_by_asc(agent_forgejo_config::Column::CreatedAt)
+        .all(db)
+        .await?)
+}
+
+pub async fn get_forgejo_config(
+    db: &Db,
+    id: Uuid,
+) -> AppResult<Option<agent_forgejo_config::Model>> {
+    Ok(agent_forgejo_config::Entity::find_by_id(id).one(db).await?)
+}
+
+pub async fn create_forgejo_config(
+    db: &Db,
+    agent_id: Uuid,
+    new: &AgentForgejoConfigNew,
+) -> AppResult<agent_forgejo_config::Model> {
+    let am = agent_forgejo_config::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        agent_id: Set(agent_id),
+        forgejo_username: Set(new.forgejo_username.trim().to_string()),
+        base_url: Set(new.base_url.trim().to_string()),
+        owner: Set(new.owner.trim().to_string()),
+        repo: Set(new.repo.trim().to_string()),
+        access_token: Set(new.access_token.clone()),
+        ..Default::default()
+    };
+    Ok(am.insert(db).await?)
+}
+
+pub async fn update_forgejo_config(
+    db: &Db,
+    id: Uuid,
+    patch: &AgentForgejoConfigPatch,
+) -> AppResult<agent_forgejo_config::Model> {
+    let mut am = agent_forgejo_config::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .into_active_model();
+    if let Some(u) = &patch.forgejo_username {
+        am.forgejo_username = Set(u.trim().to_string());
+    }
+    if let Some(b) = &patch.base_url {
+        am.base_url = Set(b.trim().to_string());
+    }
+    if let Some(o) = &patch.owner {
+        am.owner = Set(o.trim().to_string());
+    }
+    if let Some(r) = &patch.repo {
+        am.repo = Set(r.trim().to_string());
+    }
+    if let Some(t) = &patch.access_token {
+        am.access_token = Set(t.clone());
+    }
+    am.update(db).await?;
+    get_forgejo_config(db, id).await?.ok_or(AppError::NotFound)
+}
+
+pub async fn delete_forgejo_config(db: &Db, id: Uuid) -> AppResult<()> {
+    let res = agent_forgejo_config::Entity::delete_by_id(id)
+        .exec(db)
+        .await?;
+    if res.rows_affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn count_forgejo_configs_for_agent(db: &Db, agent_id: Uuid) -> AppResult<u64> {
+    Ok(agent_forgejo_config::Entity::find()
+        .filter(agent_forgejo_config::Column::AgentId.eq(agent_id))
+        .count(db)
+        .await?)
 }

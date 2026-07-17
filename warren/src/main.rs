@@ -4,6 +4,7 @@ mod db;
 mod db_ops;
 mod entity;
 mod error;
+mod forgejo;
 mod ids;
 mod models;
 mod rabbit_adapter;
@@ -210,7 +211,8 @@ async fn log_status(database_url: &str, dir_url: &str) {
 
 async fn run_dump_schema() -> anyhow::Result<()> {
     use entity::{
-        admin_session, agent, agent_event, channel, request, scheduled_prompt, scheduled_prompt_run,
+        admin_session, agent, agent_event, agent_forgejo_config, channel, request,
+        scheduled_prompt, scheduled_prompt_run,
     };
     use sea_orm::sea_query::PostgresQueryBuilder;
     use sea_orm::{DatabaseBackend, Schema};
@@ -224,6 +226,7 @@ async fn run_dump_schema() -> anyhow::Result<()> {
         schema.create_table_from_entity(agent_event::Entity),
         schema.create_table_from_entity(scheduled_prompt::Entity),
         schema.create_table_from_entity(scheduled_prompt_run::Entity),
+        schema.create_table_from_entity(agent_forgejo_config::Entity),
     ];
     for table in tables {
         println!(
@@ -292,6 +295,12 @@ async fn run_dump_schema() -> anyhow::Result<()> {
         );
     }
     for stmt in scheduled_prompt_run::extra_indexes() {
+        println!(
+            "{};",
+            stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')
+        );
+    }
+    for stmt in agent_forgejo_config::extra_indexes() {
         println!(
             "{};",
             stmt.to_string(PostgresQueryBuilder).trim_end_matches(';')

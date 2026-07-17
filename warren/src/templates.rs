@@ -37,10 +37,13 @@ pub struct AgentsTemplate {
 /// requests actionable right now: claims for this agent's class+kind,
 /// already-claimed requests this agent must respond to, and requests
 /// this agent must acknowledge (per `db_ops::list_inbox_for_agent`).
+/// `forgejo_configs` is the count of forgejo config rows for the agent
+/// (informational; the live repo list lives on the agent edit page).
 pub struct AgentRow {
     pub agent: crate::entity::agent::Model,
     pub status: Option<rabbit_lib::wire::AgentState>,
     pub action_items: u64,
+    pub forgejo_configs: u64,
 }
 
 #[derive(Template)]
@@ -51,6 +54,7 @@ pub struct AgentFormTemplate {
     pub flash: Option<Flash>,
     pub agent: Option<crate::entity::agent::Model>,
     pub form_action: String,
+    pub forgejo_configs: Vec<crate::entity::agent_forgejo_config::Model>,
 }
 
 #[derive(Template)]

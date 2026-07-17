@@ -1,11 +1,14 @@
 use crate::auth::{AgentAuth, AuthContext, SESSION_COOKIE};
 use crate::db::Db;
-use crate::entity::{agent, channel, request, scheduled_prompt, scheduled_prompt_run};
+use crate::entity::{
+    agent, agent_forgejo_config, channel, request, scheduled_prompt, scheduled_prompt_run,
+};
 use crate::error::{AppError, AppResult};
 use crate::ids::{new_agent_token, new_session_token};
 use crate::models::{
-    AgentNew, AgentPatch, ChannelNew, ChannelPatch, LoginReq, LoginRes, RequestNew, RequestRespond,
-    ScheduledPromptNew, ScheduledPromptPatch,
+    ActionItemsResponse, AgentForgejoConfigNew, AgentForgejoConfigPatch, AgentNew, AgentPatch,
+    ChannelNew, ChannelPatch, LoginReq, LoginRes, RequestNew, RequestRespond, ScheduledPromptNew,
+    ScheduledPromptPatch,
 };
 use crate::{auth, AppState};
 use axum::{
@@ -89,6 +92,17 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/scheduled-prompts/:id/run-now",
             post(api_run_scheduled_prompt_now),
+        )
+        .route(
+            "/api/agents/:id/forgejo-configs",
+            get(api_list_agent_forgejo_configs).post(api_create_agent_forgejo_config),
+        )
+        .route("/api/agents/:id/action-items", get(api_agent_action_items))
+        .route(
+            "/api/forgejo-configs/:config_id",
+            get(api_get_forgejo_config)
+                .put(api_update_forgejo_config)
+                .delete(api_delete_forgejo_config),
         )
 }
 
@@ -917,4 +931,158 @@ mod tests {
         p.context_clear_threshold_pct = Some(0);
         validate_scheduled_prompt_patch(&p).expect("Some(0) (disabled) must validate on patch");
     }
+}
+
+// --- forgejo configs --------------------------------------------------------
+
+fn validate_forgejo_config_new(n: &AgentForgejoConfigNew) -> AppResult<()> {
+    let require = |name: &str, val: &str| -> AppResult<()> {
+        if val.trim().is_empty() {
+            return Err(AppError::BadRequest(format!("{name} required")));
+        }
+        Ok(())
+    };
+    require("forgejo_username", &n.forgejo_username)?;
+    require("base_url", &n.base_url)?;
+    require("owner", &n.owner)?;
+    require("repo", &n.repo)?;
+    require("access_token", &n.access_token)?;
+    let parsed = url::Url::parse(n.base_url.trim())
+        .map_err(|e| AppError::BadRequest(format!("invalid base_url: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest(
+            "base_url must be http or https".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn api_list_agent_forgejo_configs(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(agent_id): Path<Uuid>,
+) -> AppResult<Json<Vec<agent_forgejo_config::Model>>> {
+    ctx.require_admin()?;
+    let _ = crate::db_ops::get_agent(&state.db, agent_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let rows = crate::db_ops::list_forgejo_configs_for_agent(&state.db, agent_id).await?;
+    Ok(Json(rows))
+}
+
+async fn api_create_agent_forgejo_config(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(agent_id): Path<Uuid>,
+    Json(mut new): Json<AgentForgejoConfigNew>,
+) -> AppResult<Json<agent_forgejo_config::Model>> {
+    ctx.require_admin()?;
+    let _ = crate::db_ops::get_agent(&state.db, agent_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    new.forgejo_username = new.forgejo_username.trim().to_string();
+    new.base_url = new.base_url.trim().to_string();
+    new.owner = new.owner.trim().to_string();
+    new.repo = new.repo.trim().to_string();
+    validate_forgejo_config_new(&new)?;
+    let row = crate::db_ops::create_forgejo_config(&state.db, agent_id, &new).await?;
+    Ok(Json(row))
+}
+
+async fn api_get_forgejo_config(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(config_id): Path<Uuid>,
+) -> AppResult<Json<agent_forgejo_config::Model>> {
+    ctx.require_admin()?;
+    let row = crate::db_ops::get_forgejo_config(&state.db, config_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(row))
+}
+
+async fn api_update_forgejo_config(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(config_id): Path<Uuid>,
+    Json(patch): Json<AgentForgejoConfigPatch>,
+) -> AppResult<Json<agent_forgejo_config::Model>> {
+    ctx.require_admin()?;
+    if let Some(u) = &patch.base_url {
+        let parsed = url::Url::parse(u.trim())
+            .map_err(|e| AppError::BadRequest(format!("invalid base_url: {e}")))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(AppError::BadRequest(
+                "base_url must be http or https".into(),
+            ));
+        }
+    }
+    let row = crate::db_ops::update_forgejo_config(&state.db, config_id, &patch).await?;
+    Ok(Json(row))
+}
+
+async fn api_delete_forgejo_config(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(config_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ctx.require_admin()?;
+    crate::db_ops::delete_forgejo_config(&state.db, config_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_agent_action_items(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(agent_id): Path<Uuid>,
+) -> AppResult<Json<ActionItemsResponse>> {
+    ctx.require_admin()?;
+    let _ = crate::db_ops::get_agent(&state.db, agent_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let configs = crate::db_ops::list_forgejo_configs_for_agent(&state.db, agent_id).await?;
+    let mut issues = Vec::new();
+    let mut pull_requests = Vec::new();
+
+    for cfg in &configs {
+        if cfg.forgejo_username.trim().is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "forgejo_config {} has empty forgejo_username",
+                cfg.id
+            )));
+        }
+        match crate::forgejo::fetch_unblocked_assigned(
+            &cfg.base_url,
+            &cfg.owner,
+            &cfg.repo,
+            &cfg.access_token,
+            &cfg.forgejo_username,
+        )
+        .await
+        {
+            Ok((mut iss, mut prs)) => {
+                for item in &mut iss {
+                    item.config_id = cfg.id;
+                    item.host = cfg.base_url.clone();
+                }
+                for item in &mut prs {
+                    item.config_id = cfg.id;
+                    item.host = cfg.base_url.clone();
+                }
+                issues.append(&mut iss);
+                pull_requests.append(&mut prs);
+            }
+            Err(e) => {
+                log::error!("forgejo action_items cfg={}: {e}", cfg.id);
+                log::debug!("forgejo action_items cfg={} detail: {e:?}", cfg.id);
+            }
+        }
+    }
+    issues.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    pull_requests.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(Json(ActionItemsResponse {
+        issues,
+        pull_requests,
+    }))
 }

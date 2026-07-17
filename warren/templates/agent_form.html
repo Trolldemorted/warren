@@ -35,5 +35,43 @@
 <h2 class="h5">Auth token</h2>
 <p class="text-muted">The CLI uses this token as <code>WARREN_TOKEN</code>. It is shown here on every visit.</p>
 <pre class="payload"><code>{{ a.authtoken }}</code></pre>
+
+<h2 class="h5 mt-4">Forgejo configs</h2>
+<p class="text-muted">
+  One row per (host, owner, repo, token) tuple. If the agent has access
+  to multiple repos on the same owner, declare each repo explicitly.
+  Leave the access token blank to keep the existing value.
+</p>
+<table class="table table-sm align-middle">
+  <thead>
+    <tr>
+      <th>Host</th><th>Owner</th><th>Repo</th>
+      <th>Username</th><th>Token</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in forgejo_configs %}
+    <tr>
+      <td><input name="cfg[{{ c.id }}][base_url]" value="{{ c.base_url }}" class="form-control form-control-sm"></td>
+      <td><input name="cfg[{{ c.id }}][owner]" value="{{ c.owner }}" class="form-control form-control-sm"></td>
+      <td><input name="cfg[{{ c.id }}][repo]" value="{{ c.repo }}" class="form-control form-control-sm"></td>
+      <td><input name="cfg[{{ c.id }}][forgejo_username]" value="{{ c.forgejo_username }}" class="form-control form-control-sm"></td>
+      <td><input type="password" autocomplete="off" name="cfg[{{ c.id }}][access_token]" placeholder="(keep)" class="form-control form-control-sm"></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<h3 class="h6 mt-4">Add a config</h3>
+<table class="table table-sm align-middle">
+  <tbody>
+    <tr>
+      <td><input name="new[0][base_url]" placeholder="https://codeberg.org" class="form-control form-control-sm"></td>
+      <td><input name="new[0][owner]" placeholder="myorg" class="form-control form-control-sm"></td>
+      <td><input name="new[0][repo]" placeholder="myrepo" class="form-control form-control-sm"></td>
+      <td><input name="new[0][forgejo_username]" placeholder="alice" class="form-control form-control-sm"></td>
+      <td><input type="password" autocomplete="off" name="new[0][access_token]" placeholder="access token" class="form-control form-control-sm"></td>
+    </tr>
+  </tbody>
+</table>
 {% endif %}
 {% endblock %}

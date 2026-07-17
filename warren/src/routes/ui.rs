@@ -1,7 +1,10 @@
 use crate::auth::SESSION_COOKIE;
 use crate::error::{AppError, AppResult};
 use crate::ids::new_session_token;
-use crate::models::{AgentNew, AgentPatch, ChannelNew, RequestNew, ScheduledPromptPatch};
+use crate::models::{
+    AgentForgejoConfigNew, AgentForgejoConfigPatch, AgentNew, AgentPatch, ChannelNew, RequestNew,
+    ScheduledPromptPatch,
+};
 use crate::templates::{
     format_interval, outcome_badge, AgentClaudeTemplate, AgentFormTemplate, AgentRow,
     AgentShellTemplate, AgentsTemplate, ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate,
@@ -18,6 +21,7 @@ use axum::{
     Form, Router,
 };
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -201,15 +205,153 @@ struct LoginForm {
     password: String,
 }
 
-#[derive(Deserialize)]
+/// Top-level fields parsed from the agent edit form. Forgejo config
+/// keys are reconstructed manually from the flat map because
+/// `serde_urlencoded` (which backs axum's `Form`) does not recurse into
+/// `HashMap<String, Inner>` for `cfg[uuid][field]` syntax — the keys
+/// reach us as literal strings.
 struct AgentForm {
     name: String,
     class: String,
-    #[serde(default)]
     kind: Option<String>,
     model: String,
-    #[serde(default)]
     prompt: String,
+    cfg: HashMap<Uuid, AgentForgejoConfigPatchForm>,
+    new: HashMap<String, AgentForgejoConfigNewForm>,
+}
+
+#[derive(Default, Clone)]
+struct AgentForgejoConfigPatchForm {
+    base_url: String,
+    owner: String,
+    repo: String,
+    forgejo_username: String,
+    access_token: String,
+}
+
+#[derive(Default)]
+struct AgentForgejoConfigNewForm {
+    base_url: String,
+    owner: String,
+    repo: String,
+    forgejo_username: String,
+    access_token: String,
+}
+
+fn parse_agent_form(mut form: HashMap<String, String>) -> Result<AgentForm, AppError> {
+    let name = form
+        .remove("name")
+        .ok_or_else(|| AppError::BadRequest("name required".into()))?;
+    let class = form
+        .remove("class")
+        .ok_or_else(|| AppError::BadRequest("class required".into()))?;
+    let model = form
+        .remove("model")
+        .ok_or_else(|| AppError::BadRequest("model required".into()))?;
+    let prompt = form.remove("prompt").unwrap_or_default();
+    let kind = form.remove("kind").filter(|v| !v.is_empty());
+
+    let mut cfg: HashMap<Uuid, AgentForgejoConfigPatchForm> = HashMap::new();
+    let mut new_map: HashMap<String, AgentForgejoConfigNewForm> = HashMap::new();
+    for (key, value) in &form {
+        // Split on the first '[' to separate the group prefix from the
+        // "[<id>]" segment and the "[<field>]" segment.
+        let (group, rest) = match key.split_once('[') {
+            Some((g, r)) => (g, r),
+            None => continue,
+        };
+        if group != "cfg" && group != "new" {
+            continue;
+        }
+        let rest = rest.trim_end_matches(']');
+        let (id_segment, field_segment) = match rest.split_once("][") {
+            Some((id, f)) => (id, f),
+            None => continue,
+        };
+        let field = field_segment.trim_end_matches(']');
+        match group {
+            "cfg" => {
+                let uuid = match Uuid::parse_str(id_segment) {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let entry = cfg.entry(uuid).or_default();
+                set_patch_field(entry, field, value);
+            }
+            "new" => {
+                let entry = new_map.entry(id_segment.to_string()).or_default();
+                set_new_field(entry, field, value);
+            }
+            _ => {}
+        }
+    }
+    Ok(AgentForm {
+        name,
+        class,
+        kind,
+        model,
+        prompt,
+        cfg,
+        new: new_map,
+    })
+}
+
+fn set_patch_field(p: &mut AgentForgejoConfigPatchForm, field: &str, value: &str) {
+    match field {
+        "base_url" => p.base_url = value.to_string(),
+        "owner" => p.owner = value.to_string(),
+        "repo" => p.repo = value.to_string(),
+        "forgejo_username" => p.forgejo_username = value.to_string(),
+        "access_token" => p.access_token = value.to_string(),
+        _ => {}
+    }
+}
+
+fn set_new_field(p: &mut AgentForgejoConfigNewForm, field: &str, value: &str) {
+    match field {
+        "base_url" => p.base_url = value.to_string(),
+        "owner" => p.owner = value.to_string(),
+        "repo" => p.repo = value.to_string(),
+        "forgejo_username" => p.forgejo_username = value.to_string(),
+        "access_token" => p.access_token = value.to_string(),
+        _ => {}
+    }
+}
+
+impl AgentForgejoConfigNewForm {
+    fn is_empty(&self) -> bool {
+        self.base_url.trim().is_empty()
+            && self.owner.trim().is_empty()
+            && self.repo.trim().is_empty()
+            && self.forgejo_username.trim().is_empty()
+            && self.access_token.is_empty()
+    }
+    fn into_model(self) -> AgentForgejoConfigNew {
+        AgentForgejoConfigNew {
+            base_url: self.base_url.trim().to_string(),
+            owner: self.owner.trim().to_string(),
+            repo: self.repo.trim().to_string(),
+            forgejo_username: self.forgejo_username.trim().to_string(),
+            access_token: self.access_token,
+        }
+    }
+}
+
+impl AgentForgejoConfigPatchForm {
+    fn into_patch(self) -> AgentForgejoConfigPatch {
+        let access_token = if self.access_token.is_empty() {
+            None
+        } else {
+            Some(self.access_token.clone())
+        };
+        AgentForgejoConfigPatch {
+            base_url: Some(self.base_url.trim().to_string()),
+            owner: Some(self.owner.trim().to_string()),
+            repo: Some(self.repo.trim().to_string()),
+            forgejo_username: Some(self.forgejo_username.trim().to_string()),
+            access_token,
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -257,10 +399,15 @@ async fn agents_page(
                 .await
                 .map(|rs| rs.len() as u64)
                 .unwrap_or(0);
+                let forgejo_configs =
+                    crate::db_ops::count_forgejo_configs_for_agent(&state.db, a.id)
+                        .await
+                        .unwrap_or(0);
                 rows.push(AgentRow {
                     agent: a,
                     status,
                     action_items,
+                    forgejo_configs,
                 });
             }
             let t = AgentsTemplate {
@@ -286,6 +433,7 @@ async fn agent_new_page(State(state): State<AppState>, headers: HeaderMap) -> Re
         flash: None,
         agent: None,
         form_action: "/admin/agents".into(),
+        forgejo_configs: vec![],
     };
     render(t)
 }
@@ -293,11 +441,15 @@ async fn agent_new_page(State(state): State<AppState>, headers: HeaderMap) -> Re
 async fn agent_create(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Form(form): Form<AgentForm>,
+    Form(raw): Form<HashMap<String, String>>,
 ) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
+    let form = match parse_agent_form(raw) {
+        Ok(f) => f,
+        Err(e) => return err_page(e),
+    };
     let new = AgentNew {
         name: form.name,
         class: form.class,
@@ -314,6 +466,7 @@ async fn agent_create(
                 flash: Some(Flash::success("agent created")),
                 agent: Some(agent),
                 form_action: format!("/admin/agents/{id}/edit"),
+                forgejo_configs: vec![],
             };
             render(t)
         }
@@ -331,12 +484,18 @@ async fn agent_edit_page(
     }
     match crate::db_ops::get_agent(&state.db, id).await {
         Ok(Some(agent)) => {
+            let forgejo_configs =
+                match crate::db_ops::list_forgejo_configs_for_agent(&state.db, id).await {
+                    Ok(v) => v,
+                    Err(e) => return err_page(e),
+                };
             let t = AgentFormTemplate {
                 title: Some("Edit agent"),
                 nav: Some("agents"),
                 flash: None,
                 agent: Some(agent),
                 form_action: format!("/admin/agents/{id}"),
+                forgejo_configs,
             };
             render(t)
         }
@@ -349,11 +508,15 @@ async fn agent_update(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
-    Form(form): Form<AgentForm>,
+    Form(raw): Form<HashMap<String, String>>,
 ) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
+    let form = match parse_agent_form(raw) {
+        Ok(f) => f,
+        Err(e) => return err_page(e),
+    };
     let patch = AgentPatch {
         name: Some(form.name),
         class: Some(form.class),
@@ -361,10 +524,68 @@ async fn agent_update(
         model: Some(form.model),
         prompt: Some(form.prompt),
     };
-    match crate::db_ops::update_agent(&state.db, id, &patch).await {
-        Ok(_) => Redirect::to("/admin/agents").into_response(),
-        Err(e) => err_page(e),
+    if let Err(e) = crate::db_ops::update_agent(&state.db, id, &patch).await {
+        return err_page(e);
     }
+    if let Err(e) = apply_forgejo_config_diff(&state.db, id, &form.cfg, form.new).await {
+        return err_page(e);
+    }
+    Redirect::to("/admin/agents").into_response()
+}
+
+async fn apply_forgejo_config_diff(
+    db: &crate::db::Db,
+    agent_id: Uuid,
+    cfg: &HashMap<Uuid, AgentForgejoConfigPatchForm>,
+    new: HashMap<String, AgentForgejoConfigNewForm>,
+) -> AppResult<()> {
+    for (cfg_id, p) in cfg {
+        if p.base_url.trim().is_empty()
+            || p.owner.trim().is_empty()
+            || p.repo.trim().is_empty()
+            || p.forgejo_username.trim().is_empty()
+        {
+            return Err(AppError::BadRequest(format!(
+                "forgejo config {cfg_id} has empty required field"
+            )));
+        }
+    }
+    for n in new.values() {
+        if n.is_empty() {
+            continue;
+        }
+        if n.base_url.trim().is_empty()
+            || n.owner.trim().is_empty()
+            || n.repo.trim().is_empty()
+            || n.forgejo_username.trim().is_empty()
+            || n.access_token.is_empty()
+        {
+            return Err(AppError::BadRequest(
+                "forgejo config has empty required field".into(),
+            ));
+        }
+    }
+
+    let existing = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
+    let submitted: HashSet<Uuid> = cfg.keys().copied().collect();
+
+    for (cfg_id, p) in cfg {
+        let patch: AgentForgejoConfigPatch = p.clone().into_patch();
+        crate::db_ops::update_forgejo_config(db, *cfg_id, &patch).await?;
+    }
+    for old in &existing {
+        if !submitted.contains(&old.id) {
+            crate::db_ops::delete_forgejo_config(db, old.id).await?;
+        }
+    }
+    for (_, n) in new {
+        if n.is_empty() {
+            continue;
+        }
+        let m = n.into_model();
+        crate::db_ops::create_forgejo_config(db, agent_id, &m).await?;
+    }
+    Ok(())
 }
 
 async fn agent_delete(

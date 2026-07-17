@@ -169,3 +169,44 @@ pub struct ScheduledPromptPatch {
     #[serde(default)]
     pub context_clear_threshold_pct: Option<i32>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentForgejoConfigNew {
+    pub forgejo_username: String,
+    pub base_url: String,
+    pub owner: String,
+    pub repo: String,
+    pub access_token: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentForgejoConfigPatch {
+    #[serde(default)]
+    pub forgejo_username: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub access_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionItem {
+    pub config_id: Uuid,
+    pub host: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: i64,
+    pub title: String,
+    pub html_url: String,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionItemsResponse {
+    pub issues: Vec<ActionItem>,
+    pub pull_requests: Vec<ActionItem>,
+}

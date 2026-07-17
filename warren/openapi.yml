@@ -445,6 +445,57 @@ components:
             recent_runs:
               type: array
               items: { $ref: '#/components/schemas/ScheduledPromptRun' }
+    AgentForgejoConfig:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        agent_id: { type: string, format: uuid }
+        forgejo_username: { type: string }
+        base_url: { type: string }
+        owner: { type: string }
+        repo: { type: string }
+        access_token: { type: string }
+        created_at: { type: string, format: date-time }
+      required: [id, agent_id, forgejo_username, base_url, owner, repo, access_token, created_at]
+    AgentForgejoConfigNew:
+      type: object
+      properties:
+        forgejo_username: { type: string }
+        base_url: { type: string }
+        owner: { type: string }
+        repo: { type: string }
+        access_token: { type: string }
+      required: [forgejo_username, base_url, owner, repo, access_token]
+    AgentForgejoConfigPatch:
+      type: object
+      properties:
+        forgejo_username: { type: string }
+        base_url: { type: string }
+        owner: { type: string }
+        repo: { type: string }
+        access_token: { type: string }
+    ActionItem:
+      type: object
+      properties:
+        config_id: { type: string, format: uuid }
+        host: { type: string }
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer, format: int64 }
+        title: { type: string }
+        html_url: { type: string }
+        updated_at: { type: string, format: date-time, nullable: true }
+      required: [config_id, host, owner, repo, number, title, html_url, updated_at]
+    ActionItemsResponse:
+      type: object
+      properties:
+        issues:
+          type: array
+          items: { $ref: '#/components/schemas/ActionItem' }
+        pull_requests:
+          type: array
+          items: { $ref: '#/components/schemas/ActionItem' }
+      required: [issues, pull_requests]
 paths:
   /api/login:
     post:
@@ -1244,3 +1295,120 @@ paths:
               schema: { $ref: '#/components/schemas/ScheduledPromptRun' }
         '404': { description: Schedule not found }
         '409': { description: Schedule is disabled }
+  /api/agents/{id}/forgejo-configs:
+    get:
+      tags: [forgejo]
+      summary: List the Forgejo configs declared for an agent
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AgentForgejoConfig' }
+        '404': { description: Agent not found }
+    post:
+      tags: [forgejo]
+      summary: Add a new Forgejo config for an agent
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentForgejoConfigNew' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentForgejoConfig' }
+        '400': { description: Missing required field or invalid base_url }
+        '404': { description: Agent not found }
+  /api/agents/{id}/action-items:
+    get:
+      tags: [forgejo]
+      summary: Fetch open items assigned to the agent with no open blockers (issues + PRs partitioned)
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActionItemsResponse' }
+        '400': { description: A config has an empty forgejo_username }
+        '404': { description: Agent not found }
+        '502': { description: Upstream Forgejo call failed }
+  /api/forgejo-configs/{config_id}:
+    get:
+      tags: [forgejo]
+      summary: Fetch one Forgejo config
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: config_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentForgejoConfig' }
+        '404': { description: Config not found }
+    put:
+      tags: [forgejo]
+      summary: Update one Forgejo config
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: config_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentForgejoConfigPatch' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentForgejoConfig' }
+        '400': { description: Invalid base_url }
+        '404': { description: Config not found }
+    delete:
+      tags: [forgejo]
+      summary: Delete one Forgejo config
+      security:
+        - adminSession: []
+      parameters:
+        - in: path
+          name: config_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '404': { description: Config not found }

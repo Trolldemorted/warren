@@ -113,6 +113,23 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .claude-grid .term-wrap { overflow: auto; }
 .claude-grid #term { display: block; }
 
+/* §A.6 / FF-mobile helper-textarea fix. xterm.js's bundled CSS parks
+   the focusable helper textarea at `left: -9999em` so Chromium doesn't
+   blink a caret over the canvas. `-9999em` resolves to ~160k px — fine
+   on Chromium, but Firefox mobile (Desktop Mode) refuses to deliver
+   keydown events to an element that far outside the viewport, so the
+   `attachCustomKeyEventHandler` shim below never fires and Backspace
+   stops working whenever the canvas overflows the wrap. Pull the
+   textarea back to (0,0) of the wrap (inside the 0.5rem padding, so
+   it can't intercept canvas clicks) and shrink it to 1×1 to keep
+   Chromium's caret hidden. `!important` overrides xterm.css. */
+.claude-grid .xterm-helper-textarea {
+  left: 0 !important;
+  top: 0 !important;
+  width: 1px !important;
+  height: 1px !important;
+}
+
 /* Action-button toast: bottom-right, fades in on `.visible`, auto-dismisses.
    See `showActionToast` for the JS that emits one on every action-button
    response (success or failure). Without this, a Restart click that kills
@@ -410,6 +427,38 @@ term.attachCustomKeyEventHandler(e => {
   emitBackspace();
   return false;
 });
+
+// §A.6 / Firefox-mobile fallback. Even with the helper textarea in the
+// viewport (CSS override above), Firefox mobile Desktop Mode sometimes
+// routes Backspace to <body> instead of the focused element when the
+// soft keyboard is up — `attachCustomKeyEventHandler` never sees it.
+// Add a document-level keydown that fires for Backspace whenever focus
+// is NOT on a real input (so we don't eat keystrokes in the form
+// fields above the terminal). xterm.js's helper textarea is excluded —
+// it's a `<textarea>` by tag, but it's the terminal's focus target, not
+// user-editable form content. Debounce is shared with the helper path
+// so the two can never double-fire.
+function isFormFieldFocused() {
+  const a = document.activeElement;
+  if (!a) return false;
+  if (a.classList && a.classList.contains('xterm-helper-textarea')) return false;
+  const tag = a.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (a.isContentEditable) return true;
+  return false;
+}
+document.addEventListener('keydown', e => {
+  if (e.type !== 'keydown') return;
+  if (!isBackspaceEvent(e)) return;
+  if (isFormFieldFocused()) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const now = (typeof performance !== 'undefined' && performance.now)
+    ? performance.now() : Date.now();
+  if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return;
+  lastBackspaceSentAt = now;
+  emitBackspace();
+}, true);
 
 // §Copy affordance: full-scrollback copy via the Clipboard API with a
 // document.execCommand fallback for non-secure contexts. Status surfaces
