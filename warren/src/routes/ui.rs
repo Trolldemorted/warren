@@ -399,15 +399,60 @@ async fn agents_page(
                 .await
                 .map(|rs| rs.len() as u64)
                 .unwrap_or(0);
-                let forgejo_configs =
-                    crate::db_ops::count_forgejo_configs_for_agent(&state.db, a.id)
-                        .await
-                        .unwrap_or(0);
+                // Fetch forgejo unblocked-assigned counts across all
+                // configs for this agent. Each config may have a
+                // different `base_url`, `owner`, `repo`, and
+                // `forgejo_username`, so we iterate. Per-config
+                // failures (auth, rate limit, transient network) are
+                // logged and counted as zero — never failing the whole
+                // row, so one broken repo can't blank the dashboard.
+                //
+                // NB: this runs on every render. With the "Reload every
+                // 5s" auto-refresh, a 50-agent fleet is 50 renderings /
+                // 10 s, each doing K (config) × (1 issue list + N
+                // issue-dependency lookups) HTTP calls. If that ever
+                // becomes a hot path, memoize on (config_id, fetched_at)
+                // with a short TTL — see `forgejo::fetch_unblocked_assigned`.
+                let configs = crate::db_ops::list_forgejo_configs_for_agent(&state.db, a.id)
+                    .await
+                    .unwrap_or_default();
+                let mut forgejo_issues = 0u64;
+                let mut forgejo_prs = 0u64;
+                for cfg in &configs {
+                    if cfg.forgejo_username.trim().is_empty() {
+                        continue;
+                    }
+                    match crate::forgejo::fetch_unblocked_assigned(
+                        &cfg.base_url,
+                        &cfg.owner,
+                        &cfg.repo,
+                        &cfg.access_token,
+                        &cfg.forgejo_username,
+                    )
+                    .await
+                    {
+                        Ok((iss, prs)) => {
+                            forgejo_issues += iss.len() as u64;
+                            forgejo_prs += prs.len() as u64;
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "agents_page: forgejo cfg {} ({}@{}/{}) fetch failed: {e}",
+                                cfg.id,
+                                cfg.forgejo_username,
+                                cfg.owner,
+                                cfg.repo
+                            );
+                            log::debug!("agents_page: forgejo cfg {} detail: {e:?}", cfg.id);
+                        }
+                    }
+                }
                 rows.push(AgentRow {
                     agent: a,
                     status,
                     action_items,
-                    forgejo_configs,
+                    forgejo_issues,
+                    forgejo_prs,
                 });
             }
             let t = AgentsTemplate {

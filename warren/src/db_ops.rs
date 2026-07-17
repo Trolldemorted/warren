@@ -1277,10 +1277,3 @@ pub async fn delete_forgejo_config(db: &Db, id: Uuid) -> AppResult<()> {
     }
     Ok(())
 }
-
-pub async fn count_forgejo_configs_for_agent(db: &Db, agent_id: Uuid) -> AppResult<u64> {
-    Ok(agent_forgejo_config::Entity::find()
-        .filter(agent_forgejo_config::Column::AgentId.eq(agent_id))
-        .count(db)
-        .await?)
-}
