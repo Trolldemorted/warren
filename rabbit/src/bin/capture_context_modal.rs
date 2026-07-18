@@ -135,7 +135,7 @@ fn main() -> Result<()> {
         anyhow::bail!(
             "capture does not contain any recognizable /context markers; \
              got text snippet: {:?}",
-            &lower.chars().take(400).collect::<String>()
+            lower.chars().take(400).collect::<String>()
         );
     }
     Ok(())
