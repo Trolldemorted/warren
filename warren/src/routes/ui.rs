@@ -1355,32 +1355,39 @@ fn join_label_list_csv(labels: &[String]) -> String {
 
 fn parse_scheduled_prompt_form(
     form: ScheduledPromptForm,
+    is_edit: bool,
 ) -> Result<ScheduledPromptFormParsed, AppError> {
-    let scope = form
-        .scope
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("team");
-    if scope != "team" && scope != "agent" {
-        return Err(AppError::BadRequest(
-            "scope must be 'team' or 'agent'".into(),
-        ));
-    }
-    let target_class_trimmed = form.target_class.trim().to_string();
-    let target_class_opt = if target_class_trimmed.is_empty() {
-        None
+    // On edit the address fields aren't submitted (scope is locked at
+    // creation); skip the team/agent address validation entirely so
+    // they don't have to round-trip the empty values just to satisfy
+    // the create-time check.
+    let (scope, target_class_opt, target_kind_opt, agent_id) = if is_edit {
+        (String::new(), None, None, None)
     } else {
-        Some(target_class_trimmed)
-    };
-    let target_kind_trimmed = form.target_kind.trim().to_string();
-    let target_kind_opt = if target_kind_trimmed.is_empty() {
-        None
-    } else {
-        Some(target_kind_trimmed)
-    };
-    let agent_id =
-        {
+        let scope = form
+            .scope
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("team");
+        if scope != "team" && scope != "agent" {
+            return Err(AppError::BadRequest(
+                "scope must be 'team' or 'agent'".into(),
+            ));
+        }
+        let target_class_trimmed = form.target_class.trim().to_string();
+        let target_class_opt = if target_class_trimmed.is_empty() {
+            None
+        } else {
+            Some(target_class_trimmed)
+        };
+        let target_kind_trimmed = form.target_kind.trim().to_string();
+        let target_kind_opt = if target_kind_trimmed.is_empty() {
+            None
+        } else {
+            Some(target_kind_trimmed)
+        };
+        let agent_id = {
             let t = form.agent_id.trim();
             if t.is_empty() {
                 None
@@ -1390,33 +1397,40 @@ fn parse_scheduled_prompt_form(
                 })?)
             }
         };
-    match scope {
-        "team" => {
-            if target_class_opt.is_none() {
-                return Err(AppError::BadRequest(
-                    "target_class required for team scope".into(),
-                ));
+        match scope {
+            "team" => {
+                if target_class_opt.is_none() {
+                    return Err(AppError::BadRequest(
+                        "target_class required for team scope".into(),
+                    ));
+                }
+                if agent_id.is_some() {
+                    return Err(AppError::BadRequest(
+                        "agent_id must be empty for team scope".into(),
+                    ));
+                }
             }
-            if agent_id.is_some() {
-                return Err(AppError::BadRequest(
-                    "agent_id must be empty for team scope".into(),
-                ));
+            "agent" => {
+                if agent_id.is_none() {
+                    return Err(AppError::BadRequest(
+                        "agent_id required for agent scope".into(),
+                    ));
+                }
+                if target_class_opt.is_some() || target_kind_opt.is_some() {
+                    return Err(AppError::BadRequest(
+                        "target_class/target_kind must be empty for agent scope".into(),
+                    ));
+                }
             }
+            _ => unreachable!(),
         }
-        "agent" => {
-            if agent_id.is_none() {
-                return Err(AppError::BadRequest(
-                    "agent_id required for agent scope".into(),
-                ));
-            }
-            if target_class_opt.is_some() || target_kind_opt.is_some() {
-                return Err(AppError::BadRequest(
-                    "target_class/target_kind must be empty for agent scope".into(),
-                ));
-            }
-        }
-        _ => unreachable!(),
-    }
+        (
+            scope.to_string(),
+            target_class_opt,
+            target_kind_opt,
+            agent_id,
+        )
+    };
     if form.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
     }
@@ -1469,7 +1483,7 @@ fn parse_scheduled_prompt_form(
     };
     let additional_labels = parse_label_list(form.additional_labels.as_deref().unwrap_or(""));
     Ok(ScheduledPromptFormParsed {
-        scope: scope.to_string(),
+        scope,
         target_class: target_class_opt,
         target_kind: target_kind_opt,
         agent_id,
@@ -1605,7 +1619,7 @@ async fn scheduled_prompt_create(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let parsed = match parse_scheduled_prompt_form(form) {
+    let parsed = match parse_scheduled_prompt_form(form, false) {
         Ok(p) => p,
         Err(e) => return err_page(e),
     };
@@ -1696,7 +1710,7 @@ async fn scheduled_prompt_update(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let parsed = match parse_scheduled_prompt_form(form) {
+    let parsed = match parse_scheduled_prompt_form(form, true) {
         Ok(p) => p,
         Err(e) => return err_page(e),
     };

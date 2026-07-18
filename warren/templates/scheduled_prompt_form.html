@@ -11,6 +11,30 @@
     <label class="form-label">Name</label>
     <input class="form-control" name="name" required value="{{ name }}">
   </div>
+  {% if let Some(p) = prompt %}
+  <div class="mb-3">
+    <label class="form-label">Address</label>
+    {% if scope == "team" %}
+      <div class="form-control-plaintext">
+        <strong>Team</strong> — pool <code>{{ target_class }}{% if target_kind.is_empty() %}{% else %}:{{ target_kind }}{% endif %}</code>
+      </div>
+    {% else %}
+      <div class="form-control-plaintext">
+        <strong>Agent</strong> —
+        {% if let Some(selected_id) = agent_id %}
+          {% for a in agents %}
+            {% if a.id == selected_id.to_string() %}
+              <a href="/admin/agents/{{ a.id }}/edit"><code>{{ a.name }}</code></a> ({{ a.class }}{% if a.kind.is_empty() %}{% else %}:{{ a.kind }}{% endif %})
+            {% endif %}
+          {% endfor %}
+        {% else %}
+          <span class="text-muted">(missing agent)</span>
+        {% endif %}
+      </div>
+    {% endif %}
+    <small class="text-muted">The target is set when the schedule is created. To change it, delete this schedule and create a new one.</small>
+  </div>
+  {% else %}
   <fieldset class="mb-3">
     <legend class="form-label">Address</legend>
     <div class="form-check">
@@ -55,6 +79,7 @@
       <small class="text-muted">Fires when this agent has unblocked forgejo items (unless "Ignore pending forgejo work" is on).</small>
     {% endif %}
   </div>
+  {% endif %}
   <div class="mb-3">
     <label class="form-label">Prompt text</label>
     <textarea name="prompt_text" class="form-control" rows="4" required>{{ prompt_text }}</textarea>
@@ -146,6 +171,7 @@
 {% endif %}
 {% endif %}
 {% endif %}
+{% if prompt.is_none() %}
 <script>
 (() => {
   const sync = () => {
@@ -161,4 +187,5 @@
   sync();
 })();
 </script>
+{% endif %}
 {% endblock %}
