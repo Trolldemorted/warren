@@ -2958,12 +2958,18 @@ mod tests {
         use std::sync::mpsc as std_mpsc;
         use std::time::Instant;
 
-        // `/bin/sh -c 'stty raw -echo; exec cat'` puts cat into raw mode
-        // so the kernel doesn't translate 0x7f into an erase sequence
-        // before we can observe the literal byte on the master side.
+        // `/bin/sh -c 'stty raw -echo; printf RDY; exec cat'` puts cat
+        // into raw mode so the kernel doesn't translate 0x7f into an
+        // erase sequence before we can observe the literal byte on the
+        // master side. The `printf RDY` marker is emitted *after* stty
+        // runs, so the test can wait for it before typing — otherwise
+        // the writes race the stty call and land in cooked mode.
         let mut pty = Pty::spawn(
             "/bin/sh",
-            &["-c".to_string(), "stty raw -echo; exec cat".to_string()],
+            &[
+                "-c".to_string(),
+                "stty raw -echo; printf RDY; exec cat".to_string(),
+            ],
             "/tmp",
             80,
             24,
@@ -3012,6 +3018,27 @@ mod tests {
                 }
             }
         });
+
+        // Wait until the child has applied `stty raw -echo` before
+        // typing. The shell prints the `RDY` marker only after stty
+        // runs, so observing it proves the terminal is in raw mode and
+        // the DEL byte we send next won't be swallowed by the line
+        // discipline as an erase. Without this handshake the typed bytes
+        // race the stty call and the test flakes in cooked mode.
+        let mut ready = Vec::new();
+        let ready_deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.windows(3).any(|w| w == b"RDY") && Instant::now() < ready_deadline {
+            match echo_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(chunk) => ready.extend_from_slice(&chunk),
+                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(
+            ready.windows(3).any(|w| w == b"RDY"),
+            "child never signalled raw-mode readiness; saw {:?}",
+            String::from_utf8_lossy(&ready)
+        );
 
         // Type "abc<BS>x" — every byte travels through the shared
         // writer exactly as the War UI's onData handler feeds them in.
