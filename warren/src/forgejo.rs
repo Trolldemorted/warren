@@ -19,6 +19,56 @@ fn client(base_url: &str, access_token: &str) -> AppResult<Forgejo> {
     .map_err(|e| AppError::BadRequest(format!("forgejo client: {e}")))
 }
 
+/// Build the exact URL forgejo-api will GET for `issue_list_issues`.
+/// Mirrors the path layout in `forgejo-api`'s generated endpoint
+/// (`/api/v1/repos/{owner}/{repo}/issues`) and percent-encodes owner
+/// / repo the same way `urlencoding::encode` does. The query is
+/// passed verbatim so callers can attach their own params without
+/// double-encoding — pass `""` for no query string.
+fn issue_list_url(base_url: &str, owner: &str, repo: &str, query: &str) -> AppResult<String> {
+    let mut url = Url::parse(base_url)
+        .map_err(|e| AppError::BadRequest(format!("invalid forgejo base_url: {e}")))?;
+    {
+        let mut segs = url.path_segments_mut().map_err(|_| {
+            AppError::BadRequest(format!("forgejo base_url has no path: {base_url}"))
+        })?;
+        segs.pop_if_empty();
+        segs.push("api");
+        segs.push("v1");
+        segs.push("repos");
+        segs.push(owner);
+        segs.push(repo);
+        segs.push("issues");
+    }
+    if !query.is_empty() {
+        url.set_query(Some(query));
+    }
+    Ok(url.to_string())
+}
+
+/// Build the exact URL forgejo-api will GET for
+/// `issue_list_issue_dependencies`. Same path layout as
+/// `issue_list_url`, plus `/issues/{index}/dependencies`.
+fn issue_deps_url(base_url: &str, owner: &str, repo: &str, index: i64) -> AppResult<String> {
+    let mut url = Url::parse(base_url)
+        .map_err(|e| AppError::BadRequest(format!("invalid forgejo base_url: {e}")))?;
+    {
+        let mut segs = url.path_segments_mut().map_err(|_| {
+            AppError::BadRequest(format!("forgejo base_url has no path: {base_url}"))
+        })?;
+        segs.pop_if_empty();
+        segs.push("api");
+        segs.push("v1");
+        segs.push("repos");
+        segs.push(owner);
+        segs.push(repo);
+        segs.push("issues");
+        segs.push(&index.to_string());
+        segs.push("dependencies");
+    }
+    Ok(url.to_string())
+}
+
 fn deps_have_open(deps: &[Issue]) -> bool {
     deps.iter()
         .any(|d| matches!(d.state, Some(StateType::Open)))
@@ -59,6 +109,12 @@ pub async fn fetch_unblocked_assigned(
     forgejo_username: &str,
 ) -> AppResult<(Vec<ActionItem>, Vec<ActionItem>)> {
     let api = client(base_url, access_token)?;
+    let issues_url = issue_list_url(
+        base_url,
+        owner,
+        repo,
+        &format!("state=open&assigned_by={forgejo_username}"),
+    )?;
     let issues = api
         .issue_list_issues(
             owner,
@@ -70,7 +126,8 @@ pub async fn fetch_unblocked_assigned(
             },
         )
         .all()
-        .await?;
+        .await
+        .map_err(|e| AppError::BadGateway(format!("GET {issues_url}: {e}")))?;
 
     let mut issue_items = Vec::new();
     let mut pr_items = Vec::new();
@@ -79,16 +136,19 @@ pub async fn fetch_unblocked_assigned(
             Some(n) => n,
             None => continue,
         };
+        let deps_url = issue_deps_url(base_url, owner, repo, number)?;
         let deps = match api
             .issue_list_issue_dependencies(owner, repo, number)
             .send()
             .await
+            .map_err(|e| AppError::BadGateway(format!("GET {deps_url}: {e}")))
         {
             Ok(d) => d,
             Err(e) => {
                 log::warn!(
-                    "forgejo: cfg {} ({}/{}) issue #{} dep lookup failed ({e}); treating as unblocked",
-                    config_id, owner, repo, number
+                    "forgejo: cfg {} GET {} failed ({e}); treating as unblocked",
+                    config_id,
+                    deps_url
                 );
                 Vec::new()
             }
@@ -151,18 +211,26 @@ pub async fn fetch_unblocked_unassigned_with_label(
         return Ok((Vec::new(), Vec::new()));
     }
     let api = client(base_url, access_token)?;
+    let labels_csv = labels.join(",");
+    let issues_url = issue_list_url(
+        base_url,
+        owner,
+        repo,
+        &format!("state=open&labels={labels_csv}"),
+    )?;
     let issues = api
         .issue_list_issues(
             owner,
             repo,
             IssueListIssuesQuery {
                 state: Some(IssueListIssuesQueryState::Open),
-                labels: Some(labels.join(",")),
+                labels: Some(labels_csv),
                 ..Default::default()
             },
         )
         .all()
-        .await?;
+        .await
+        .map_err(|e| AppError::BadGateway(format!("GET {issues_url}: {e}")))?;
 
     let mut issue_items = Vec::new();
     let mut pr_items = Vec::new();
@@ -180,19 +248,19 @@ pub async fn fetch_unblocked_unassigned_with_label(
             Some(n) => n,
             None => continue,
         };
+        let deps_url = issue_deps_url(base_url, owner, repo, number)?;
         let deps = match api
             .issue_list_issue_dependencies(owner, repo, number)
             .send()
             .await
+            .map_err(|e| AppError::BadGateway(format!("GET {deps_url}: {e}")))
         {
             Ok(d) => d,
             Err(e) => {
                 log::warn!(
-                    "forgejo: cfg {} ({}/{}) issue #{} dep lookup failed ({e}); treating as unblocked",
+                    "forgejo: cfg {} GET {} failed ({e}); treating as unblocked",
                     config_id,
-                    owner,
-                    repo,
-                    number
+                    deps_url
                 );
                 Vec::new()
             }
@@ -275,7 +343,7 @@ pub async fn unblocked_work_items_for_agent(
                     "{}/{}: {}",
                     cfg.owner,
                     cfg.repo,
-                    truncate(&e.to_string(), 120)
+                    truncate(&e.to_string(), PER_CONFIG_ERROR_MAX)
                 ));
             }
         }
@@ -298,7 +366,7 @@ pub async fn unblocked_work_items_for_agent(
                         "{}/{}: {}",
                         cfg.owner,
                         cfg.repo,
-                        truncate(&e.to_string(), 120)
+                        truncate(&e.to_string(), PER_CONFIG_ERROR_MAX)
                     ));
                 }
             }
@@ -353,7 +421,7 @@ pub async fn count_work_items_for_agent(
                     "{}/{}: {}",
                     cfg.owner,
                     cfg.repo,
-                    truncate(&e.to_string(), 120)
+                    truncate(&e.to_string(), PER_CONFIG_ERROR_MAX)
                 ));
             }
         }
@@ -376,7 +444,7 @@ pub async fn count_work_items_for_agent(
                         "{}/{}: {}",
                         cfg.owner,
                         cfg.repo,
-                        truncate(&e.to_string(), 120)
+                        truncate(&e.to_string(), PER_CONFIG_ERROR_MAX)
                     ));
                 }
             }
@@ -400,4 +468,50 @@ fn truncate(s: &str, max: usize) -> String {
     out.push_str(&s[..end]);
     out.push('…');
     out
+}
+
+/// Cap for the per-config error string that surfaces in the
+/// agents-page dashboard. Sized so the full forgejo URL (`GET
+/// {base}/api/v1/repos/{owner}/{repo}/issues?…`) plus a short inner
+/// error survives in the badge `title` attribute.
+const PER_CONFIG_ERROR_MAX: usize = 240;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_list_url_strips_trailing_slash_and_appends_path() {
+        let url = issue_list_url(
+            "https://git.stronk.pw/",
+            "Patrician3",
+            "Patrizia3",
+            "state=open&assigned_by=p3-claude-rewrite-miniax",
+        )
+        .expect("URL must build");
+        assert_eq!(
+            url,
+            "https://git.stronk.pw/api/v1/repos/Patrician3/Patrizia3/issues?state=open&assigned_by=p3-claude-rewrite-miniax"
+        );
+    }
+
+    #[test]
+    fn issue_list_url_percent_encodes_owner_and_repo() {
+        let url = issue_list_url("https://forge.example/", "foo bar", "baz/qux", "")
+            .expect("URL must build");
+        assert_eq!(
+            url,
+            "https://forge.example/api/v1/repos/foo%20bar/baz%2Fqux/issues"
+        );
+    }
+
+    #[test]
+    fn issue_deps_url_appends_issue_index_and_segment() {
+        let url =
+            issue_deps_url("https://git.example", "owner", "repo", 116).expect("URL must build");
+        assert_eq!(
+            url,
+            "https://git.example/api/v1/repos/owner/repo/issues/116/dependencies"
+        );
+    }
 }
