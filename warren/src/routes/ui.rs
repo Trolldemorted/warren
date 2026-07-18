@@ -1317,10 +1317,15 @@ async fn agent_shell_page(
 #[derive(Deserialize)]
 struct NewScheduledPromptForm {
     scope: Option<String>,
-    target_class: String,
-    target_kind: String,
+    /// Address fields are `Option<String>` because the browser omits
+    /// disabled inputs from form submissions. When scope=agent, the
+    /// team-address fields are hidden + disabled and won't be sent;
+    /// when scope=team, the agent field is hidden + disabled. The
+    /// server-side parser rejects mismatched scope/address combos.
+    target_class: Option<String>,
+    target_kind: Option<String>,
     /// Raw agent selector; either an agent id (uuid string) or empty.
-    agent_id: String,
+    agent_id: Option<String>,
     name: String,
     prompt_text: String,
     interval_seconds: String,
@@ -1489,23 +1494,21 @@ fn parse_new_scheduled_prompt_form(
             "scope must be 'team' or 'agent'".into(),
         ));
     }
-    let target_class_opt = {
-        let t = form.target_class.trim();
+    let target_class_opt = form.target_class.as_deref().map(str::trim).and_then(|t| {
         if t.is_empty() {
             None
         } else {
             Some(t.to_string())
         }
-    };
-    let target_kind_opt = {
-        let t = form.target_kind.trim();
+    });
+    let target_kind_opt = form.target_kind.as_deref().map(str::trim).and_then(|t| {
         if t.is_empty() {
             None
         } else {
             Some(t.to_string())
         }
-    };
-    let agent_id = match form.agent_id.trim() {
+    });
+    let agent_id = match form.agent_id.as_deref().map(str::trim).unwrap_or("") {
         "" => None,
         t => Some(
             Uuid::parse_str(t)

@@ -29,7 +29,7 @@
   <div data-scope-panel="team" class="row" {% if scope != "team" %}hidden{% endif %}>
     <div class="col-md-6 mb-3">
       <label class="form-label">Target class</label>
-      <select class="form-select" name="target_class" required>
+      <select class="form-select" name="target_class" data-scope-required>
         <option value="" disabled {% if scope == "team" && target_class.is_empty() %}selected{% endif %}>Select a class…</option>
         {% for c in classes %}<option value="{{ c }}" {% if scope == "team" && target_class == c.as_str() %}selected{% endif %}>{{ c }}</option>{% endfor %}
       </select>
@@ -48,7 +48,7 @@
     {% if agents.is_empty() %}
       <div class="alert alert-warning mb-0">No agents registered.</div>
     {% else %}
-      <select class="form-select" name="agent_id" required>
+      <select class="form-select" name="agent_id" data-scope-required>
         <option value="" disabled {% if scope == "agent" && agent_id.is_none() %}selected{% endif %}>Select an agent…</option>
         {% for a in agents %}<option value="{{ a.id }}" {% if scope == "agent" %}{% if let Some(id) = agent_id %}{% if id.to_string() == a.id.as_str() %}selected{% endif %}{% endif %}{% endif %}>{{ a.name }} ({{ a.class }}{% if a.kind.is_empty() %}{% else %}:{{ a.kind }}{% endif %})</option>{% endfor %}
       </select>
@@ -116,7 +116,18 @@
     const checked = document.querySelector('input[name="scope"]:checked');
     const scope = checked ? checked.value : 'team';
     document.querySelectorAll('[data-scope-panel]').forEach(el => {
-      el.hidden = el.dataset.scopePanel !== scope;
+      const active = el.dataset.scopePanel === scope;
+      el.hidden = !active;
+      // Required fields inside a hidden panel block submission with
+      // "not focusable" — disable + drop required on hidden panels.
+      el.querySelectorAll('[data-scope-required]').forEach(f => {
+        f.disabled = !active;
+        if (active) {
+          f.setAttribute('required', '');
+        } else {
+          f.removeAttribute('required');
+        }
+      });
     });
   };
   document.querySelectorAll('input[name="scope"]').forEach(r => {
