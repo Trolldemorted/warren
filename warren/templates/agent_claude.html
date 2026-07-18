@@ -507,6 +507,41 @@ if (isTouchDevice) {
   }
 }
 
+// §Pan the terminal on touch/wheel input. xterm.js installs
+// `passive: false` listeners for `touchmove` and `wheel` directly on
+// its viewport (see the grep-set in xterm.js v5 —
+// `addEventListener("touchmove", …, { passive: !1 })` and
+// `addEventListener("wheel", n.wheel, { passive: !1 })`). Their
+// internals fall through to `this.cancel(e)` which calls
+// `e.preventDefault()`, killing the browser's default "scroll the
+// closest scroll container" behavior even when our `.term-wrap` has
+// `overflow: auto`. Result: on FF mobile the swipe dies inside xterm
+// without ever reaching `.term-wrap`, and on desktop mouse-wheel
+// pan never bubbles there either.
+//
+// CSS-only fixes (`pointer-events: none` on `.xterm-viewport`,
+// `touch-action: pan-x pan-y pinch-zoom` on `.term-wrap`) can't help:
+// `pointer-events` controls hit-test targeting but xterm's listeners
+// are already attached to the viewport's children, so the events still
+// hit xterm; `touch-action` is an ancestor-scoped intersection that
+// doesn't strip preventDefault from a descendant listener.
+//
+// Capture-phase `stopImmediatePropagation` on the wrap is the right
+// lever: it runs BEFORE xterm's bubble-phase listener on the
+// viewport, aborts the chain, never calls preventDefault on the
+// browser's default scroll pipeline, and `.term-wrap`'s `overflow:
+// auto` finally gets to pan the canvas content. Same hook also fixes
+// desktop wheel-pan (free of charge). Listening on `.term-wrap`
+// bounds the suppression to inside-the-terminal; the `<aside>`
+// scroll area below is unaffected.
+(function blockXtermScrollListeners() {
+  const wrap = document.querySelector('.claude-grid .term-wrap');
+  if (!wrap) return;
+  const swallow = e => { e.stopImmediatePropagation(); };
+  wrap.addEventListener('touchmove', swallow, { capture: true });
+  wrap.addEventListener('wheel', swallow, { capture: true });
+})();
+
 // §A.7 / seq-numbered snapshot protocol — buffer that holds live binary
 // frames between WS open and the first `screen_snapshot` apply, so the
 // snapshot's `after_seq` watermark can trim frames the snapshot already
