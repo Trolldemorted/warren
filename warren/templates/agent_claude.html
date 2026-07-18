@@ -10,8 +10,14 @@
   margin-top: 1rem;
   /* §Fill the viewport below the fixed navbar (4.5rem from base.html).
      Caps the page at one screen so wheel scroll stays inside the
-     terminal wrap / sidebar and can't push the whole layout off-screen. */
+     terminal wrap / sidebar and can't push the whole layout off-screen.
+     `min-height: 0` overrides the grid default so a tall xterm canvas
+     can't force the grid past its calc() height (which would otherwise
+     scroll the body up on FF Mobile as soon as the helper textarea
+     gains focus). */
   height: calc(100vh - 4.5rem);
+  min-height: 0;
+  overflow: hidden;
 }
 .claude-grid .term-wrap {
   background: #0d1117;
@@ -133,6 +139,21 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   bottom: auto !important;
   width: 1px !important;
   height: 1px !important;
+}
+
+/* §A.6 / FF-mobile scroll containment. When the soft keyboard opens
+   on Firefox Mobile, the browser tries to keep the focused element
+   (xterm's helper textarea, parked at (0,0) of the wrap) in view by
+   scrolling the nearest scrollable ancestor. Without this rule,
+   "nearest" can resolve to the body — scrolling the whole page up so
+   the prompt leaves the viewport. `scroll-padding` makes any
+   `scrollIntoView` on a child keep some room around the focus target,
+   and `overscroll-behavior: contain` stops a scrolled wrap from
+   bubbling scroll back to the page. Together they keep the wrap
+   contained: scroll happens inside the wrap, the body doesn't move. */
+.claude-grid .term-wrap {
+  scroll-padding: 0 !important;
+  overscroll-behavior: contain;
 }
 
 /* Action-button toast: bottom-right, fades in on `.visible`, auto-dismisses.
@@ -348,7 +369,51 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   mouseEvents: false,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
-term.focus();
+// §A.6 / FF-mobile scroll guard. xterm's `focus()` doesn't pass
+// `preventScroll: true`, so on Firefox Mobile the browser scrolls the
+// body to bring the helper textarea (at (0,0) of the wrap) into view
+// when the soft keyboard opens. Bypass xterm's focus path entirely and
+// call the helper textarea's focus directly with `preventScroll: true`
+// — the same internal call xterm would make, just before the browser
+// can auto-scroll. The capture-phase focusin handler above is the
+// belt-and-braces fallback for cases where xterm re-focuses the
+// textarea mid-keystroke (it does this every time `term.write` runs
+// with the cursor in the input region).
+function focusTerm(opts = { preventScroll: true }) {
+  // The helper textarea is xterm's focusable element; reach it the
+  // same way xterm's internal focus does. Falls back to term.focus()
+  // (the buggy path) if the textarea isn't yet attached — xterm
+  // attaches it on `open()` so this is just a safety net.
+  const ta = document.querySelector('.claude-grid .xterm-helper-textarea');
+  if (ta) ta.focus(opts);
+  else term.focus();
+}
+focusTerm();
+
+// §A.6 / FF-mobile scroll guard. xterm's helper textarea is parked at
+// (0,0) of the wrap so the page's main viewport doesn't see the caret
+// (Chromium blinks it otherwise). On Firefox Mobile, when the soft
+// keyboard opens — or when xterm re-focuses its textarea mid-keystroke
+// — the browser tries to scroll the focused element into view. With
+// the textarea at the very top of the wrap, "into view" can resolve
+// to scrolling the body so the top of the wrap is visible, which
+// pushes the bottom (the prompt) off-screen. Capture the focus event
+// for the helper textarea and *prevent the default* scrollIntoView
+// by restoring the body's previous scroll position immediately
+// afterwards. The wrap is the only thing that should be scrolling.
+const wrap = document.getElementById('term').parentElement;
+document.addEventListener('focusin', e => {
+  const t = e.target;
+  if (!(t && t.classList && t.classList.contains('xterm-helper-textarea'))) return;
+  const prevX = window.scrollX;
+  const prevY = window.scrollY;
+  // The browser will scroll the body synchronously to bring the
+  // textarea into view. Restore on the next frame so the user sees
+  // the page where it was before the focus.
+  requestAnimationFrame(() => {
+    window.scrollTo(prevX, prevY);
+  });
+}, true);
 
 // §A.7 / seq-numbered snapshot protocol — buffer that holds live binary
 // frames between WS open and the first `screen_snapshot` apply, so the

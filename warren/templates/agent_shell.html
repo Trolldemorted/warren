@@ -8,14 +8,55 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   margin-top: 1rem;
+  /* §Fill the viewport below the fixed navbar (4.5rem from base.html).
+     Caps the page at one screen so wheel scroll stays inside the
+     terminal wrap (the term-wrap gets its own overflow below) and
+     can't push the whole layout off-screen. Without this on Firefox
+     Mobile, zooming in and typing into the helper textarea can
+     scroll the body up so the prompt is no longer visible. */
+  height: calc(100vh - 4.5rem);
+  min-height: 0;
 }
 .shell-grid .term-wrap {
   background: #0d1117;
   border-radius: .375rem;
   padding: .5rem;
   position: relative;
+  min-height: 0;
+  overflow: auto;
 }
-.shell-grid #term { width: 100%; font-family: ui-monospace, monospace; }
+.shell-grid #term { width: 100%; font-family: ui-monospace, monospace; display: block; }
+
+/* §A.6 / FF-mobile helper-textarea fix (matches agent_claude.html).
+   xterm.js's bundled CSS parks the focusable helper textarea at
+   `left: -9999em` so Chromium doesn't blink a caret over the canvas.
+   `-9999em` resolves to ~160k px — fine on Chromium, but Firefox
+   Mobile (Desktop Mode) refuses to deliver keydown events to an
+   element that far outside the viewport, so the
+   `attachCustomKeyEventHandler` shim never fires and Backspace
+   stops working. Pull the textarea back to (0,0) of the wrap
+   (inside the 0.5rem padding, so it can't intercept canvas clicks)
+   and shrink it to 1×1 to keep Chromium's caret hidden.
+   `!important` overrides xterm.css. Also reset `right`/`bottom` in
+   case xterm.js (or the wrapped input direction) sets a negative
+   coordinate that would still leave the element outside the
+   visible rect on FF mobile. */
+.shell-grid .xterm-helper-textarea {
+  left: 0 !important;
+  top: 0 !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: 1px !important;
+  height: 1px !important;
+}
+
+/* §A.6 / FF-mobile scroll containment. Mirror agent_claude.html: keep
+   scroll inside the wrap when the soft keyboard opens, so the body
+   doesn't scroll up and the prompt leaves the viewport. */
+.shell-grid .term-wrap {
+  scroll-padding: 0 !important;
+  overscroll-behavior: contain;
+}
 .shell-grid .offline-overlay {
   position: absolute;
   inset: .5rem;
@@ -90,7 +131,26 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   scrollback: 5000,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
-term.focus();
+// §A.6 / FF-mobile scroll guard. Mirror the focus path on
+// agent_claude.html: focus the helper textarea directly with
+// `preventScroll: true` so the soft keyboard opening doesn't scroll
+// the body, and a capture-phase focusin handler restores any body
+// scroll the browser still tries to do.
+function focusTerm(opts = { preventScroll: true }) {
+  const ta = document.querySelector('.shell-grid .xterm-helper-textarea');
+  if (ta) ta.focus(opts);
+  else term.focus();
+}
+focusTerm();
+document.addEventListener('focusin', e => {
+  const t = e.target;
+  if (!(t && t.classList && t.classList.contains('xterm-helper-textarea'))) return;
+  const prevX = window.scrollX;
+  const prevY = window.scrollY;
+  requestAnimationFrame(() => {
+    window.scrollTo(prevX, prevY);
+  });
+}, true);
 
 let ws = null;
 let wsBackoff = 500;
