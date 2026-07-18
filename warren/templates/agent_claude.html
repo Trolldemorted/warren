@@ -156,12 +156,28 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     height: auto;
     overflow: visible;
   }
-  /* Bound the wrap's height so a vertical swipe pans inside the terminal
-     (via its own `overflow: auto`) exactly like horizontal panning does,
-     instead of falling through to the whole page. The sidebar stacks
-     below and is still reachable by scrolling the page. */
-  .claude-grid .term-wrap { height: 70vh; }
+  /* Bound the wrap and let IT own both scroll axes so a swipe pans inside
+     the terminal. Horizontal already worked; vertical didn't because
+     xterm's own `.xterm-viewport` (an absolute, `overflow-y: scroll`
+     overlay for scrollback) swallowed the gesture and, having nothing to
+     scroll, chained it out to the whole page. Disabling that vertical
+     capture hands the pan back to the wrap. `overscroll-behavior:
+     contain` keeps the pan from scrolling the page; the stacked sidebar
+     below is reached by swiping outside the terminal frame. */
+  .claude-grid .term-wrap {
+    height: 70vh;
+    overscroll-behavior: contain;
+  }
+  .claude-grid .xterm-viewport { overflow-y: hidden !important; }
   .claude-grid aside { overflow-y: visible; }
+  /* Pin xterm's focusable helper textarea to the viewport so focusing it
+     — and the caret move on every keystroke — never triggers a
+     scroll-into-view that yanks the terminal to the top. */
+  .claude-grid .xterm-helper-textarea {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+  }
 }
 
 /* Action-button toast: bottom-right, fades in on `.visible`, auto-dismisses.
