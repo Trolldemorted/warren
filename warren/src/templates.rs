@@ -236,12 +236,11 @@ pub struct AgentOption {
 }
 
 #[derive(Template)]
-#[template(path = "scheduled_prompt_form.html")]
-pub struct ScheduledPromptFormTemplate {
+#[template(path = "scheduled_prompt_new.html")]
+pub struct ScheduledPromptNewTemplate {
     pub title: Option<&'static str>,
     pub nav: Option<&'static str>,
     pub flash: Option<Flash>,
-    pub prompt: Option<crate::entity::scheduled_prompt::Model>,
     pub form_action: String,
     pub classes: Vec<String>,
     pub kinds: Vec<String>,
@@ -268,6 +267,31 @@ pub struct ScheduledPromptFormTemplate {
     /// binding; the route handler trims, splits, and re-validates on
     /// submit so a malformed list round-trips through the same parse
     /// path as the API.
+    pub additional_labels_csv: String,
+}
+
+#[derive(Template)]
+#[template(path = "scheduled_prompt_edit.html")]
+pub struct ScheduledPromptEditTemplate {
+    pub title: Option<&'static str>,
+    pub nav: Option<&'static str>,
+    pub flash: Option<Flash>,
+    pub prompt: crate::entity::scheduled_prompt::Model,
+    pub form_action: String,
+    /// Only used to render the agent name link in the read-only
+    /// address summary; new-schedule-only fields (`classes`, `kinds`,
+    /// `target_class`/`target_kind` selects) are intentionally not
+    /// present because the address is locked post-creation.
+    pub agents: Vec<AgentOption>,
+    pub name: String,
+    pub prompt_text: String,
+    pub interval_seconds: i64,
+    pub enabled: bool,
+    pub ignore_inbox_state: bool,
+    pub ignore_pending_forgejo_work: bool,
+    pub weekly_safety_buffer_pct: i32,
+    pub session_safety_buffer_pct: i32,
+    pub context_clear_threshold_tokens: Option<i64>,
     pub additional_labels_csv: String,
     pub runs: Vec<ScheduledPromptRunRow>,
 }

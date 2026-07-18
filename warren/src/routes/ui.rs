@@ -8,8 +8,9 @@ use crate::models::{
 use crate::templates::{
     format_interval, outcome_badge, AgentClaudeTemplate, AgentFormTemplate, AgentOption, AgentRow,
     AgentShellTemplate, AgentsTemplate, ChannelFormTemplate, ChannelsTemplate, CommsInjectTemplate,
-    CommsRow, CommsTemplate, Flash, LoginTemplate, MigrationsTemplate, ScheduledPromptFormTemplate,
-    ScheduledPromptRow, ScheduledPromptRunRow, ScheduledPromptsTemplate,
+    CommsRow, CommsTemplate, Flash, LoginTemplate, MigrationsTemplate, ScheduledPromptEditTemplate,
+    ScheduledPromptNewTemplate, ScheduledPromptRow, ScheduledPromptRunRow,
+    ScheduledPromptsTemplate,
 };
 use crate::{auth, AppState};
 use askama::Template;
@@ -1314,17 +1315,29 @@ async fn agent_shell_page(
 }
 
 #[derive(Deserialize)]
-struct ScheduledPromptForm {
+struct NewScheduledPromptForm {
     scope: Option<String>,
-    /// The address fields are only required for the scope chosen on
-    /// create. The edit page no longer renders them at all (the
-    /// address is immutable post-creation), so they're `Option` here
-    /// and the `parse_scheduled_prompt_form` validator decides whether
-    /// their presence is required.
-    target_class: Option<String>,
-    target_kind: Option<String>,
+    target_class: String,
+    target_kind: String,
     /// Raw agent selector; either an agent id (uuid string) or empty.
-    agent_id: Option<String>,
+    agent_id: String,
+    name: String,
+    prompt_text: String,
+    interval_seconds: String,
+    enabled: Option<String>,
+    ignore_inbox_state: Option<String>,
+    ignore_pending_forgejo_work: Option<String>,
+    weekly_safety_buffer_pct: String,
+    session_safety_buffer_pct: String,
+    context_clear_threshold_tokens: String,
+    additional_labels: Option<String>,
+}
+
+/// Fields on the edit form. Scope and address are intentionally not
+/// here — they're locked at creation, the edit page renders them as
+/// read-only, and the handler doesn't touch them.
+#[derive(Deserialize)]
+struct EditScheduledPromptForm {
     name: String,
     prompt_text: String,
     interval_seconds: String,
@@ -1358,92 +1371,48 @@ fn join_label_list_csv(labels: &[String]) -> String {
     labels.join(",")
 }
 
-fn parse_scheduled_prompt_form(
-    form: ScheduledPromptForm,
-    is_edit: bool,
-) -> Result<ScheduledPromptFormParsed, AppError> {
-    // On edit the address fields aren't submitted (scope is locked at
-    // creation); skip the team/agent address validation entirely so
-    // they don't have to round-trip the empty values just to satisfy
-    // the create-time check.
-    let (scope, target_class_opt, target_kind_opt, agent_id) = if is_edit {
-        (String::new(), None, None, None)
-    } else {
-        let scope = form
-            .scope
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("team");
-        if scope != "team" && scope != "agent" {
-            return Err(AppError::BadRequest(
-                "scope must be 'team' or 'agent'".into(),
-            ));
-        }
-        let target_class_opt = form
-            .target_class
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let target_kind_opt = form
-            .target_kind
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let agent_id = form
-            .agent_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|t| {
-                Uuid::parse_str(t).map_err(|_| {
-                    AppError::BadRequest(format!("agent_id '{t}' is not a valid uuid"))
-                })
-            })
-            .transpose()?;
-        match scope {
-            "team" => {
-                if target_class_opt.is_none() {
-                    return Err(AppError::BadRequest(
-                        "target_class required for team scope".into(),
-                    ));
-                }
-                if agent_id.is_some() {
-                    return Err(AppError::BadRequest(
-                        "agent_id must be empty for team scope".into(),
-                    ));
-                }
-            }
-            "agent" => {
-                if agent_id.is_none() {
-                    return Err(AppError::BadRequest(
-                        "agent_id required for agent scope".into(),
-                    ));
-                }
-                if target_class_opt.is_some() || target_kind_opt.is_some() {
-                    return Err(AppError::BadRequest(
-                        "target_class/target_kind must be empty for agent scope".into(),
-                    ));
-                }
-            }
-            _ => unreachable!(),
-        }
-        (
-            scope.to_string(),
-            target_class_opt,
-            target_kind_opt,
-            agent_id,
-        )
-    };
-    if form.name.trim().is_empty() {
+/// Fields shared between the create and edit forms. Parsed the same
+/// way in both paths; the surrounding parse_* function decides what
+/// (if anything) to do with the result.
+struct SharedScheduledPromptFields {
+    name: String,
+    prompt_text: String,
+    interval_seconds: i64,
+    enabled: bool,
+    ignore_inbox_state: bool,
+    ignore_pending_forgejo_work: bool,
+    weekly_safety_buffer_pct: i32,
+    session_safety_buffer_pct: i32,
+    context_clear_threshold_tokens: Option<i64>,
+    additional_labels: Vec<String>,
+}
+
+/// Raw input bundle for `parse_shared_scheduled_prompt_fields`. Built
+/// once from `NewScheduledPromptForm` or `EditScheduledPromptForm` —
+/// the helper is then the same for both code paths.
+struct SharedScheduledPromptFormInput<'a> {
+    name: &'a str,
+    prompt_text: &'a str,
+    interval_seconds: &'a str,
+    enabled: Option<&'a str>,
+    ignore_inbox_state: Option<&'a str>,
+    ignore_pending_forgejo_work: Option<&'a str>,
+    weekly_safety_buffer_pct: &'a str,
+    session_safety_buffer_pct: &'a str,
+    context_clear_threshold_tokens: &'a str,
+    additional_labels: Option<&'a str>,
+}
+
+fn parse_shared_scheduled_prompt_fields(
+    input: SharedScheduledPromptFormInput<'_>,
+) -> Result<SharedScheduledPromptFields, AppError> {
+    if input.name.trim().is_empty() {
         return Err(AppError::BadRequest("name required".into()));
     }
-    if form.prompt_text.trim().is_empty() {
+    if input.prompt_text.trim().is_empty() {
         return Err(AppError::BadRequest("prompt_text required".into()));
     }
-    let interval_seconds = form
+    let interval_seconds = input
         .interval_seconds
         .trim()
         .parse::<i64>()
@@ -1451,12 +1420,12 @@ fn parse_scheduled_prompt_form(
     if interval_seconds < 1 {
         return Err(AppError::BadRequest("interval_seconds must be >= 1".into()));
     }
-    let weekly_safety_buffer_pct = form
+    let weekly_safety_buffer_pct = input
         .weekly_safety_buffer_pct
         .trim()
         .parse::<i32>()
         .map_err(|_| AppError::BadRequest("weekly_safety_buffer_pct must be an integer".into()))?;
-    let session_safety_buffer_pct = form
+    let session_safety_buffer_pct = input
         .session_safety_buffer_pct
         .trim()
         .parse::<i32>()
@@ -1471,7 +1440,7 @@ fn parse_scheduled_prompt_form(
             "session_safety_buffer_pct must be 0..=100".into(),
         ));
     }
-    let context_clear_threshold_tokens_raw = form.context_clear_threshold_tokens.trim();
+    let context_clear_threshold_tokens_raw = input.context_clear_threshold_tokens.trim();
     let context_clear_threshold_tokens = if context_clear_threshold_tokens_raw.is_empty() {
         None
     } else {
@@ -1487,19 +1456,17 @@ fn parse_scheduled_prompt_form(
         }
         Some(v)
     };
-    let additional_labels = parse_label_list(form.additional_labels.as_deref().unwrap_or(""));
-    Ok(ScheduledPromptFormParsed {
-        scope,
-        target_class: target_class_opt,
-        target_kind: target_kind_opt,
-        agent_id,
-        name: form.name.trim().to_string(),
-        prompt_text: form.prompt_text,
+    let additional_labels = parse_label_list(input.additional_labels.unwrap_or(""));
+    Ok(SharedScheduledPromptFields {
+        name: input.name.trim().to_string(),
+        prompt_text: input.prompt_text.to_string(),
         interval_seconds,
-        enabled: scheduled_prompt_form_checkbox(form.enabled),
-        ignore_inbox_state: scheduled_prompt_form_checkbox(form.ignore_inbox_state),
+        enabled: scheduled_prompt_form_checkbox(input.enabled.map(str::to_string)),
+        ignore_inbox_state: scheduled_prompt_form_checkbox(
+            input.ignore_inbox_state.map(str::to_string),
+        ),
         ignore_pending_forgejo_work: scheduled_prompt_form_checkbox(
-            form.ignore_pending_forgejo_work,
+            input.ignore_pending_forgejo_work.map(str::to_string),
         ),
         weekly_safety_buffer_pct,
         session_safety_buffer_pct,
@@ -1508,11 +1475,147 @@ fn parse_scheduled_prompt_form(
     })
 }
 
-struct ScheduledPromptFormParsed {
+fn parse_new_scheduled_prompt_form(
+    form: NewScheduledPromptForm,
+) -> Result<NewScheduledPromptFormParsed, AppError> {
+    let scope = form
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("team");
+    if scope != "team" && scope != "agent" {
+        return Err(AppError::BadRequest(
+            "scope must be 'team' or 'agent'".into(),
+        ));
+    }
+    let target_class_opt = {
+        let t = form.target_class.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    };
+    let target_kind_opt = {
+        let t = form.target_kind.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    };
+    let agent_id = match form.agent_id.trim() {
+        "" => None,
+        t => Some(
+            Uuid::parse_str(t)
+                .map_err(|_| AppError::BadRequest(format!("agent_id '{t}' is not a valid uuid")))?,
+        ),
+    };
+    match scope {
+        "team" => {
+            if target_class_opt.is_none() {
+                return Err(AppError::BadRequest(
+                    "target_class required for team scope".into(),
+                ));
+            }
+            if agent_id.is_some() {
+                return Err(AppError::BadRequest(
+                    "agent_id must be empty for team scope".into(),
+                ));
+            }
+        }
+        "agent" => {
+            if agent_id.is_none() {
+                return Err(AppError::BadRequest(
+                    "agent_id required for agent scope".into(),
+                ));
+            }
+            if target_class_opt.is_some() || target_kind_opt.is_some() {
+                return Err(AppError::BadRequest(
+                    "target_class/target_kind must be empty for agent scope".into(),
+                ));
+            }
+        }
+        _ => unreachable!(),
+    }
+    let shared = parse_shared_scheduled_prompt_fields(SharedScheduledPromptFormInput {
+        name: &form.name,
+        prompt_text: &form.prompt_text,
+        interval_seconds: &form.interval_seconds,
+        enabled: form.enabled.as_deref(),
+        ignore_inbox_state: form.ignore_inbox_state.as_deref(),
+        ignore_pending_forgejo_work: form.ignore_pending_forgejo_work.as_deref(),
+        weekly_safety_buffer_pct: &form.weekly_safety_buffer_pct,
+        session_safety_buffer_pct: &form.session_safety_buffer_pct,
+        context_clear_threshold_tokens: &form.context_clear_threshold_tokens,
+        additional_labels: form.additional_labels.as_deref(),
+    })?;
+    Ok(NewScheduledPromptFormParsed {
+        scope: scope.to_string(),
+        target_class: target_class_opt,
+        target_kind: target_kind_opt,
+        agent_id,
+        name: shared.name,
+        prompt_text: shared.prompt_text,
+        interval_seconds: shared.interval_seconds,
+        enabled: shared.enabled,
+        ignore_inbox_state: shared.ignore_inbox_state,
+        ignore_pending_forgejo_work: shared.ignore_pending_forgejo_work,
+        weekly_safety_buffer_pct: shared.weekly_safety_buffer_pct,
+        session_safety_buffer_pct: shared.session_safety_buffer_pct,
+        context_clear_threshold_tokens: shared.context_clear_threshold_tokens,
+        additional_labels: shared.additional_labels,
+    })
+}
+
+fn parse_edit_scheduled_prompt_form(
+    form: EditScheduledPromptForm,
+) -> Result<EditScheduledPromptFormParsed, AppError> {
+    let shared = parse_shared_scheduled_prompt_fields(SharedScheduledPromptFormInput {
+        name: &form.name,
+        prompt_text: &form.prompt_text,
+        interval_seconds: &form.interval_seconds,
+        enabled: form.enabled.as_deref(),
+        ignore_inbox_state: form.ignore_inbox_state.as_deref(),
+        ignore_pending_forgejo_work: form.ignore_pending_forgejo_work.as_deref(),
+        weekly_safety_buffer_pct: &form.weekly_safety_buffer_pct,
+        session_safety_buffer_pct: &form.session_safety_buffer_pct,
+        context_clear_threshold_tokens: &form.context_clear_threshold_tokens,
+        additional_labels: form.additional_labels.as_deref(),
+    })?;
+    Ok(EditScheduledPromptFormParsed {
+        name: shared.name,
+        prompt_text: shared.prompt_text,
+        interval_seconds: shared.interval_seconds,
+        enabled: shared.enabled,
+        ignore_inbox_state: shared.ignore_inbox_state,
+        ignore_pending_forgejo_work: shared.ignore_pending_forgejo_work,
+        weekly_safety_buffer_pct: shared.weekly_safety_buffer_pct,
+        session_safety_buffer_pct: shared.session_safety_buffer_pct,
+        context_clear_threshold_tokens: shared.context_clear_threshold_tokens,
+        additional_labels: shared.additional_labels,
+    })
+}
+
+struct NewScheduledPromptFormParsed {
     scope: String,
     target_class: Option<String>,
     target_kind: Option<String>,
     agent_id: Option<Uuid>,
+    name: String,
+    prompt_text: String,
+    interval_seconds: i64,
+    enabled: bool,
+    ignore_inbox_state: bool,
+    ignore_pending_forgejo_work: bool,
+    weekly_safety_buffer_pct: i32,
+    session_safety_buffer_pct: i32,
+    context_clear_threshold_tokens: Option<i64>,
+    additional_labels: Vec<String>,
+}
+
+struct EditScheduledPromptFormParsed {
     name: String,
     prompt_text: String,
     interval_seconds: i64,
@@ -1590,11 +1693,10 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
         Ok(v) => v,
         Err(e) => return err_page(e),
     };
-    render(ScheduledPromptFormTemplate {
+    render(ScheduledPromptNewTemplate {
         title: Some("New schedule"),
         nav: Some("scheduled_prompts"),
         flash: None,
-        prompt: None,
         form_action: "/admin/scheduled-prompts".into(),
         classes,
         kinds,
@@ -1613,19 +1715,18 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
         session_safety_buffer_pct: 0,
         context_clear_threshold_tokens: None,
         additional_labels_csv: String::new(),
-        runs: vec![],
     })
 }
 
 async fn scheduled_prompt_create(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Form(form): Form<ScheduledPromptForm>,
+    Form(form): Form<NewScheduledPromptForm>,
 ) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let parsed = match parse_scheduled_prompt_form(form, false) {
+    let parsed = match parse_new_scheduled_prompt_form(form) {
         Ok(p) => p,
         Err(e) => return err_page(e),
     };
@@ -1659,7 +1760,7 @@ async fn scheduled_prompt_edit_page(
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let (classes, kinds, agents) = match load_class_kinds_agents(&state.db).await {
+    let (_, _, agents) = match load_class_kinds_agents(&state.db).await {
         Ok(v) => v,
         Err(e) => return err_page(e),
     };
@@ -1676,19 +1777,13 @@ async fn scheduled_prompt_edit_page(
                     .collect(),
                 Err(_) => vec![],
             };
-            render(ScheduledPromptFormTemplate {
+            render(ScheduledPromptEditTemplate {
                 title: Some("Edit schedule"),
                 nav: Some("scheduled_prompts"),
                 flash: None,
-                prompt: Some(p.clone()),
+                prompt: p.clone(),
                 form_action: format!("/admin/scheduled-prompts/{id}"),
-                classes,
-                kinds,
                 agents,
-                scope: p.scope.clone(),
-                target_class: p.target_class.clone().unwrap_or_default(),
-                target_kind: p.target_kind.clone().unwrap_or_default(),
-                agent_id: p.agent_id,
                 name: p.name,
                 prompt_text: p.prompt_text,
                 interval_seconds: p.interval_seconds,
@@ -1711,12 +1806,12 @@ async fn scheduled_prompt_update(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
-    Form(form): Form<ScheduledPromptForm>,
+    Form(form): Form<EditScheduledPromptForm>,
 ) -> Response {
     if require_admin(&state, &headers).await.is_err() {
         return redirect_to_login();
     }
-    let parsed = match parse_scheduled_prompt_form(form, true) {
+    let parsed = match parse_edit_scheduled_prompt_form(form) {
         Ok(p) => p,
         Err(e) => return err_page(e),
     };

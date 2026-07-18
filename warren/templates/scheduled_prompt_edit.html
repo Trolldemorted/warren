@@ -1,27 +1,23 @@
 {% extends "base.html" %}
 {% block body %}
-<h1 class="h3 mb-3">{% if let Some(p) = prompt %}Edit schedule{% else %}New schedule{% endif %}</h1>
-{% if classes.is_empty() %}
-  <div class="alert alert-warning">
-    No agent classes defined. Create at least one agent before defining schedules.
-  </div>
-{% else %}
+<h1 class="h3 mb-3">Edit schedule</h1>
 <form method="post" action="{{ form_action }}" class="col-md-8">
   <div class="mb-3">
     <label class="form-label">Name</label>
     <input class="form-control" name="name" required value="{{ name }}">
   </div>
-  {% if let Some(p) = prompt %}
   <div class="mb-3">
     <label class="form-label">Address</label>
-    {% if scope == "team" %}
+    {% if prompt.scope == "team" %}
       <div class="form-control-plaintext">
-        <strong>Team</strong> — pool <code>{{ target_class }}{% if target_kind.is_empty() %}{% else %}:{{ target_kind }}{% endif %}</code>
+        {% let tc = prompt.target_class.as_deref().unwrap_or("") %}
+        {% let tk = prompt.target_kind.as_deref().unwrap_or("") %}
+        <strong>Team</strong> — pool <code>{{ tc }}{% if tk.is_empty() %}{% else %}:{{ tk }}{% endif %}</code>
       </div>
     {% else %}
       <div class="form-control-plaintext">
         <strong>Agent</strong> —
-        {% if let Some(selected_id) = agent_id %}
+        {% if let Some(selected_id) = prompt.agent_id %}
           {% for a in agents %}
             {% if a.id == selected_id.to_string() %}
               <a href="/admin/agents/{{ a.id }}/edit"><code>{{ a.name }}</code></a> ({{ a.class }}{% if a.kind.is_empty() %}{% else %}:{{ a.kind }}{% endif %})
@@ -34,52 +30,6 @@
     {% endif %}
     <small class="text-muted">The target is set when the schedule is created. To change it, delete this schedule and create a new one.</small>
   </div>
-  {% else %}
-  <fieldset class="mb-3">
-    <legend class="form-label">Address</legend>
-    <div class="form-check">
-      <input class="form-check-input" type="radio" name="scope" id="scope_team" value="team" {% if scope == "team" %}checked{% endif %}>
-      <label class="form-check-label" for="scope_team">
-        <strong>Team</strong> — any connected idle agent matching <code>(target_class, target_kind)</code>.
-      </label>
-    </div>
-    <div class="form-check">
-      <input class="form-check-input" type="radio" name="scope" id="scope_agent" value="agent" {% if scope == "agent" %}checked{% endif %}>
-      <label class="form-check-label" for="scope_agent">
-        <strong>Agent</strong> — one specific agent; fires when it has unblocked forgejo items.
-      </label>
-    </div>
-  </fieldset>
-  <div data-scope-panel="team" class="row" {% if scope != "team" %}hidden{% endif %}>
-    <div class="col-md-6 mb-3">
-      <label class="form-label">Target class</label>
-      <select class="form-select" name="target_class">
-        <option value="" {% if scope == "team" && target_class.is_empty() %}selected{% endif %}>Select a class…</option>
-        {% for c in classes %}<option value="{{ c }}" {% if scope == "team" && target_class == c.as_str() %}selected{% endif %}>{{ c }}</option>{% endfor %}
-      </select>
-    </div>
-    <div class="col-md-6 mb-3">
-      <label class="form-label">Target kind</label>
-      <select class="form-select" name="target_kind">
-        <option value="" {% if scope == "team" && target_kind.is_empty() %}selected{% endif %}>any</option>
-        {% for k in kinds %}<option value="{{ k }}" {% if scope == "team" && target_kind == k.as_str() %}selected{% endif %}>{{ k }}</option>{% endfor %}
-      </select>
-      <small class="text-muted">Optional. <code>any</code> matches agents with NULL kind.</small>
-    </div>
-  </div>
-  <div data-scope-panel="agent" class="mb-3" {% if scope != "agent" %}hidden{% endif %}>
-    <label class="form-label">Agent</label>
-    {% if agents.is_empty() %}
-      <div class="alert alert-warning mb-0">No agents registered.</div>
-    {% else %}
-      <select class="form-select" name="agent_id">
-        <option value="" {% if scope == "agent" && agent_id.is_none() %}selected{% endif %}>Select an agent…</option>
-        {% for a in agents %}<option value="{{ a.id }}" {% if scope == "agent" %}{% if let Some(id) = agent_id %}{% if id.to_string() == a.id.as_str() %}selected{% endif %}{% endif %}{% endif %}>{{ a.name }} ({{ a.class }}{% if a.kind.is_empty() %}{% else %}:{{ a.kind }}{% endif %})</option>{% endfor %}
-      </select>
-      <small class="text-muted">Fires when this agent has unblocked forgejo items (unless "Ignore pending forgejo work" is on).</small>
-    {% endif %}
-  </div>
-  {% endif %}
   <div class="mb-3">
     <label class="form-label">Prompt text</label>
     <textarea name="prompt_text" class="form-control" rows="4" required>{{ prompt_text }}</textarea>
@@ -93,12 +43,12 @@
     <input type="checkbox" class="form-check-input" id="enabled" name="enabled" value="true" {% if enabled %}checked{% endif %}>
     <label class="form-check-label" for="enabled">Enabled</label>
   </div>
-  <div data-scope-panel="team" class="mb-3 form-check" {% if scope != "team" %}hidden{% endif %}>
-    <input type="checkbox" class="form-check-input" id="ignore_inbox_state" name="ignore_inbox_state" value="true" {% if scope == "team" && ignore_inbox_state %}checked{% endif %}>
+  <div data-scope-panel="team" class="mb-3 form-check" {% if prompt.scope != "team" %}hidden{% endif %}>
+    <input type="checkbox" class="form-check-input" id="ignore_inbox_state" name="ignore_inbox_state" value="true" {% if prompt.scope == "team" && ignore_inbox_state %}checked{% endif %}>
     <label class="form-check-label" for="ignore_inbox_state">Ignore inbox state (fire even when no actionable requests)</label>
   </div>
-  <div data-scope-panel="agent" class="mb-3 form-check" {% if scope != "agent" %}hidden{% endif %}>
-    <input type="checkbox" class="form-check-input" id="ignore_pending_forgejo_work" name="ignore_pending_forgejo_work" value="true" {% if scope == "agent" && ignore_pending_forgejo_work %}checked{% endif %}>
+  <div data-scope-panel="agent" class="mb-3 form-check" {% if prompt.scope != "agent" %}hidden{% endif %}>
+    <input type="checkbox" class="form-check-input" id="ignore_pending_forgejo_work" name="ignore_pending_forgejo_work" value="true" {% if prompt.scope == "agent" && ignore_pending_forgejo_work %}checked{% endif %}>
     <label class="form-check-label" for="ignore_pending_forgejo_work">Ignore pending forgejo work (fire even when no unblocked forgejo items)</label>
   </div>
   <div class="row">
@@ -121,7 +71,7 @@
       <small class="text-muted">Send <code>/clear</code> before submitting when <code>ctx_used_tokens</code> ≥ this. Empty or <code>0</code> disables.</small>
     </div>
   </div>
-  <div class="mb-3" data-scope-panel="agent" {% if scope != "agent" %}hidden{% endif %}>
+  <div class="mb-3" data-scope-panel="agent" {% if prompt.scope != "agent" %}hidden{% endif %}>
     <label class="form-label">Additional labels for unassigned work</label>
     <input class="form-control" name="additional_labels" value="{{ additional_labels_csv }}">
     <small class="text-muted">
@@ -133,13 +83,10 @@
     </small>
   </div>
   <button type="submit" class="btn btn-primary">Save</button>
-  {% if let Some(p) = prompt %}
-    <button type="submit" formaction="/admin/scheduled-prompts/{{ p.id }}/run-now" class="btn btn-outline-secondary">Run now</button>
-  {% endif %}
+  <button type="submit" formaction="/admin/scheduled-prompts/{{ prompt.id }}/run-now" class="btn btn-outline-secondary">Run now</button>
   <a href="/admin/scheduled-prompts" class="btn btn-link">Cancel</a>
 </form>
 
-{% if let Some(p) = prompt %}
 <h2 class="h5 mt-5">Run history</h2>
 {% if runs.is_empty() %}
   <p class="text-muted">No runs yet.</p>
@@ -168,24 +115,5 @@
     {% endfor %}
   </tbody>
 </table>
-{% endif %}
-{% endif %}
-{% endif %}
-{% if prompt.is_none() %}
-<script>
-(() => {
-  const sync = () => {
-    const checked = document.querySelector('input[name="scope"]:checked');
-    const scope = checked ? checked.value : 'team';
-    document.querySelectorAll('[data-scope-panel]').forEach(el => {
-      el.hidden = el.dataset.scopePanel !== scope;
-    });
-  };
-  document.querySelectorAll('input[name="scope"]').forEach(r => {
-    r.addEventListener('change', sync);
-  });
-  sync();
-})();
-</script>
 {% endif %}
 {% endblock %}
