@@ -844,6 +844,122 @@ fn validate_request_respond(r: &RequestRespond) -> AppResult<()> {
     Ok(())
 }
 
+// --- forgejo configs --------------------------------------------------------
+
+fn validate_forgejo_config_new(n: &AgentForgejoConfigNew) -> AppResult<()> {
+    let require = |name: &str, val: &str| -> AppResult<()> {
+        if val.trim().is_empty() {
+            return Err(AppError::BadRequest(format!("{name} required")));
+        }
+        Ok(())
+    };
+    require("forgejo_username", &n.forgejo_username)?;
+    require("base_url", &n.base_url)?;
+    require("owner", &n.owner)?;
+    require("repo", &n.repo)?;
+    require("access_token", &n.access_token)?;
+    let parsed = url::Url::parse(n.base_url.trim())
+        .map_err(|e| AppError::BadRequest(format!("invalid base_url: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest(
+            "base_url must be http or https".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn api_list_agent_forgejo_configs(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(agent_id): Path<Uuid>,
+) -> AppResult<Json<Vec<agent_forgejo_config::Model>>> {
+    ctx.require_admin()?;
+    let _ = crate::db_ops::get_agent(&state.db, agent_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let rows = crate::db_ops::list_forgejo_configs_for_agent(&state.db, agent_id).await?;
+    Ok(Json(rows))
+}
+
+async fn api_create_agent_forgejo_config(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(agent_id): Path<Uuid>,
+    Json(mut new): Json<AgentForgejoConfigNew>,
+) -> AppResult<Json<agent_forgejo_config::Model>> {
+    ctx.require_admin()?;
+    let _ = crate::db_ops::get_agent(&state.db, agent_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    new.forgejo_username = new.forgejo_username.trim().to_string();
+    new.base_url = new.base_url.trim().to_string();
+    new.owner = new.owner.trim().to_string();
+    new.repo = new.repo.trim().to_string();
+    validate_forgejo_config_new(&new)?;
+    let row = crate::db_ops::create_forgejo_config(&state.db, agent_id, &new).await?;
+    Ok(Json(row))
+}
+
+async fn api_get_forgejo_config(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(config_id): Path<Uuid>,
+) -> AppResult<Json<agent_forgejo_config::Model>> {
+    ctx.require_admin()?;
+    let row = crate::db_ops::get_forgejo_config(&state.db, config_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(row))
+}
+
+async fn api_update_forgejo_config(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(config_id): Path<Uuid>,
+    Json(patch): Json<AgentForgejoConfigPatch>,
+) -> AppResult<Json<agent_forgejo_config::Model>> {
+    ctx.require_admin()?;
+    if let Some(u) = &patch.base_url {
+        let parsed = url::Url::parse(u.trim())
+            .map_err(|e| AppError::BadRequest(format!("invalid base_url: {e}")))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(AppError::BadRequest(
+                "base_url must be http or https".into(),
+            ));
+        }
+    }
+    let row = crate::db_ops::update_forgejo_config(&state.db, config_id, &patch).await?;
+    Ok(Json(row))
+}
+
+async fn api_delete_forgejo_config(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(config_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ctx.require_admin()?;
+    crate::db_ops::delete_forgejo_config(&state.db, config_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_agent_action_items(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(agent_id): Path<Uuid>,
+) -> AppResult<Json<ActionItemsResponse>> {
+    ctx.require_admin()?;
+    let _ = crate::db_ops::get_agent(&state.db, agent_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let (issues, pull_requests) =
+        crate::forgejo::unblocked_assigned_for_agent(&state.db, agent_id).await?;
+    Ok(Json(ActionItemsResponse {
+        issues,
+        pull_requests,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,9 +988,6 @@ mod tests {
 
     #[test]
     fn request_new_rejects_whitespace_only_payload() {
-        // Whitespace-only payloads carry no useful instruction either;
-        // they round-trip through the DB as a non-empty string and look
-        // legitimate until the agent tries to act on them.
         for ws in ["   ", "\n", "\t\t", " \n \t "] {
             let r = RequestNew {
                 target_class: "claude".into(),
@@ -990,120 +1103,4 @@ mod tests {
         };
         validate_scheduled_prompt_patch(&p).expect("Some(0) (disabled) must validate on patch");
     }
-}
-
-// --- forgejo configs --------------------------------------------------------
-
-fn validate_forgejo_config_new(n: &AgentForgejoConfigNew) -> AppResult<()> {
-    let require = |name: &str, val: &str| -> AppResult<()> {
-        if val.trim().is_empty() {
-            return Err(AppError::BadRequest(format!("{name} required")));
-        }
-        Ok(())
-    };
-    require("forgejo_username", &n.forgejo_username)?;
-    require("base_url", &n.base_url)?;
-    require("owner", &n.owner)?;
-    require("repo", &n.repo)?;
-    require("access_token", &n.access_token)?;
-    let parsed = url::Url::parse(n.base_url.trim())
-        .map_err(|e| AppError::BadRequest(format!("invalid base_url: {e}")))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(AppError::BadRequest(
-            "base_url must be http or https".into(),
-        ));
-    }
-    Ok(())
-}
-
-async fn api_list_agent_forgejo_configs(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(agent_id): Path<Uuid>,
-) -> AppResult<Json<Vec<agent_forgejo_config::Model>>> {
-    ctx.require_admin()?;
-    let _ = crate::db_ops::get_agent(&state.db, agent_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    let rows = crate::db_ops::list_forgejo_configs_for_agent(&state.db, agent_id).await?;
-    Ok(Json(rows))
-}
-
-async fn api_create_agent_forgejo_config(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(agent_id): Path<Uuid>,
-    Json(mut new): Json<AgentForgejoConfigNew>,
-) -> AppResult<Json<agent_forgejo_config::Model>> {
-    ctx.require_admin()?;
-    let _ = crate::db_ops::get_agent(&state.db, agent_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    new.forgejo_username = new.forgejo_username.trim().to_string();
-    new.base_url = new.base_url.trim().to_string();
-    new.owner = new.owner.trim().to_string();
-    new.repo = new.repo.trim().to_string();
-    validate_forgejo_config_new(&new)?;
-    let row = crate::db_ops::create_forgejo_config(&state.db, agent_id, &new).await?;
-    Ok(Json(row))
-}
-
-async fn api_get_forgejo_config(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(config_id): Path<Uuid>,
-) -> AppResult<Json<agent_forgejo_config::Model>> {
-    ctx.require_admin()?;
-    let row = crate::db_ops::get_forgejo_config(&state.db, config_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    Ok(Json(row))
-}
-
-async fn api_update_forgejo_config(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(config_id): Path<Uuid>,
-    Json(patch): Json<AgentForgejoConfigPatch>,
-) -> AppResult<Json<agent_forgejo_config::Model>> {
-    ctx.require_admin()?;
-    if let Some(u) = &patch.base_url {
-        let parsed = url::Url::parse(u.trim())
-            .map_err(|e| AppError::BadRequest(format!("invalid base_url: {e}")))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(AppError::BadRequest(
-                "base_url must be http or https".into(),
-            ));
-        }
-    }
-    let row = crate::db_ops::update_forgejo_config(&state.db, config_id, &patch).await?;
-    Ok(Json(row))
-}
-
-async fn api_delete_forgejo_config(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(config_id): Path<Uuid>,
-) -> AppResult<StatusCode> {
-    ctx.require_admin()?;
-    crate::db_ops::delete_forgejo_config(&state.db, config_id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn api_agent_action_items(
-    State(state): State<AppState>,
-    ctx: AuthContext,
-    Path(agent_id): Path<Uuid>,
-) -> AppResult<Json<ActionItemsResponse>> {
-    ctx.require_admin()?;
-    let _ = crate::db_ops::get_agent(&state.db, agent_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-
-    let (issues, pull_requests) =
-        crate::forgejo::unblocked_assigned_for_agent(&state.db, agent_id).await?;
-    Ok(Json(ActionItemsResponse {
-        issues,
-        pull_requests,
-    }))
 }

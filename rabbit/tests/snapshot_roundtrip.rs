@@ -182,9 +182,9 @@ async fn screen_snapshot_serializes_with_all_fields_and_correct_tag() {
         after_seq: 0,
     };
     cmd_tx
-        .send(LinkCmd::SendMeta(EnvelopeBody::ScreenSnapshot(
+        .send(LinkCmd::SendMeta(Box::new(EnvelopeBody::ScreenSnapshot(
             snap.clone(),
-        )))
+        ))))
         .await
         .expect("send snapshot to link");
 
@@ -281,9 +281,9 @@ async fn screen_snapshot_body_after_seq_field_roundtrips_through_wire() {
         after_seq: 1024,
     };
     cmd_tx
-        .send(LinkCmd::SendMeta(EnvelopeBody::ScreenSnapshot(
+        .send(LinkCmd::SendMeta(Box::new(EnvelopeBody::ScreenSnapshot(
             snap.clone(),
-        )))
+        ))))
         .await
         .expect("send snapshot to link");
 

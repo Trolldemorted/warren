@@ -19,26 +19,6 @@ use rabbit::observer::hooks::ObserverHandle;
 use rabbit::observer::state::State;
 use rabbit_lib::wire::{Envelope, EnvelopeBody};
 
-fn prompt() -> EnvelopeBody {
-    EnvelopeBody::Prompt {
-        id: uuid::Uuid::nil(),
-        text: "do the thing".into(),
-        by: "tester".into(),
-        by_connection_id: None,
-    }
-}
-fn interrupt() -> EnvelopeBody {
-    EnvelopeBody::Interrupt
-}
-fn slash() -> EnvelopeBody {
-    EnvelopeBody::Slash {
-        cmd: "usage".into(),
-    }
-}
-fn clear() -> EnvelopeBody {
-    EnvelopeBody::Clear { hard: false }
-}
-
 #[test]
 fn observer_state_machine_matches_actor_perspective() {
     // The actor's authoritative state lives on `AgentHandle::snapshot`

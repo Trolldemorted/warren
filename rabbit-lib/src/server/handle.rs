@@ -379,8 +379,8 @@ impl AgentHandle {
     /// Route a programmatic resize through rabbit over the wire
     /// (`EnvelopeBody::Resize` → `PtyCmd::Resize` → `ioctl(TIOCSWINSZ)`
     /// + SIGWINCH). With the per-leader resize model gone, the only
-    /// caller is the warren actor's startup path when warren ships
-    /// a `TuiConfig` to rabbit.
+    ///   caller is the warren actor's startup path when warren ships
+    ///   a `TuiConfig` to rabbit.
     pub async fn resize(&self, cols: u16, rows: u16) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Resize { cols, rows })

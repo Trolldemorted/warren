@@ -50,7 +50,7 @@ pub enum LinkEvent {
         chan: u8,
         data: Vec<u8>,
     },
-    Text(Envelope),
+    Text(Box<Envelope>),
 }
 
 #[derive(Debug)]
@@ -67,7 +67,7 @@ pub enum LinkCmd {
     /// Structured meta event. The link assigns the next seq, buffers the
     /// serialized frame in the meta ring, then sends. The frame is replayed
     /// on the next WS attempt until warren sends `Ack{seq}` for it.
-    SendMeta(EnvelopeBody),
+    SendMeta(Box<EnvelopeBody>),
     /// Sent by the supervisor just before its outer loop exits so the link's
     /// `attempt()` issues `Message::Close` to warren and returns cleanly. The
     /// `Arc<AtomicBool>` `shutdown` flag is the backstop that breaks the
@@ -316,7 +316,7 @@ impl Link {
                             let env = Envelope {
                                 v: PROTOCOL_VERSION,
                                 seq,
-                                body,
+                                body: *body,
                             };
                             let frame = serde_json::to_string(&env)?;
                             self.meta_ring.push(seq, frame.clone());
@@ -358,7 +358,7 @@ impl Link {
                                     }
                                     continue;
                                 }
-                                let _ = self.event_tx.send(LinkEvent::Text(env)).await;
+                                let _ = self.event_tx.send(LinkEvent::Text(Box::new(env))).await;
                             }
                         }
                         Message::Binary(mut b) => {
@@ -476,7 +476,7 @@ mod tests {
     /// until the next claude crash.
     #[tokio::test]
     async fn emits_connected_after_successful_hello() {
-        use futures_util::{SinkExt, StreamExt};
+        use futures_util::StreamExt;
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

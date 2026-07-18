@@ -415,7 +415,7 @@ pub async fn run(config: Config) -> Result<()> {
                                 crate::dispatch::send_or_warn(
                                     "LinkCmd::SendMeta(Usage)",
                                     &cmd_tx,
-                                    LinkCmd::SendMeta(EnvelopeBody::Usage(snap)),
+                                    LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(snap))),
                                 )
                                 .await;
                             }
@@ -552,7 +552,7 @@ pub async fn run(config: Config) -> Result<()> {
                                 crate::dispatch::send_or_warn(
                                     "LinkCmd::SendMeta(Usage+context)",
                                     &cmd_tx,
-                                    LinkCmd::SendMeta(EnvelopeBody::Usage(combined)),
+                                    LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(combined))),
                                 )
                                 .await;
                             } else {
@@ -570,7 +570,7 @@ pub async fn run(config: Config) -> Result<()> {
                                 crate::dispatch::send_or_warn(
                                     "LinkCmd::SendMeta(Usage+context:no-session)",
                                     &cmd_tx,
-                                    LinkCmd::SendMeta(EnvelopeBody::Usage(combined)),
+                                    LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(combined))),
                                 )
                                 .await;
                             }
@@ -855,7 +855,7 @@ fn spawn_transcript_relay(
             }
             snap.ctx_scrape_incomplete |= cached.ctx_scrape_incomplete;
             let _ = cmd_tx
-                .send(LinkCmd::SendMeta(EnvelopeBody::Usage(snap)))
+                .send(LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(snap))))
                 .await;
         }
     });
@@ -913,7 +913,7 @@ pub enum PtyEvt {
     /// the blocking PTY thread (currently only `ScreenSnapshot`). The driver
     /// loop forwards these to warren via `LinkCmd::SendMeta` so they ride
     /// the same seq/ack channel as everything else.
-    Meta(EnvelopeBody),
+    Meta(Box<EnvelopeBody>),
 }
 
 #[derive(Debug)]
@@ -1187,7 +1187,9 @@ fn spawn_run_one(
                             after_seq,
                         };
                         if pty_evt_tx
-                            .blocking_send(PtyEvt::Meta(EnvelopeBody::ScreenSnapshot(body)))
+                            .blocking_send(PtyEvt::Meta(Box::new(EnvelopeBody::ScreenSnapshot(
+                                body,
+                            ))))
                             .is_err()
                         {
                             break;
@@ -1525,7 +1527,7 @@ async fn forward_observer_event(cmd_tx: &mpsc::Sender<LinkCmd>, ev: &ObserverEve
         crate::dispatch::send_or_warn(
             "LinkCmd::SendMeta(observer)",
             cmd_tx,
-            LinkCmd::SendMeta(body),
+            LinkCmd::SendMeta(Box::new(body)),
         )
         .await;
     }
@@ -2017,7 +2019,9 @@ async fn run_context_scrape(
         after_seq,
     };
     if let Err(e) = cmd_tx
-        .send(LinkCmd::SendMeta(EnvelopeBody::ScreenSnapshot(body)))
+        .send(LinkCmd::SendMeta(Box::new(EnvelopeBody::ScreenSnapshot(
+            body,
+        ))))
         .await
     {
         log::warn!("context_check: failed to publish restore snapshot: {e:?}");
@@ -2217,7 +2221,7 @@ pub async fn send_state(
         observer.set_state(st);
     }
     let _ = cmd_tx
-        .send(LinkCmd::SendMeta(EnvelopeBody::State(frame)))
+        .send(LinkCmd::SendMeta(Box::new(EnvelopeBody::State(frame))))
         .await;
     Ok(())
 }

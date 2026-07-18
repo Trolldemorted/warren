@@ -1369,8 +1369,10 @@ mod tests {
     #[test]
     fn is_empty_distinguishes_empty_from_partial() {
         assert!(ContextSnapshot::default().is_empty());
-        let mut s = ContextSnapshot::default();
-        s.used_tokens = Some(100);
+        let s = ContextSnapshot {
+            used_tokens: Some(100),
+            ..Default::default()
+        };
         assert!(!s.is_empty());
     }
 

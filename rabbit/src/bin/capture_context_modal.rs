@@ -140,6 +140,3 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
-
-#[allow(unused_imports)]
-use rabbit;

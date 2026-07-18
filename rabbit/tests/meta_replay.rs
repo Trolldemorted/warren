@@ -139,9 +139,18 @@ async fn replays_unacked_meta_with_original_seq_after_drop() {
         "first frame is Hello"
     );
 
-    cmd_tx.send(LinkCmd::SendMeta(state("idle"))).await.unwrap();
-    cmd_tx.send(LinkCmd::SendMeta(usage())).await.unwrap();
-    cmd_tx.send(LinkCmd::SendMeta(log_line())).await.unwrap();
+    cmd_tx
+        .send(LinkCmd::SendMeta(Box::new(state("idle"))))
+        .await
+        .unwrap();
+    cmd_tx
+        .send(LinkCmd::SendMeta(Box::new(usage())))
+        .await
+        .unwrap();
+    cmd_tx
+        .send(LinkCmd::SendMeta(Box::new(log_line())))
+        .await
+        .unwrap();
 
     let e1 = next_env(&mut c1).await;
     let e2 = next_env(&mut c1).await;
@@ -188,8 +197,14 @@ async fn ack_trims_ring_so_acked_events_are_not_replayed() {
     let mut c1 = accept(&listener).await;
     let hello = next_env(&mut c1).await;
 
-    cmd_tx.send(LinkCmd::SendMeta(state("idle"))).await.unwrap();
-    cmd_tx.send(LinkCmd::SendMeta(usage())).await.unwrap();
+    cmd_tx
+        .send(LinkCmd::SendMeta(Box::new(state("idle"))))
+        .await
+        .unwrap();
+    cmd_tx
+        .send(LinkCmd::SendMeta(Box::new(usage())))
+        .await
+        .unwrap();
     let a = next_env(&mut c1).await;
     let b = next_env(&mut c1).await;
     assert_eq!(a.seq, hello.seq + 1);
@@ -218,7 +233,10 @@ async fn ack_trims_ring_so_acked_events_are_not_replayed() {
     assert!(matches!(marker.body, EnvelopeBody::Interrupt));
 
     // A third meta event, sent after the Ack was processed, stays un-acked.
-    cmd_tx.send(LinkCmd::SendMeta(log_line())).await.unwrap();
+    cmd_tx
+        .send(LinkCmd::SendMeta(Box::new(log_line())))
+        .await
+        .unwrap();
     let c = next_env(&mut c1).await;
     assert_eq!(c.seq, b.seq + 1);
 
@@ -239,7 +257,7 @@ async fn ack_trims_ring_so_acked_events_are_not_replayed() {
     // The very next frame is a fresh live event — proving exactly one frame was
     // replayed (had the acked prefix survived, seq {a,b} would arrive first).
     cmd_tx
-        .send(LinkCmd::SendMeta(state("running")))
+        .send(LinkCmd::SendMeta(Box::new(state("running"))))
         .await
         .unwrap();
     let live = next_env(&mut c2).await;
