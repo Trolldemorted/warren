@@ -473,36 +473,55 @@ async fn fetch_fresh_usage(
     if let Err(e) = handle.context_check().await {
         log::warn!("scheduler: context_check send failed (ignored): {e:?}");
     }
+    // §Context-window: the `/usage` envelope reply carries
+    // weekly/session pcts but NOT ctx_* fields. The `/context`
+    // envelope reply carries ctx_used_tokens/pct. We need both for
+    // the auto-clear threshold guard, so we keep reading envelopes
+    // until ctx_used_tokens lands or the timeout fires. Returning on
+    // the first envelope (which is almost always the `/usage` reply)
+    // silently disables the threshold check because ctx_used_tokens
+    // is None.
     let result = tokio::time::timeout(timeout_d, async {
+        let mut weekly_pct: Option<f64> = None;
+        let mut session_pct: Option<f64> = None;
+        let mut ctx_used_pct: Option<f64> = None;
+        let mut ctx_used_tokens: Option<u64> = None;
         loop {
             match rx.recv().await {
-                // §Context-window: the supervisor publishes a single
-                // `Usage` envelope per `context_check` scrape with
-                // the `ctx_*` fields populated. We accept any Usage
-                // envelope here; both `/usage` and `/context` end up
-                // on the same meta channel. By the time we see the
-                // first one the operator's last scrape (whichever
-                // it was) has landed and we record its values. If
-                // both modals fire in quick succession, the second
-                // one will be a later envelope — but our caller
-                // only awaits one and we accept the first match.
                 Ok(EnvelopeBody::Usage(snap)) => {
-                    // Prefer the most-recently-populated context pct:
-                    // both scrapes land on the same channel, so the
-                    // last envelope within the timeout window carries
-                    // the freshest values. Capture the most recent
-                    // envelope that has any of the three fields.
-                    return (
-                        snap.weekly_pct,
-                        snap.session_pct,
-                        snap.ctx_used_pct,
-                        snap.ctx_used_tokens,
-                    );
+                    // `/usage` envelopes never populate ctx_* (the
+                    // supervisor's UsageCheck reply builds the snap
+                    // with `..Default::default()`); `/context`
+                    // envelopes populate only ctx_*. Merge whichever
+                    // fields this envelope actually carries so a
+                    // late-arriving `/context` reply fills the
+                    // missing slot.
+                    if snap.weekly_pct.is_some() {
+                        weekly_pct = snap.weekly_pct;
+                    }
+                    if snap.session_pct.is_some() {
+                        session_pct = snap.session_pct;
+                    }
+                    if snap.ctx_used_pct.is_some() {
+                        ctx_used_pct = snap.ctx_used_pct;
+                    }
+                    if snap.ctx_used_tokens.is_some() {
+                        ctx_used_tokens = snap.ctx_used_tokens;
+                    }
+                    // Have we seen both envelopes? The run row needs
+                    // weekly/session; the auto-clear guard needs
+                    // ctx_used_tokens. Bail as soon as ctx_used_tokens
+                    // is in, since that's the slow envelope (the
+                    // operator only sees the threshold fire on the
+                    // correct value).
+                    if ctx_used_tokens.is_some() {
+                        return (weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens);
+                    }
                 }
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return (None, None, None, None);
+                    return (weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens);
                 }
             }
         }
