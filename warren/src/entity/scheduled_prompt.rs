@@ -39,11 +39,13 @@ pub struct Model {
     /// `scope='agent'` rows carry an `agent_id` instead.
     pub target_class: Option<String>,
     pub target_kind: Option<String>,
-    /// Whole-percent threshold on the scraped `/context` `ctx_used_pct`
-    /// at fire time. `None` or `Some(0)` disables auto-`/clear`;
-    /// `Some(1..=100)` clears before submitting the prompt when
-    /// `ctx_used_pct >= this`.
-    pub context_clear_threshold_pct: Option<i32>,
+    /// Absolute-token threshold on the scraped `/context` `ctx_used_tokens`
+    /// at fire time. `None` or `Some(0)` disables auto-`/clear`; any
+    /// positive value clears before submitting the prompt when
+    /// `ctx_used_tokens >= this`. Stored as `i64` so the
+    /// `DeriveEntityModel` `Eq` bound is satisfied (floats are not `Eq`)
+    /// while still covering the largest model contexts.
+    pub context_clear_threshold_tokens: Option<i64>,
     /// `team` keeps the historical `(target_class, target_kind)` pool
     /// semantics — at fire time any connected idle agent matching
     /// the pool picks the prompt up. `agent` targets a specific

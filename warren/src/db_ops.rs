@@ -899,7 +899,7 @@ pub async fn create_scheduled_prompt(
         weekly_safety_buffer_pct: Set(new.weekly_safety_buffer_pct),
         session_safety_buffer_pct: Set(new.session_safety_buffer_pct),
         next_fire_at: Set(Some(chrono::Utc::now())),
-        context_clear_threshold_pct: Set(new.context_clear_threshold_pct),
+        context_clear_threshold_tokens: Set(new.context_clear_threshold_tokens),
         ..Default::default()
     };
     Ok(am.insert(db).await?)
@@ -940,8 +940,8 @@ pub async fn update_scheduled_prompt(
     if let Some(s) = patch.session_safety_buffer_pct {
         am.session_safety_buffer_pct = Set(s);
     }
-    if let Some(c) = patch.context_clear_threshold_pct {
-        am.context_clear_threshold_pct = Set(Some(c));
+    if let Some(c) = patch.context_clear_threshold_tokens {
+        am.context_clear_threshold_tokens = Set(Some(c));
     }
     if let Some(f) = patch.ignore_pending_forgejo_work {
         am.ignore_pending_forgejo_work = Set(f);

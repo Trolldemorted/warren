@@ -257,7 +257,7 @@ pub struct ScheduledPromptFormTemplate {
     pub ignore_pending_forgejo_work: bool,
     pub weekly_safety_buffer_pct: i32,
     pub session_safety_buffer_pct: i32,
-    pub context_clear_threshold_pct: Option<i32>,
+    pub context_clear_threshold_tokens: Option<i64>,
     pub runs: Vec<ScheduledPromptRunRow>,
 }
 

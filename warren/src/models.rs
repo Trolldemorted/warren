@@ -163,7 +163,7 @@ pub struct ScheduledPromptNew {
     #[serde(default)]
     pub session_safety_buffer_pct: i32,
     #[serde(default)]
-    pub context_clear_threshold_pct: Option<i32>,
+    pub context_clear_threshold_tokens: Option<i64>,
     /// Agent-scope only: when true the schedule fires regardless of
     /// whether the target agent has unblocked forgejo items. Has no
     /// effect for `scope='team'`.
@@ -198,7 +198,7 @@ pub struct ScheduledPromptPatch {
     #[serde(default)]
     pub session_safety_buffer_pct: Option<i32>,
     #[serde(default)]
-    pub context_clear_threshold_pct: Option<i32>,
+    pub context_clear_threshold_tokens: Option<i64>,
     #[serde(default)]
     pub ignore_pending_forgejo_work: Option<bool>,
 }

@@ -184,7 +184,7 @@ pub async fn fire_prompt(
     }
 
     // (3) Fresh usage scrape via the chosen handle.
-    let (weekly_pct, session_pct, context_pct) =
+    let (weekly_pct, session_pct, context_pct, ctx_used_tokens) =
         match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT).await {
             Some(t) => t,
             None => {
@@ -235,13 +235,15 @@ pub async fn fire_prompt(
     }
 
     // (3.5) Optional auto-`/clear` when the freshly-scraped context
-    // window is at or above the schedule's threshold. Best-effort:
-    // a clear failure is logged but the tick still fires — the
-    // operator configured this as a guardrail, not a hard gate.
-    if let Some(threshold) = prompt.context_clear_threshold_pct {
+    // window's used tokens meet or exceed the schedule's threshold.
+    // Absolute tokens (not a percentage) so the guardrail scales with
+    // the actual model context size. Best-effort: a clear failure is
+    // logged but the tick still fires — the operator configured this
+    // as a guardrail, not a hard gate.
+    if let Some(threshold) = prompt.context_clear_threshold_tokens {
         if threshold > 0 {
-            if let Some(c) = context_pct {
-                if c >= threshold as f64 {
+            if let Some(used) = ctx_used_tokens {
+                if used >= threshold as u64 {
                     if let Err(e) = handle.clear(false).await {
                         log::warn!(
                             "scheduler: auto-clear failed for prompt={} agent={}: {e:?}",
@@ -394,7 +396,7 @@ async fn skip(
 async fn fetch_fresh_usage(
     handle: &AgentHandle,
     timeout_d: Duration,
-) -> Option<(Option<f64>, Option<f64>, Option<f64>)> {
+) -> Option<(Option<f64>, Option<f64>, Option<f64>, Option<u64>)> {
     let mut rx = handle.subscribe_meta();
     if let Err(e) = handle.usage_check().await {
         log::error!("scheduler: usage_check send failed: {e:?}");
@@ -428,12 +430,17 @@ async fn fetch_fresh_usage(
                     // last envelope within the timeout window carries
                     // the freshest values. Capture the most recent
                     // envelope that has any of the three fields.
-                    return (snap.weekly_pct, snap.session_pct, snap.ctx_used_pct);
+                    return (
+                        snap.weekly_pct,
+                        snap.session_pct,
+                        snap.ctx_used_pct,
+                        snap.ctx_used_tokens,
+                    );
                 }
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return (None, None, None);
+                    return (None, None, None, None);
                 }
             }
         }

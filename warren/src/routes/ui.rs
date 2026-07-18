@@ -1309,7 +1309,7 @@ struct ScheduledPromptForm {
     ignore_pending_forgejo_work: Option<String>,
     weekly_safety_buffer_pct: String,
     session_safety_buffer_pct: String,
-    context_clear_threshold_pct: String,
+    context_clear_threshold_tokens: String,
 }
 
 fn scheduled_prompt_form_checkbox(s: Option<String>) -> bool {
@@ -1414,18 +1414,18 @@ fn parse_scheduled_prompt_form(
             "session_safety_buffer_pct must be 0..=100".into(),
         ));
     }
-    let context_clear_threshold_pct_raw = form.context_clear_threshold_pct.trim();
-    let context_clear_threshold_pct = if context_clear_threshold_pct_raw.is_empty() {
+    let context_clear_threshold_tokens_raw = form.context_clear_threshold_tokens.trim();
+    let context_clear_threshold_tokens = if context_clear_threshold_tokens_raw.is_empty() {
         None
     } else {
-        let v = context_clear_threshold_pct_raw
-            .parse::<i32>()
+        let v = context_clear_threshold_tokens_raw
+            .parse::<i64>()
             .map_err(|_| {
-                AppError::BadRequest("context_clear_threshold_pct must be an integer".into())
+                AppError::BadRequest("context_clear_threshold_tokens must be an integer".into())
             })?;
-        if !(0..=100).contains(&v) {
+        if v < 0 {
             return Err(AppError::BadRequest(
-                "context_clear_threshold_pct must be 0..=100".into(),
+                "context_clear_threshold_tokens must be a non-negative integer".into(),
             ));
         }
         Some(v)
@@ -1445,7 +1445,7 @@ fn parse_scheduled_prompt_form(
         ),
         weekly_safety_buffer_pct,
         session_safety_buffer_pct,
-        context_clear_threshold_pct,
+        context_clear_threshold_tokens,
     })
 }
 
@@ -1462,7 +1462,7 @@ struct ScheduledPromptFormParsed {
     ignore_pending_forgejo_work: bool,
     weekly_safety_buffer_pct: i32,
     session_safety_buffer_pct: i32,
-    context_clear_threshold_pct: Option<i32>,
+    context_clear_threshold_tokens: Option<i64>,
 }
 
 async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1551,7 +1551,7 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
         ignore_pending_forgejo_work: false,
         weekly_safety_buffer_pct: 0,
         session_safety_buffer_pct: 0,
-        context_clear_threshold_pct: None,
+        context_clear_threshold_tokens: None,
         runs: vec![],
     })
 }
@@ -1581,7 +1581,7 @@ async fn scheduled_prompt_create(
         ignore_pending_forgejo_work: parsed.ignore_pending_forgejo_work,
         weekly_safety_buffer_pct: parsed.weekly_safety_buffer_pct,
         session_safety_buffer_pct: parsed.session_safety_buffer_pct,
-        context_clear_threshold_pct: parsed.context_clear_threshold_pct,
+        context_clear_threshold_tokens: parsed.context_clear_threshold_tokens,
     };
     match crate::db_ops::create_scheduled_prompt(&state.db, &new).await {
         Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),
@@ -1635,7 +1635,7 @@ async fn scheduled_prompt_edit_page(
                 ignore_pending_forgejo_work: p.ignore_pending_forgejo_work,
                 weekly_safety_buffer_pct: p.weekly_safety_buffer_pct,
                 session_safety_buffer_pct: p.session_safety_buffer_pct,
-                context_clear_threshold_pct: p.context_clear_threshold_pct,
+                context_clear_threshold_tokens: p.context_clear_threshold_tokens,
                 runs,
             })
         }
@@ -1666,7 +1666,7 @@ async fn scheduled_prompt_update(
         ignore_inbox_state: Some(parsed.ignore_inbox_state),
         weekly_safety_buffer_pct: Some(parsed.weekly_safety_buffer_pct),
         session_safety_buffer_pct: Some(parsed.session_safety_buffer_pct),
-        context_clear_threshold_pct: parsed.context_clear_threshold_pct,
+        context_clear_threshold_tokens: parsed.context_clear_threshold_tokens,
         ignore_pending_forgejo_work: Some(parsed.ignore_pending_forgejo_work),
     };
     match crate::db_ops::update_scheduled_prompt(&state.db, id, &patch).await {

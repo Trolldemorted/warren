@@ -650,10 +650,10 @@ fn validate_scheduled_prompt_new(n: &ScheduledPromptNew) -> AppResult<()> {
             "session_safety_buffer_pct must be 0..=100".into(),
         ));
     }
-    if let Some(c) = n.context_clear_threshold_pct {
-        if !(0..=100).contains(&c) {
+    if let Some(c) = n.context_clear_threshold_tokens {
+        if c < 0 {
             return Err(AppError::BadRequest(
-                "context_clear_threshold_pct must be 0..=100".into(),
+                "context_clear_threshold_tokens must be a non-negative integer".into(),
             ));
         }
     }
@@ -700,10 +700,10 @@ fn validate_scheduled_prompt_patch(p: &ScheduledPromptPatch) -> AppResult<()> {
             ));
         }
     }
-    if let Some(c) = p.context_clear_threshold_pct {
-        if !(0..=100).contains(&c) {
+    if let Some(c) = p.context_clear_threshold_tokens {
+        if c < 0 {
             return Err(AppError::BadRequest(
-                "context_clear_threshold_pct must be 0..=100".into(),
+                "context_clear_threshold_tokens must be a non-negative integer".into(),
             ));
         }
     }
@@ -1054,51 +1054,46 @@ mod tests {
             ignore_inbox_state: false,
             weekly_safety_buffer_pct: 0,
             session_safety_buffer_pct: 0,
-            context_clear_threshold_pct: None,
+            context_clear_threshold_tokens: None,
         }
     }
 
     #[test]
-    fn scheduled_prompt_new_rejects_out_of_range_clear_threshold() {
+    fn scheduled_prompt_new_rejects_negative_clear_threshold() {
         let mut n = ok_new();
-        n.context_clear_threshold_pct = Some(150);
+        n.context_clear_threshold_tokens = Some(-1);
         assert_bad_request_contains(
             validate_scheduled_prompt_new(&n).unwrap_err(),
-            "context_clear_threshold_pct must be 0..=100",
-        );
-        n.context_clear_threshold_pct = Some(-1);
-        assert_bad_request_contains(
-            validate_scheduled_prompt_new(&n).unwrap_err(),
-            "context_clear_threshold_pct must be 0..=100",
+            "context_clear_threshold_tokens must be a non-negative integer",
         );
     }
 
     #[test]
     fn scheduled_prompt_new_accepts_clear_threshold_at_boundaries() {
-        for v in [None, Some(0), Some(100)] {
+        for v in [None, Some(0), Some(100_000)] {
             let mut n = ok_new();
-            n.context_clear_threshold_pct = v;
+            n.context_clear_threshold_tokens = v;
             validate_scheduled_prompt_new(&n)
                 .unwrap_or_else(|e| panic!("threshold {v:?} must validate: {e:?}"));
         }
     }
 
     #[test]
-    fn scheduled_prompt_patch_rejects_out_of_range_clear_threshold() {
+    fn scheduled_prompt_patch_rejects_negative_clear_threshold() {
         let p = ScheduledPromptPatch {
-            context_clear_threshold_pct: Some(101),
+            context_clear_threshold_tokens: Some(-1),
             ..Default::default()
         };
         assert_bad_request_contains(
             validate_scheduled_prompt_patch(&p).unwrap_err(),
-            "context_clear_threshold_pct must be 0..=100",
+            "context_clear_threshold_tokens must be a non-negative integer",
         );
     }
 
     #[test]
     fn scheduled_prompt_patch_ignores_clearing_threshold_via_none() {
         let p = ScheduledPromptPatch {
-            context_clear_threshold_pct: Some(0),
+            context_clear_threshold_tokens: Some(0),
             ..Default::default()
         };
         validate_scheduled_prompt_patch(&p).expect("Some(0) (disabled) must validate on patch");
