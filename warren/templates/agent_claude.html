@@ -150,7 +150,17 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .claude-grid .term-wrap {
   scroll-padding: 0 !important;
 }
-@media (max-width: 700px) {
+/* §Pan the terminal on touch devices. The first condition matches
+   narrow mobile-mode viewports; the second is the standard MDN-
+   recommended touch-device check (no hover, coarse pointer), which
+   fires on Firefox Android *regardless* of the user's
+   mobile/Desktop Mode toggle. Firefox's desktop mode sets the layout
+   viewport to ~1280px (which would otherwise defeat a
+   `max-width: 700px` rule), but the primary input is still a finger,
+   so `hover: none and pointer: coarse` is the right hook here.
+   Applied as a comma-OR so both shapes get the same scroll-locking
+   treatment from one block. */
+@media (max-width: 700px), (hover: none) and (pointer: coarse) {
   /* Lock the document so a swipe can't scroll the page out from under
      the terminal. This is the crux of the mobile scroll fix: with the
      page unable to move, the only scrollable surface a swipe can act on
