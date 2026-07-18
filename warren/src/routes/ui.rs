@@ -412,16 +412,32 @@ async fn agents_page(
                 // becomes a hot path, memoize on (config_id, fetched_at)
                 // with a short TTL — see
                 // `forgejo::count_unblocked_assigned_for_agent`.
-                let (forgejo_issues, forgejo_prs) =
+                let ((forgejo_issues, forgejo_prs), forgejo_errors) =
                     crate::forgejo::count_unblocked_assigned_for_agent(&state.db, a.id)
                         .await
-                        .unwrap_or((0, 0));
+                        .unwrap_or_else(|e| {
+                            log::warn!(
+                                "forgejo: count_unblocked_assigned_for_agent({}) outer error: {e}",
+                                a.id
+                            );
+                            log::debug!("forgejo: count outer detail: {e:?}");
+                            (
+                                (0, 0),
+                                vec!["failed to load forgejo configs — see logs".to_string()],
+                            )
+                        });
+                let forgejo_error = if forgejo_errors.is_empty() {
+                    None
+                } else {
+                    Some(forgejo_errors.join(" | "))
+                };
                 rows.push(AgentRow {
                     agent: a,
                     status,
                     action_items,
                     forgejo_issues,
                     forgejo_prs,
+                    forgejo_error,
                 });
             }
             let t = AgentsTemplate {

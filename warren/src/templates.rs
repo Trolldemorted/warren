@@ -48,6 +48,12 @@ pub struct AgentRow {
     pub action_items: u64,
     pub forgejo_issues: u64,
     pub forgejo_prs: u64,
+    /// Most-recent per-config error message for this agent, or `None`
+    /// if every config succeeded (or there were no configs). When
+    /// `Some`, the agents dashboard renders an `err` badge with the
+    /// full message(s) available in the title attribute. Truncated to
+    /// ~120 chars per config so the cell stays compact.
+    pub forgejo_error: Option<String>,
 }
 
 #[derive(Template)]

@@ -58,17 +58,24 @@
            across all its forgejo configs that have no remaining open
            blocker (per `forgejo::fetch_unblocked_assigned`). A non-zero
            count links to the edit page where the per-config auth +
-           host can be reviewed; zero renders as "—". Same badge
+           host can be reviewed; zero renders as "—". When any config
+           surfaced an error, the count is replaced with a red `err`
+           badge whose title attribute carries the human-readable
+           detail (per-config messages joined with ` | `). Same badge
            palette as Action items so the three action columns read as
            one group. #}
-        {% if r.forgejo_issues > 0 %}
+        {% if let Some(e) = r.forgejo_error %}
+          <span class="badge bg-danger" title="{{ e }}">err</span>
+        {% else if r.forgejo_issues > 0 %}
           <a class="badge bg-warning text-dark text-decoration-none" href="/admin/agents/{{ r.agent.id }}/edit" title="Unblocked assigned issues">{{ r.forgejo_issues }}</a>
         {% else %}
           <span class="text-muted">—</span>
         {% endif %}
       </td>
       <td>
-        {% if r.forgejo_prs > 0 %}
+        {% if let Some(e) = r.forgejo_error %}
+          <span class="badge bg-danger" title="{{ e }}">err</span>
+        {% else if r.forgejo_prs > 0 %}
           <a class="badge bg-warning text-dark text-decoration-none" href="/admin/agents/{{ r.agent.id }}/edit" title="Unblocked assigned PRs">{{ r.forgejo_prs }}</a>
         {% else %}
           <span class="text-muted">—</span>

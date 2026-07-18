@@ -79,11 +79,20 @@ pub async fn fetch_unblocked_assigned(
             Some(n) => n,
             None => continue,
         };
-        let deps = api
+        let deps = match api
             .issue_list_issue_dependencies(owner, repo, number)
             .send()
             .await
-            .unwrap_or_default();
+        {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "forgejo: cfg {} ({}/{}) issue #{} dep lookup failed ({e}); treating as unblocked",
+                    config_id, owner, repo, number
+                );
+                Vec::new()
+            }
+        };
         if deps_have_open(&deps) {
             continue;
         }
@@ -126,12 +135,20 @@ async fn fetch_unblocked_assigned_for_config(
 pub async fn unblocked_assigned_for_agent(
     db: &Db,
     agent_id: Uuid,
-) -> AppResult<(Vec<ActionItem>, Vec<ActionItem>)> {
+) -> AppResult<((Vec<ActionItem>, Vec<ActionItem>), Vec<String>)> {
     let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
     let mut issues = Vec::new();
     let mut pull_requests = Vec::new();
+    let mut errors = Vec::new();
     for cfg in &configs {
         if cfg.forgejo_username.trim().is_empty() {
+            log::warn!(
+                "forgejo: cfg {} ({}@{}/{}) skipped: forgejo_username is empty",
+                cfg.id,
+                cfg.base_url,
+                cfg.owner,
+                cfg.repo
+            );
             continue;
         }
         match fetch_unblocked_assigned_for_config(cfg).await {
@@ -148,12 +165,18 @@ pub async fn unblocked_assigned_for_agent(
                     cfg.repo
                 );
                 log::debug!("forgejo: cfg {} detail: {e:?}", cfg.id);
+                errors.push(format!(
+                    "{}/{}: {}",
+                    cfg.owner,
+                    cfg.repo,
+                    truncate(&e.to_string(), 120)
+                ));
             }
         }
     }
     issues.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     pull_requests.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
-    Ok((issues, pull_requests))
+    Ok(((issues, pull_requests), errors))
 }
 
 /// Count-only variant of `unblocked_assigned_for_agent`. The
@@ -162,12 +185,23 @@ pub async fn unblocked_assigned_for_agent(
 /// wasteful. Per-config errors are similarly swallowed (counted as
 /// zero) so a transient forgejo outage doesn't continuously skip the
 /// schedule.
-pub async fn count_unblocked_assigned_for_agent(db: &Db, agent_id: Uuid) -> AppResult<(u64, u64)> {
+pub async fn count_unblocked_assigned_for_agent(
+    db: &Db,
+    agent_id: Uuid,
+) -> AppResult<((u64, u64), Vec<String>)> {
     let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
     let mut issues = 0u64;
     let mut prs = 0u64;
+    let mut errors = Vec::new();
     for cfg in &configs {
         if cfg.forgejo_username.trim().is_empty() {
+            log::warn!(
+                "forgejo: cfg {} ({}@{}/{}) skipped: forgejo_username is empty",
+                cfg.id,
+                cfg.base_url,
+                cfg.owner,
+                cfg.repo
+            );
             continue;
         }
         match fetch_unblocked_assigned_for_config(cfg).await {
@@ -184,11 +218,31 @@ pub async fn count_unblocked_assigned_for_agent(db: &Db, agent_id: Uuid) -> AppR
                     cfg.repo
                 );
                 log::debug!("forgejo: cfg {} detail: {e:?}", cfg.id);
+                errors.push(format!(
+                    "{}/{}: {}",
+                    cfg.owner,
+                    cfg.repo,
+                    truncate(&e.to_string(), 120)
+                ));
             }
         }
     }
-    Ok((issues, prs))
+    Ok(((issues, prs), errors))
 }
 
 #[allow(dead_code)]
 fn _ensure_date_time_type_used(_: DateTime<Utc>) {}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 1);
+    out.push_str(&s[..end]);
+    out.push('…');
+    out
+}

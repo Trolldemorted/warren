@@ -952,7 +952,7 @@ async fn api_agent_action_items(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let (issues, pull_requests) =
+    let ((issues, pull_requests), _errors) =
         crate::forgejo::unblocked_assigned_for_agent(&state.db, agent_id).await?;
     Ok(Json(ActionItemsResponse {
         issues,

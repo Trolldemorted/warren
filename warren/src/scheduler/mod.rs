@@ -156,10 +156,10 @@ pub async fn fire_prompt(
     //     set, mirroring `ignore_inbox_state` for team schedules.
     if prompt.scope == "agent" {
         if !prompt.ignore_pending_forgejo_work {
-            let (issues, prs) =
+            let ((issues, prs), _errors) =
                 crate::forgejo::count_unblocked_assigned_for_agent(&state.db, agent_id)
                     .await
-                    .unwrap_or((0, 0));
+                    .unwrap_or(((0, 0), Vec::new()));
             if issues + prs == 0 {
                 skip(
                     &state,
