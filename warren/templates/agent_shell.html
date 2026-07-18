@@ -206,6 +206,10 @@ function connectWs() {
   const viewerQuery = viewerMode ? '?viewer=true' : '';
   ws = new WebSocket(`${proto}//${location.host}/agent/${agentId}/shell/ws${viewerQuery}`);
   ws.binaryType = 'arraybuffer';
+  // §UTF-8 streaming decoder: rebuild on every (re)connect so
+  // any partial codepoint buffered by a dying socket never combines
+  // with the fresh stream.
+  utf8Decoder = new TextDecoder('utf-8', { stream: true });
 
   ws.onopen = () => {
     wsBackoff = 500;
@@ -258,8 +262,15 @@ function connectWs() {
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
+// §UTF-8 streaming decoder. See agent_claude.html for the
+// rationale — every WS frame would otherwise be decoded in
+// isolation, producing U+FFFD for any multi-byte codepoint that
+// straddles a chunk boundary. Reset on each reconnect (same place
+// rebuilds the WS) so dying-socket partial codepoints don’t get
+// combined with the new stream’s first bytes.
+let utf8Decoder = new TextDecoder('utf-8', { stream: true });
 function bytesToUtf8(bytes) {
-  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  return utf8Decoder.decode(bytes, { stream: true });
 }
 
 connectWs();

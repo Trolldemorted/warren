@@ -883,6 +883,12 @@ function connectWs() {
   const viewerQuery = viewerMode ? '?viewer=true' : '';
   ws = new WebSocket(`${proto}//${location.host}/agent/${agentId}/claude/ws${viewerQuery}`);
   ws.binaryType = 'arraybuffer';
+  // §UTF-8 streaming decoder: rebuild on every (re)connect so any
+  // incomplete bytes buffered by the prior socket's dying stream
+  // never get combined with the first bytes of the fresh one (which
+  // would be a different codepoint). See the comment on
+  // `utf8Decoder` above.
+  utf8Decoder = new TextDecoder('utf-8', { stream: true });
 
   ws.onopen = () => {
     wsBackoff = 500;
@@ -943,11 +949,17 @@ function connectWs() {
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
+// §UTF-8 streaming decoder. Without `stream: true`, every call decodes
+// in isolation, so a multi-byte UTF-8 codepoint whose bytes straddle two
+// WS frames produces a trailing U+FFFD on each chunk. The streaming
+// decoder buffers incomplete trailing bytes internally across calls
+// and emits the completed codepoint on the next chunk. The decoder is
+// re-created on every reconnect so buffered bytes from a dying socket
+// never combine with the first bytes of the fresh one (see
+// `connectWs`).
+let utf8Decoder = new TextDecoder('utf-8', { stream: true });
 function bytesToUtf8(bytes) {
-  // xterm.write takes a UTF-8 string. The PTY is mostly UTF-8 but repaints
-  // may produce partial sequences; TextDecoder surfaces replacement chars
-  // which xterm renders as � without crashing.
-  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  return utf8Decoder.decode(bytes, { stream: true });
 }
 
 // Action buttons POST to /api/agents/:id/claude/* — cookie-authed and
