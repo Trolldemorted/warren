@@ -53,8 +53,8 @@
   <div data-scope-panel="team" class="row" {% if scope != "team" %}hidden{% endif %}>
     <div class="col-md-6 mb-3">
       <label class="form-label">Target class</label>
-      <select class="form-select" name="target_class" required>
-        <option value="" disabled {% if scope == "team" && target_class.is_empty() %}selected{% endif %}>Select…</option>
+      <select class="form-select" name="target_class">
+        <option value="" {% if scope == "team" && target_class.is_empty() %}selected{% endif %}>Select a class…</option>
         {% for c in classes %}<option value="{{ c }}" {% if scope == "team" && target_class == c.as_str() %}selected{% endif %}>{{ c }}</option>{% endfor %}
       </select>
     </div>
@@ -72,8 +72,8 @@
     {% if agents.is_empty() %}
       <div class="alert alert-warning mb-0">No agents registered.</div>
     {% else %}
-      <select class="form-select" name="agent_id" required>
-        <option value="" disabled {% if scope == "agent" && agent_id.is_none() %}selected{% endif %}>Select…</option>
+      <select class="form-select" name="agent_id">
+        <option value="" {% if scope == "agent" && agent_id.is_none() %}selected{% endif %}>Select an agent…</option>
         {% for a in agents %}<option value="{{ a.id }}" {% if scope == "agent" %}{% if let Some(id) = agent_id %}{% if id.to_string() == a.id.as_str() %}selected{% endif %}{% endif %}{% endif %}>{{ a.name }} ({{ a.class }}{% if a.kind.is_empty() %}{% else %}:{{ a.kind }}{% endif %})</option>{% endfor %}
       </select>
       <small class="text-muted">Fires when this agent has unblocked forgejo items (unless "Ignore pending forgejo work" is on).</small>

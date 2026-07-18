@@ -1316,10 +1316,15 @@ async fn agent_shell_page(
 #[derive(Deserialize)]
 struct ScheduledPromptForm {
     scope: Option<String>,
-    target_class: String,
-    target_kind: String,
+    /// The address fields are only required for the scope chosen on
+    /// create. The edit page no longer renders them at all (the
+    /// address is immutable post-creation), so they're `Option` here
+    /// and the `parse_scheduled_prompt_form` validator decides whether
+    /// their presence is required.
+    target_class: Option<String>,
+    target_kind: Option<String>,
     /// Raw agent selector; either an agent id (uuid string) or empty.
-    agent_id: String,
+    agent_id: Option<String>,
     name: String,
     prompt_text: String,
     interval_seconds: String,
@@ -1375,28 +1380,29 @@ fn parse_scheduled_prompt_form(
                 "scope must be 'team' or 'agent'".into(),
             ));
         }
-        let target_class_trimmed = form.target_class.trim().to_string();
-        let target_class_opt = if target_class_trimmed.is_empty() {
-            None
-        } else {
-            Some(target_class_trimmed)
-        };
-        let target_kind_trimmed = form.target_kind.trim().to_string();
-        let target_kind_opt = if target_kind_trimmed.is_empty() {
-            None
-        } else {
-            Some(target_kind_trimmed)
-        };
-        let agent_id = {
-            let t = form.agent_id.trim();
-            if t.is_empty() {
-                None
-            } else {
-                Some(Uuid::parse_str(t).map_err(|_| {
+        let target_class_opt = form
+            .target_class
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let target_kind_opt = form
+            .target_kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let agent_id = form
+            .agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|t| {
+                Uuid::parse_str(t).map_err(|_| {
                     AppError::BadRequest(format!("agent_id '{t}' is not a valid uuid"))
-                })?)
-            }
-        };
+                })
+            })
+            .transpose()?;
         match scope {
             "team" => {
                 if target_class_opt.is_none() {
