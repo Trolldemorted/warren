@@ -28,7 +28,7 @@ pub fn spawn(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
 }
 
 async fn run(state: Arc<AppState>) {
-    match db_ops::reconcile_after_restart(&state.db).await {
+    match reconcile_after_restart(&state).await {
         Ok(n) if n > 0 => {
             log::info!("scheduler: reconciled {n} stale run(s) after restart");
         }
@@ -48,6 +48,47 @@ async fn run(state: Arc<AppState>) {
     }
 }
 
+/// Cross-restart reconciliation scoped to runs whose supervising
+/// rabbit is currently unregistered. We can't blanket-mark every
+/// `outcome='fired', finished_at=NULL` row as `warren_restart`: the
+/// observer task is allowed to exit via the meta-channel Closed
+/// branch or the hard deadline, and those paths now write their own
+/// terminal outcomes. A row still stranded in the `'fired'` state
+/// after a restart implies either the run lost its supervising
+/// connection (treat as `warren_restart`) or warren died mid-tick
+/// before the observer could observe anything (also `warren_restart`
+/// — the rabbit will have reconnected by now). A row whose agent is
+/// *currently* registered means the observer is alive and writing
+/// the real outcome; leave it alone.
+async fn reconcile_after_restart(state: &AppState) -> anyhow::Result<u64> {
+    let now = chrono::Utc::now();
+    let stale =
+        db_ops::list_unfinalized_runs(&state.db, now - chrono::Duration::seconds(5), 1000).await?;
+    let mut reconciled: u64 = 0;
+    for run in stale {
+        let still_connected = run
+            .agent_id
+            .map(|aid| state.live.registry.contains_key(&aid))
+            .unwrap_or(false);
+        if still_connected {
+            log::debug!(
+                "scheduler: skipping stale run {} on reconcile (prompt={}, agent still registered)",
+                run.id,
+                run.scheduled_prompt_id
+            );
+            continue;
+        }
+        db_ops::finalize_run(&state.db, run.id, "warren_restart", Some("warren_restart")).await?;
+        if let Some(p) = db_ops::get_scheduled_prompt(&state.db, run.scheduled_prompt_id).await? {
+            let next = now + chrono::Duration::seconds(p.interval_seconds);
+            db_ops::set_next_fire_at(&state.db, p.id, next, now).await?;
+            db_ops::mark_scheduled_prompt_finished(&state.db, p.id, now).await?;
+        }
+        reconciled += 1;
+    }
+    Ok(reconciled)
+}
+
 async fn tick(state: &Arc<AppState>) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
 
@@ -64,6 +105,23 @@ async fn tick(state: &Arc<AppState>) -> anyhow::Result<()> {
     let threshold = now - chrono::Duration::seconds(STALE_RUN_THRESHOLD.as_secs() as i64);
     let stale = db_ops::list_unfinalized_runs(&state.db, threshold, 100).await?;
     for run in stale {
+        // Only sweep rows whose supervising rabbit isn't currently
+        // registered. If the rabbit is still connected the observer
+        // task is alive and the next StopHook/Dead/NeedsInput will
+        // finalize the run with the right outcome; we have no signal
+        // that the run is actually lost.
+        let still_connected = run
+            .agent_id
+            .map(|aid| state.live.registry.contains_key(&aid))
+            .unwrap_or(false);
+        if still_connected {
+            log::debug!(
+                "scheduler: skipping stale run {} (prompt={}, agent still registered)",
+                run.id,
+                run.scheduled_prompt_id
+            );
+            continue;
+        }
         if let Err(e) = finalize_stale_run(state, run, now).await {
             log::error!("scheduler: finalize stale run failed: {e:?}");
         }
@@ -553,21 +611,257 @@ async fn observe(
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // Channel closed means the rabbit disconnected.
+                    // Finalize so the row doesn't stay at outcome='fired'
+                    // and get swept as 'warren_restart' on the next boot.
+                    let now = chrono::Utc::now();
+                    if let Err(e) = db_ops::finalize_run(
+                        &state.db,
+                        run_id,
+                        "meta_channel_closed",
+                        Some("rabbit disconnected before StopHook"),
+                    )
+                    .await
+                    {
+                        log::error!("scheduler: finalize Closed failed: {e:?}");
+                    }
+                    if let Err(e) = db_ops::mark_scheduled_prompt_finished(&state.db, prompt.id, now).await {
+                        log::error!("scheduler: mark finished failed: {e:?}");
+                    }
+                    let next = now + chrono::Duration::seconds(prompt.interval_seconds);
+                    if let Err(e) = db_ops::set_next_fire_at(&state.db, prompt.id, next, fired_at).await {
+                        log::error!("scheduler: set_next_fire_at failed: {e:?}");
+                    }
                     log::warn!(
-                        "scheduler: meta channel closed for prompt={}",
-                        prompt.id
+                        "scheduler: meta channel closed prompt={} run={}",
+                        prompt.id,
+                        run_id
                     );
                     return;
                 }
             },
             _ = &mut deadline => {
+                // Hard deadline hit without seeing StopHook / NeedsInput /
+                // Dead. The run may have completed successfully but we
+                // can't observe that anymore. Finalize with a distinct
+                // outcome so it doesn't get re-labeled 'warren_restart'
+                // by the next sweep.
+                let now = chrono::Utc::now();
+                if let Err(e) = db_ops::finalize_run(
+                    &state.db,
+                    run_id,
+                    "observation_deadline",
+                    Some("observation deadline exceeded without StopHook"),
+                )
+                .await
+                {
+                    log::error!("scheduler: finalize deadline failed: {e:?}");
+                }
+                if let Err(e) = db_ops::mark_scheduled_prompt_finished(&state.db, prompt.id, now).await {
+                    log::error!("scheduler: mark finished failed: {e:?}");
+                }
+                let next = now + chrono::Duration::seconds(prompt.interval_seconds);
+                if let Err(e) = db_ops::set_next_fire_at(&state.db, prompt.id, next, fired_at).await {
+                    log::error!("scheduler: set_next_fire_at failed: {e:?}");
+                }
                 log::warn!(
-                    "scheduler: observation hard deadline for prompt={} run={}",
+                    "scheduler: observation hard deadline prompt={} run={}",
                     prompt.id,
                     run_id
                 );
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::db;
+    use crate::entity::{agent, scheduled_prompt};
+    use crate::rabbit_adapter;
+    use sea_orm::{ActiveModelTrait, EntityTrait, Set};
+
+    /// `reconcile_after_restart` must skip a stranded `'fired'` run
+    /// whose supervising rabbit is still registered — the observer
+    /// task is alive and writing the real outcome. Without this
+    /// guard, a successful-but-delayed completion would be silently
+    /// relabeled as `warren_restart` on every warren boot.
+    #[tokio::test]
+    async fn reconcile_skips_runs_with_registered_agents() {
+        let Some(test_state) = build_test_state().await else {
+            eprintln!("skipping reconcile test: DATABASE_URL not set or DB unreachable");
+            return;
+        };
+
+        // 1) Seed two agent rows + a scheduled-prompt row.
+        //    The agent_id on each run is what the reconcile filter
+        //    checks against `live.registry`.
+        let registered_agent_id = Uuid::new_v4();
+        let unregistered_agent_id = Uuid::new_v4();
+        let prompt_id = Uuid::new_v4();
+        for aid in [registered_agent_id, unregistered_agent_id] {
+            agent::ActiveModel {
+                id: Set(aid),
+                name: Set(format!("reconcile-test-{aid}")),
+                class: Set("reconcile-test".into()),
+                kind: Set(None),
+                model: Set("claude".into()),
+                authtoken: Set(format!("test-token-{aid}")),
+                ..Default::default()
+            }
+            .insert(&test_state.db)
+            .await
+            .expect("insert agent");
+        }
+        scheduled_prompt::ActiveModel {
+            id: Set(prompt_id),
+            name: Set(format!("reconcile-test-prompt-{prompt_id}")),
+            scope: Set("agent".into()),
+            target_class: Set(None),
+            target_kind: Set(None),
+            agent_id: Set(Some(registered_agent_id)),
+            prompt_text: Set("x".into()),
+            interval_seconds: Set(3600),
+            enabled: Set(true),
+            ignore_inbox_state: Set(false),
+            ignore_pending_forgejo_work: Set(false),
+            weekly_safety_buffer_pct: Set(0),
+            session_safety_buffer_pct: Set(0),
+            context_clear_threshold_tokens: Set(None),
+            additional_labels: Set(Vec::new()),
+            next_fire_at: Set(Some(chrono::Utc::now() + chrono::Duration::seconds(3600))),
+            last_fired_at: Set(None),
+            last_finished_at: Set(None),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+        }
+        .insert(&test_state.db)
+        .await
+        .expect("insert prompt");
+
+        // 2) Insert one stranded run per agent. The first run points
+        //    at a registered agent (must be left alone); the second
+        //    points at an unregistered one (must be finalized as
+        //    warren_restart). `fired_at` is backdated past the 5s
+        //    `older_than` threshold that reconcile_after_restart uses
+        //    to find stranded rows.
+        let stranded_fired_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let registered_run_id = Uuid::new_v4();
+        let unregistered_run_id = Uuid::new_v4();
+        scheduled_prompt_run::ActiveModel {
+            id: Set(registered_run_id),
+            scheduled_prompt_id: Set(prompt_id),
+            agent_id: Set(Some(registered_agent_id)),
+            fired_at: Set(stranded_fired_at),
+            finished_at: Set(None),
+            outcome: Set("fired".into()),
+            prompt_id: Set(None),
+            outcome_error: Set(None),
+            usage_weekly_pct: Set(None),
+            usage_session_pct: Set(None),
+            usage_context_pct: Set(None),
+            skip_reason: Set(None),
+        }
+        .insert(&test_state.db)
+        .await
+        .expect("insert registered run");
+        scheduled_prompt_run::ActiveModel {
+            id: Set(unregistered_run_id),
+            scheduled_prompt_id: Set(prompt_id),
+            agent_id: Set(Some(unregistered_agent_id)),
+            fired_at: Set(stranded_fired_at),
+            finished_at: Set(None),
+            outcome: Set("fired".into()),
+            prompt_id: Set(None),
+            outcome_error: Set(None),
+            usage_weekly_pct: Set(None),
+            usage_session_pct: Set(None),
+            usage_context_pct: Set(None),
+            skip_reason: Set(None),
+        }
+        .insert(&test_state.db)
+        .await
+        .expect("insert unregistered run");
+
+        // 3) Register only the first agent in the live registry.
+        let _handle = test_state.live.registry.register(registered_agent_id);
+
+        // 4) Run reconcile. The exact count depends on whether other
+        //    stranded rows exist in the shared test DB; we only
+        //    assert on the two rows we own.
+        let _reconciled = reconcile_after_restart(&test_state)
+            .await
+            .expect("reconcile");
+
+        // 5) Verify outcomes.
+        let rows = db_ops::list_runs_for_scheduled_prompt(&test_state.db, prompt_id, 10)
+            .await
+            .unwrap();
+        let registered_row = rows
+            .iter()
+            .find(|r| r.id == registered_run_id)
+            .expect("registered run row");
+        let unregistered_row = rows
+            .iter()
+            .find(|r| r.id == unregistered_run_id)
+            .expect("unregistered run row");
+        assert_eq!(
+            registered_row.outcome, "fired",
+            "registered-agent row must remain 'fired' so the live observer can finalize it"
+        );
+        assert_eq!(
+            unregistered_row.outcome, "warren_restart",
+            "unregistered-agent row must be finalized as 'warren_restart'"
+        );
+
+        // Cleanup. Runs reference the prompt directly (no cascade),
+        // so delete runs first.
+        for run_id in [registered_run_id, unregistered_run_id] {
+            scheduled_prompt_run::Entity::delete_by_id(run_id)
+                .exec(&test_state.db)
+                .await
+                .expect("delete run");
+        }
+        scheduled_prompt::Entity::delete_by_id(prompt_id)
+            .exec(&test_state.db)
+            .await
+            .expect("delete prompt");
+        for aid in [registered_agent_id, unregistered_agent_id] {
+            agent::Entity::delete_by_id(aid)
+                .exec(&test_state.db)
+                .await
+                .expect("delete agent");
+        }
+    }
+
+    /// Spin up a minimal `AppState` against the test database.
+    /// Returns `None` if `DATABASE_URL` isn't set or the DB is
+    /// unreachable, so this test silently no-ops in environments
+    /// without a live Postgres (CI without the test DB).
+    async fn build_test_state() -> Option<AppState> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let db = match db::connect(&url).await {
+            Ok(c) => c,
+            Err(_) => return None,
+        };
+        let cfg = Config {
+            bind_addr: "127.0.0.1:0".into(),
+            database_url: url,
+            admin_psk: "test-psk".into(),
+            session_ttl_hours: 1,
+            static_dir: Default::default(),
+            docs_dir: Default::default(),
+            tui_cols: 160,
+            tui_rows: 50,
+        };
+        let live = rabbit_adapter::build_server_state(db.clone(), cfg.tui_cols, cfg.tui_rows);
+        Some(AppState {
+            db,
+            config: cfg,
+            live,
+        })
     }
 }

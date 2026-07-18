@@ -343,6 +343,8 @@ pub fn outcome_badge(outcome: &str) -> &'static str {
         "needs_input_canceled" => "bg-warning text-dark",
         "warren_restart" => "bg-warning text-dark",
         "rabbit_offline" => "bg-secondary",
+        "meta_channel_closed" => "bg-warning text-dark",
+        "observation_deadline" => "bg-warning text-dark",
         "failed" => "bg-danger",
         "fired" => "bg-secondary",
         "skipped_offline" | "skipped_no_idle" | "skipped_no_inbox" | "skipped_unsafe_scrape" => {

@@ -1164,7 +1164,10 @@ pub async fn list_runs_for_scheduled_prompt(
 }
 
 /// Find runs that were fired but never finalized — used by the
-/// observation sweep to detect lost prompts.
+/// observation sweep and the cross-restart reconcile to detect
+/// lost prompts. Callers must apply additional scoping (e.g. liveness
+/// of the supervising rabbit) before finalizing; the row's
+/// `agent_id` is `Option<Uuid>`.
 pub async fn list_unfinalized_runs(
     db: &Db,
     older_than: chrono::DateTime<chrono::Utc>,
@@ -1178,29 +1181,6 @@ pub async fn list_unfinalized_runs(
         .limit(Some(limit))
         .all(db)
         .await?)
-}
-
-/// Cross-restart reconciliation: every run row in `'fired'` state
-/// without a `finished_at` is presumed lost (warren died mid-prompt,
-/// rabbit dropped, etc.). Flip them to `'warren_restart'`, set
-/// `finished_at = now`, and recompute `next_fire_at` for the parent
-/// schedule so the tick loop picks it up on the next pass. Idempotent:
-/// the `finished_at IS NULL` filter skips already-reconciled rows.
-pub async fn reconcile_after_restart(db: &Db) -> AppResult<u64> {
-    let now = chrono::Utc::now();
-    let stale = list_unfinalized_runs(db, now - chrono::Duration::seconds(5), 1000).await?;
-    let mut reconciled: u64 = 0;
-    for run in stale {
-        finalize_run(db, run.id, "warren_restart", Some("warren_restart")).await?;
-        // Advance the parent schedule by one interval from now.
-        if let Some(p) = get_scheduled_prompt(db, run.scheduled_prompt_id).await? {
-            let next = now + chrono::Duration::seconds(p.interval_seconds);
-            set_next_fire_at(db, p.id, next, now).await?;
-            mark_scheduled_prompt_finished(db, p.id, now).await?;
-        }
-        reconciled += 1;
-    }
-    Ok(reconciled)
 }
 
 #[derive(FromQueryResult)]
