@@ -122,10 +122,15 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    stops working whenever the canvas overflows the wrap. Pull the
    textarea back to (0,0) of the wrap (inside the 0.5rem padding, so
    it can't intercept canvas clicks) and shrink it to 1×1 to keep
-   Chromium's caret hidden. `!important` overrides xterm.css. */
+   Chromium's caret hidden. `!important` overrides xterm.css. Also
+   reset `right`/`bottom` in case xterm.js (or the wrapped input
+   direction) sets a negative coordinate that would still leave the
+   element outside the visible rect on FF mobile. */
 .claude-grid .xterm-helper-textarea {
   left: 0 !important;
   top: 0 !important;
+  right: auto !important;
+  bottom: auto !important;
   width: 1px !important;
   height: 1px !important;
 }
@@ -391,16 +396,33 @@ function writeBinaryFrame(seq, data) {
 // pair into a single 0x7f frame so a double-fire doesn't reach claude.
 const BACKSPACE_DEBOUNCE_MS = 50;
 let lastBackspaceSentAt = 0;
+// §A.6 / soft-keyboard detection. `e.code === 'Backspace'` is the
+// physical-key fallback for the FF mobile soft keyboard, which on recent
+// builds sometimes leaves `e.key` empty and never sets `e.keyCode`.
+// `e.which === 8` covers the same hole on older webkit-based mobile
+// builds. Without these, the shim silently fails to recognise the
+// keystroke at all and Backspace "does nothing".
 function isBackspaceEvent(e) {
-  return e.key === 'Backspace' || e.keyCode === 8;
+  return e.key === 'Backspace' || e.code === 'Backspace' ||
+         e.keyCode === 8 || e.which === 8;
 }
 function emitBackspace() {
-  if (!connected || !ws || viewerMode) return;
+  if (viewerMode) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (debugTyping) console.log('[typing] dropped 0x7f: ws=', ws ? ws.readyState : 'null');
+    return;
+  }
   const buf = new Uint8Array(2);
   buf[0] = 0x01;
   buf[1] = 0x7f;
   ws.send(buf);
+  if (debugTyping) console.log('[typing] sent 0x7f at', Date.now());
 }
+// §A.6 / FF-mobile diagnostic. `?debug_typing=1` on the URL enables
+// per-event console logs so we can confirm whether the shim sees the
+// keystroke, where it ended up routed, and whether `ws.readyState` was
+// OPEN at send time. Cheap; only enabled on demand.
+const debugTyping = new URLSearchParams(location.search).get('debug_typing') === '1';
 term.attachCustomKeyEventHandler(e => {
   if (e.type !== 'keydown' && e.type !== 'keypress') return true;
   // §Copy affordance: xterm renders to a <canvas>, so the browser can't
@@ -424,6 +446,8 @@ term.attachCustomKeyEventHandler(e => {
     ? performance.now() : Date.now();
   if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return false;
   lastBackspaceSentAt = now;
+  if (debugTyping) console.log('[typing] shim', e.type, 'key=' + JSON.stringify(e.key),
+    'code=' + JSON.stringify(e.code), 'keyCode=' + e.keyCode, 'active=' + (document.activeElement && document.activeElement.tagName + '.' + (document.activeElement.className || '')));
   emitBackspace();
   return false;
 });
@@ -447,16 +471,62 @@ function isFormFieldFocused() {
   if (a.isContentEditable) return true;
   return false;
 }
+// §A.6 / focus-inside-terminal-grid detection. Used by the document-level
+// fallback so we always handle Backspace when the operator is interacting
+// with the terminal area — even if xterm.js's helper-textarea path didn't
+// run (the original failure mode on FF mobile: focus on body, soft
+// keyboard input, keydown only reaches `<document>` and never reaches
+// xterm's textarea). The terminal grid is uniquely identifiable via its
+// own class; walking up to it is O(depth-from-target) and bounded by
+// the page's small DOM tree.
+function focusInsideTerminalGrid() {
+  const a = document.activeElement;
+  if (!a) return true;
+  if (a === document.body || a === document.documentElement) return true;
+  let n = a;
+  while (n) {
+    if (n.classList && n.classList.contains('claude-grid')) return true;
+    n = n.parentElement;
+  }
+  return false;
+}
 document.addEventListener('keydown', e => {
   if (e.type !== 'keydown') return;
   if (!isBackspaceEvent(e)) return;
   if (isFormFieldFocused()) return;
+  if (!focusInsideTerminalGrid()) return;
   e.preventDefault();
   e.stopPropagation();
   const now = (typeof performance !== 'undefined' && performance.now)
     ? performance.now() : Date.now();
   if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return;
   lastBackspaceSentAt = now;
+  if (debugTyping) console.log('[typing] doc-fallback', 'active=' + (document.activeElement && document.activeElement.tagName + '.' + (document.activeElement.className || '')));
+  emitBackspace();
+}, true);
+
+// §A.6 / soft-keyboard `beforeinput` fallback. Modern mobile FF fires
+// the soft keyboard's Backspace as a `beforeinput` event with
+// `inputType === 'deleteContentBackward'` even when no keydown reaches
+// xterm.js's helper textarea. The xterm shim and the document-level
+// keydown both miss that path on soft-kb-only builds. Listen at the
+// document level with capture so we get the event before xterm.js
+// does anything with it; emit `\x7f` and block the default. The shared
+// debounce still collapses a hypothetical keydown→beforeinput double-fire.
+document.addEventListener('beforeinput', e => {
+  if (e.inputType !== 'deleteContentBackward' &&
+      e.inputType !== 'deleteWordBackward' &&
+      e.inputType !== 'deleteSoftLineBackward') return;
+  if (viewerMode) return;
+  if (isFormFieldFocused()) return;
+  if (!focusInsideTerminalGrid()) return;
+  e.preventDefault();
+  const now = (typeof performance !== 'undefined' && performance.now)
+    ? performance.now() : Date.now();
+  if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return;
+  lastBackspaceSentAt = now;
+  if (debugTyping) console.log('[typing] beforeinput', e.inputType,
+    'active=' + (document.activeElement && document.activeElement.tagName + '.' + (document.activeElement.className || '')));
   emitBackspace();
 }, true);
 
