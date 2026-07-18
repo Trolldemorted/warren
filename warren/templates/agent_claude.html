@@ -151,28 +151,46 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   scroll-padding: 0 !important;
 }
 @media (max-width: 700px) {
+  /* Lock the document so a swipe can't scroll the page out from under
+     the terminal. This is the crux of the mobile scroll fix: with the
+     page unable to move, the only scrollable surface a swipe can act on
+     is the terminal wrap below, so the gesture pans the terminal instead
+     of falling through to the document. */
+  html, body { height: 100%; overflow: hidden; }
+  /* App-like column layout below the fixed navbar: the terminal fills
+     the remaining space and pans internally (both axes — the fixed
+     160×50 grid is larger than a phone), and the sidebar takes a bounded
+     strip beneath it with its own independent scroll. `dvh` tracks the
+     real viewport as the mobile address bar shows/hides; `vh` is the
+     fallback for engines without `dvh`. */
   .claude-grid {
-    grid-template-columns: minmax(0, 1fr);
-    height: auto;
-    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 4.5rem);
+    height: calc(100dvh - 4.5rem);
+    overflow: hidden;
   }
-  /* Bound the wrap and let IT own both scroll axes so a swipe pans inside
-     the terminal. Horizontal already worked; vertical didn't because
-     xterm's own `.xterm-viewport` (an absolute, `overflow-y: scroll`
-     overlay for scrollback) swallowed the gesture and, having nothing to
-     scroll, chained it out to the whole page. Disabling that vertical
-     capture hands the pan back to the wrap. `overscroll-behavior:
-     contain` keeps the pan from scrolling the page; the stacked sidebar
-     below is reached by swiping outside the terminal frame. */
   .claude-grid .term-wrap {
-    height: 70vh;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
     overscroll-behavior: contain;
+    touch-action: pan-x pan-y;
   }
+  /* xterm's own `.xterm-viewport` is an absolute overlay with
+     `overflow-y: scroll` for scrollback a full-screen TUI never uses; it
+     otherwise captures the vertical swipe before the wrap can. Disable
+     that capture so the wrap owns the vertical pan. */
   .claude-grid .xterm-viewport { overflow-y: hidden !important; }
-  .claude-grid aside { overflow-y: visible; }
+  .claude-grid aside {
+    flex: 0 0 auto;
+    max-height: 38vh;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   /* Pin xterm's focusable helper textarea to the viewport so focusing it
      — and the caret move on every keystroke — never triggers a
-     scroll-into-view that yanks the terminal to the top. */
+     scroll-into-view that pans the terminal to the top. */
   .claude-grid .xterm-helper-textarea {
     position: fixed !important;
     top: 0 !important;
