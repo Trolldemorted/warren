@@ -141,19 +141,22 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   height: 1px !important;
 }
 
-/* §A.6 / FF-mobile scroll containment. When the soft keyboard opens
-   on Firefox Mobile, the browser tries to keep the focused element
-   (xterm's helper textarea, parked at (0,0) of the wrap) in view by
-   scrolling the nearest scrollable ancestor. Without this rule,
-   "nearest" can resolve to the body — scrolling the whole page up so
-   the prompt leaves the viewport. `scroll-padding` makes any
-   `scrollIntoView` on a child keep some room around the focus target,
-   and `overscroll-behavior: contain` stops a scrolled wrap from
-   bubbling scroll back to the page. Together they keep the wrap
-   contained: scroll happens inside the wrap, the body doesn't move. */
+/* §FF-mobile scroll fix. The previous `overscroll-behavior: contain`
+   here trapped touch-scroll inside the terminal wrap so the page could
+   never scroll on Firefox for Android. It's gone. On narrow viewports
+   we also drop the one-screen `overflow: hidden` grid and stack the
+   sidebar below the terminal, so the whole page scrolls naturally
+   instead of pinning everything inside a `100vh` box. */
 .claude-grid .term-wrap {
   scroll-padding: 0 !important;
-  overscroll-behavior: contain;
+}
+@media (max-width: 700px) {
+  .claude-grid {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    overflow: visible;
+  }
+  .claude-grid aside { overflow-y: visible; }
 }
 
 /* Action-button toast: bottom-right, fades in on `.visible`, auto-dismisses.
@@ -369,51 +372,68 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   mouseEvents: false,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
-// §A.6 / FF-mobile scroll guard. xterm's `focus()` doesn't pass
-// `preventScroll: true`, so on Firefox Mobile the browser scrolls the
-// body to bring the helper textarea (at (0,0) of the wrap) into view
-// when the soft keyboard opens. Bypass xterm's focus path entirely and
-// call the helper textarea's focus directly with `preventScroll: true`
-// — the same internal call xterm would make, just before the browser
-// can auto-scroll. The capture-phase focusin handler above is the
-// belt-and-braces fallback for cases where xterm re-focuses the
-// textarea mid-keystroke (it does this every time `term.write` runs
-// with the cursor in the input region).
+// §FF-mobile fix. Two device-specific problems on Firefox for Android,
+// both handled here:
+//
+//   Scroll — the previous build restored `window.scrollTo` on every
+//   helper-textarea focusin AND set `overscroll-behavior: contain` on
+//   the wrap. Since the textarea is auto-focused, that pinned the page
+//   at the top and swallowed touch scroll. Both are gone (the focusin
+//   handler is deleted, the CSS rule removed), and on touch we no longer
+//   auto-focus on load — so the page scrolls normally and the soft
+//   keyboard only opens when the operator taps the terminal.
+//
+//   Backspace — xterm keeps its helper textarea empty, and Firefox
+//   mobile fires NO `keydown`/`beforeinput` for Backspace on an empty
+//   field, so the delete never reached the document-level handlers
+//   below. Keeping the textarea "armed" with a sentinel prefix means a
+//   Backspace always has something to delete, so `beforeinput`
+//   (`deleteContentBackward`) fires and the existing handler turns it
+//   into a `\x7f` byte. xterm forwards only `e.data` on insert and
+//   anchors composition to the value length at compositionstart, so the
+//   sentinel prefix is never sent to the PTY.
+const isTouchDevice = (navigator.maxTouchPoints || 0) > 0 ||
+  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+
 function focusTerm(opts = { preventScroll: true }) {
-  // The helper textarea is xterm's focusable element; reach it the
-  // same way xterm's internal focus does. Falls back to term.focus()
-  // (the buggy path) if the textarea isn't yet attached — xterm
-  // attaches it on `open()` so this is just a safety net.
   const ta = document.querySelector('.claude-grid .xterm-helper-textarea');
   if (ta) ta.focus(opts);
   else term.focus();
 }
-focusTerm();
+if (!isTouchDevice) focusTerm();
 
-// §A.6 / FF-mobile scroll guard. xterm's helper textarea is parked at
-// (0,0) of the wrap so the page's main viewport doesn't see the caret
-// (Chromium blinks it otherwise). On Firefox Mobile, when the soft
-// keyboard opens — or when xterm re-focuses its textarea mid-keystroke
-// — the browser tries to scroll the focused element into view. With
-// the textarea at the very top of the wrap, "into view" can resolve
-// to scrolling the body so the top of the wrap is visible, which
-// pushes the bottom (the prompt) off-screen. Capture the focus event
-// for the helper textarea and *prevent the default* scrollIntoView
-// by restoring the body's previous scroll position immediately
-// afterwards. The wrap is the only thing that should be scrolling.
-const wrap = document.getElementById('term').parentElement;
-document.addEventListener('focusin', e => {
-  const t = e.target;
-  if (!(t && t.classList && t.classList.contains('xterm-helper-textarea'))) return;
-  const prevX = window.scrollX;
-  const prevY = window.scrollY;
-  // The browser will scroll the body synchronously to bring the
-  // textarea into view. Restore on the next frame so the user sees
-  // the page where it was before the focus.
-  requestAnimationFrame(() => {
-    window.scrollTo(prevX, prevY);
-  });
-}, true);
+const KEEPALIVE_SENTINEL = '        ';
+let imeComposing = false;
+function armHelperTextarea() {
+  if (!isTouchDevice || imeComposing) return;
+  const ta = document.querySelector('.claude-grid .xterm-helper-textarea');
+  if (!ta) return;
+  if (ta.value !== KEEPALIVE_SENTINEL) ta.value = KEEPALIVE_SENTINEL;
+  const end = KEEPALIVE_SENTINEL.length;
+  try { ta.setSelectionRange(end, end); } catch (e) {}
+}
+if (isTouchDevice) {
+  const ta = document.querySelector('.claude-grid .xterm-helper-textarea');
+  if (ta) {
+    ta.setAttribute('autocapitalize', 'none');
+    ta.setAttribute('autocomplete', 'off');
+    ta.setAttribute('autocorrect', 'off');
+    ta.setAttribute('spellcheck', 'false');
+    ta.addEventListener('compositionstart', () => { imeComposing = true; });
+    ta.addEventListener('compositionend', () => {
+      imeComposing = false;
+      setTimeout(armHelperTextarea, 0);
+    });
+    // xterm clears the textarea (value = "") after every accepted
+    // keystroke and on blur; re-arm on the bubble phase — which runs
+    // after xterm's own capture-phase input handler — so it's ready for
+    // the next Backspace. Setting `.value` programmatically doesn't
+    // refire `input`, so this can't loop or leak the sentinel.
+    ta.addEventListener('input', () => { if (!imeComposing) armHelperTextarea(); });
+    ta.addEventListener('focus', () => setTimeout(armHelperTextarea, 0));
+    armHelperTextarea();
+  }
+}
 
 // §A.7 / seq-numbered snapshot protocol — buffer that holds live binary
 // frames between WS open and the first `screen_snapshot` apply, so the
