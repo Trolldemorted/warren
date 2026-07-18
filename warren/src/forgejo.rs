@@ -127,7 +127,7 @@ pub async fn fetch_unblocked_assigned(
         )
         .all()
         .await
-        .map_err(|e| AppError::BadGateway(format!("GET {issues_url}: {e}")))?;
+        .map_err(|e| AppError::from(e).with_url(&issues_url))?;
 
     let mut issue_items = Vec::new();
     let mut pr_items = Vec::new();
@@ -141,7 +141,7 @@ pub async fn fetch_unblocked_assigned(
             .issue_list_issue_dependencies(owner, repo, number)
             .send()
             .await
-            .map_err(|e| AppError::BadGateway(format!("GET {deps_url}: {e}")))
+            .map_err(|e| AppError::from(e).with_url(&deps_url))
         {
             Ok(d) => d,
             Err(e) => {
@@ -230,7 +230,7 @@ pub async fn fetch_unblocked_unassigned_with_label(
         )
         .all()
         .await
-        .map_err(|e| AppError::BadGateway(format!("GET {issues_url}: {e}")))?;
+        .map_err(|e| AppError::from(e).with_url(&issues_url))?;
 
     let mut issue_items = Vec::new();
     let mut pr_items = Vec::new();
@@ -253,7 +253,7 @@ pub async fn fetch_unblocked_unassigned_with_label(
             .issue_list_issue_dependencies(owner, repo, number)
             .send()
             .await
-            .map_err(|e| AppError::BadGateway(format!("GET {deps_url}: {e}")))
+            .map_err(|e| AppError::from(e).with_url(&deps_url))
         {
             Ok(d) => d,
             Err(e) => {
