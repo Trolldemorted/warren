@@ -151,15 +151,19 @@ pub async fn fire_prompt(
 
     // (2) Action-items gate, scoped to the schedule's address.
     //   - Team scope: warren inbox count (existing semantics).
-    //   - Agent scope: count of unblocked forgejo items assigned to the
-    //     target agent. Bypassed when `ignore_pending_forgejo_work` is
-    //     set, mirroring `ignore_inbox_state` for team schedules.
+    //   - Agent scope: count of unblocked forgejo items the agent owns
+    //     (assigned + unassigned-with-label per the schedule's
+    //     `additional_labels`). Bypassed when `ignore_pending_forgejo_work`
+    //     is set, mirroring `ignore_inbox_state` for team schedules.
     if prompt.scope == "agent" {
         if !prompt.ignore_pending_forgejo_work {
-            let ((issues, prs), _errors) =
-                crate::forgejo::count_unblocked_assigned_for_agent(&state.db, agent_id)
-                    .await
-                    .unwrap_or(((0, 0), Vec::new()));
+            let ((issues, prs), _errors) = crate::forgejo::count_work_items_for_agent(
+                &state.db,
+                agent_id,
+                &prompt.additional_labels,
+            )
+            .await
+            .unwrap_or(((0, 0), Vec::new()));
             if issues + prs == 0 {
                 skip(
                     &state,

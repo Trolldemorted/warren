@@ -591,6 +591,30 @@ fn validate_channel_new(n: &ChannelNew) -> AppResult<()> {
     Ok(())
 }
 
+/// Cap on the joined label-list size for a schedule. Bounds the
+/// request body and the persisted array; the form UI parses with
+/// comma-splitting and trims whitespace, so a sensible operator
+/// input stays well below this. Mirrors the defense the threshold
+/// validators already use.
+const MAX_LABEL_LIST_BYTES: usize = 1024;
+
+fn validate_label_list(labels: &[String]) -> AppResult<()> {
+    let total: usize = labels.iter().map(|s| s.len()).sum();
+    if total > MAX_LABEL_LIST_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "additional_labels too large ({total} bytes; max {MAX_LABEL_LIST_BYTES})"
+        )));
+    }
+    for l in labels {
+        if l.is_empty() {
+            return Err(AppError::BadRequest(
+                "additional_labels entries must be non-empty".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_scheduled_prompt_new(n: &ScheduledPromptNew) -> AppResult<()> {
     // Scope gate — must be one of the two known strings and the
     // address fields must match the scope (mutual exclusion).
@@ -657,6 +681,7 @@ fn validate_scheduled_prompt_new(n: &ScheduledPromptNew) -> AppResult<()> {
             ));
         }
     }
+    validate_label_list(&n.additional_labels)?;
     Ok(())
 }
 
@@ -706,6 +731,9 @@ fn validate_scheduled_prompt_patch(p: &ScheduledPromptPatch) -> AppResult<()> {
                 "context_clear_threshold_tokens must be a non-negative integer".into(),
             ));
         }
+    }
+    if let Some(labels) = &p.additional_labels {
+        validate_label_list(labels)?;
     }
     Ok(())
 }
@@ -953,7 +981,7 @@ async fn api_agent_action_items(
         .ok_or(AppError::NotFound)?;
 
     let ((issues, pull_requests), _errors) =
-        crate::forgejo::unblocked_assigned_for_agent(&state.db, agent_id).await?;
+        crate::forgejo::unblocked_work_items_for_agent(&state.db, agent_id, &[]).await?;
     Ok(Json(ActionItemsResponse {
         issues,
         pull_requests,
@@ -1055,6 +1083,7 @@ mod tests {
             weekly_safety_buffer_pct: 0,
             session_safety_buffer_pct: 0,
             context_clear_threshold_tokens: None,
+            additional_labels: vec![],
         }
     }
 
@@ -1097,5 +1126,54 @@ mod tests {
             ..Default::default()
         };
         validate_scheduled_prompt_patch(&p).expect("Some(0) (disabled) must validate on patch");
+    }
+
+    #[test]
+    fn scheduled_prompt_new_accepts_non_empty_labels() {
+        let mut n = ok_new();
+        n.additional_labels = vec!["p3-agent".into(), "blocker-p0".into()];
+        validate_scheduled_prompt_new(&n).expect("non-empty label list must validate");
+    }
+
+    #[test]
+    fn scheduled_prompt_new_rejects_empty_label_entries() {
+        let mut n = ok_new();
+        n.additional_labels = vec!["ok".into(), String::new()];
+        assert_bad_request_contains(
+            validate_scheduled_prompt_new(&n).unwrap_err(),
+            "additional_labels entries must be non-empty",
+        );
+    }
+
+    #[test]
+    fn scheduled_prompt_new_rejects_oversize_label_list() {
+        let mut n = ok_new();
+        // 1025 ASCII chars spread across two entries — must trip the cap.
+        n.additional_labels = vec!["a".repeat(1024), "b".into()];
+        assert_bad_request_contains(
+            validate_scheduled_prompt_new(&n).unwrap_err(),
+            "additional_labels too large",
+        );
+    }
+
+    #[test]
+    fn scheduled_prompt_patch_validates_labels_when_present() {
+        let p = ScheduledPromptPatch {
+            additional_labels: Some(vec![String::new()]),
+            ..Default::default()
+        };
+        assert_bad_request_contains(
+            validate_scheduled_prompt_patch(&p).unwrap_err(),
+            "additional_labels entries must be non-empty",
+        );
+    }
+
+    #[test]
+    fn scheduled_prompt_patch_accepts_clearing_labels_via_empty_vec() {
+        let p = ScheduledPromptPatch {
+            additional_labels: Some(vec![]),
+            ..Default::default()
+        };
+        validate_scheduled_prompt_patch(&p).expect("empty vec must validate (clears the set)");
     }
 }

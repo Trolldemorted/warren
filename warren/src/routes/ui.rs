@@ -411,13 +411,16 @@ async fn agents_page(
                 // issue-dependency lookups) HTTP calls. If that ever
                 // becomes a hot path, memoize on (config_id, fetched_at)
                 // with a short TTL — see
-                // `forgejo::count_unblocked_assigned_for_agent`.
+                // `forgejo::count_work_items_for_agent`. The dashboard
+                // has no schedule context so it passes `&[]` (assigned
+                // only) — unassigned-by-label counts only ever feed the
+                // scheduler pre-fire gate per schedule.
                 let ((forgejo_issues, forgejo_prs), forgejo_errors) =
-                    crate::forgejo::count_unblocked_assigned_for_agent(&state.db, a.id)
+                    crate::forgejo::count_work_items_for_agent(&state.db, a.id, &[])
                         .await
                         .unwrap_or_else(|e| {
                             log::warn!(
-                                "forgejo: count_unblocked_assigned_for_agent({}) outer error: {e}",
+                                "forgejo: count_work_items_for_agent({}) outer error: {e}",
                                 a.id
                             );
                             log::debug!("forgejo: count outer detail: {e:?}");
@@ -1326,10 +1329,28 @@ struct ScheduledPromptForm {
     weekly_safety_buffer_pct: String,
     session_safety_buffer_pct: String,
     context_clear_threshold_tokens: String,
+    additional_labels: Option<String>,
 }
 
 fn scheduled_prompt_form_checkbox(s: Option<String>) -> bool {
     matches!(s.as_deref(), Some("true"))
+}
+
+/// Parse a comma-separated label list from a form input. Trims each
+/// entry and drops empties (so `,,a, ,b,` → `["a","b"]`). Labels
+/// containing commas can't be expressed; the form helper text says
+/// so. The validators in `routes::api` reject oversize / empty
+/// entries — this function only normalises whitespace.
+fn parse_label_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn join_label_list_csv(labels: &[String]) -> String {
+    labels.join(",")
 }
 
 fn parse_scheduled_prompt_form(
@@ -1446,6 +1467,7 @@ fn parse_scheduled_prompt_form(
         }
         Some(v)
     };
+    let additional_labels = parse_label_list(form.additional_labels.as_deref().unwrap_or(""));
     Ok(ScheduledPromptFormParsed {
         scope: scope.to_string(),
         target_class: target_class_opt,
@@ -1462,6 +1484,7 @@ fn parse_scheduled_prompt_form(
         weekly_safety_buffer_pct,
         session_safety_buffer_pct,
         context_clear_threshold_tokens,
+        additional_labels,
     })
 }
 
@@ -1479,6 +1502,7 @@ struct ScheduledPromptFormParsed {
     weekly_safety_buffer_pct: i32,
     session_safety_buffer_pct: i32,
     context_clear_threshold_tokens: Option<i64>,
+    additional_labels: Vec<String>,
 }
 
 async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1568,6 +1592,7 @@ async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: Heade
         weekly_safety_buffer_pct: 0,
         session_safety_buffer_pct: 0,
         context_clear_threshold_tokens: None,
+        additional_labels_csv: String::new(),
         runs: vec![],
     })
 }
@@ -1598,6 +1623,7 @@ async fn scheduled_prompt_create(
         weekly_safety_buffer_pct: parsed.weekly_safety_buffer_pct,
         session_safety_buffer_pct: parsed.session_safety_buffer_pct,
         context_clear_threshold_tokens: parsed.context_clear_threshold_tokens,
+        additional_labels: parsed.additional_labels,
     };
     match crate::db_ops::create_scheduled_prompt(&state.db, &new).await {
         Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),
@@ -1652,6 +1678,7 @@ async fn scheduled_prompt_edit_page(
                 weekly_safety_buffer_pct: p.weekly_safety_buffer_pct,
                 session_safety_buffer_pct: p.session_safety_buffer_pct,
                 context_clear_threshold_tokens: p.context_clear_threshold_tokens,
+                additional_labels_csv: join_label_list_csv(&p.additional_labels),
                 runs,
             })
         }
@@ -1683,6 +1710,7 @@ async fn scheduled_prompt_update(
         weekly_safety_buffer_pct: Some(parsed.weekly_safety_buffer_pct),
         session_safety_buffer_pct: Some(parsed.session_safety_buffer_pct),
         context_clear_threshold_tokens: parsed.context_clear_threshold_tokens,
+        additional_labels: Some(parsed.additional_labels),
         ignore_pending_forgejo_work: Some(parsed.ignore_pending_forgejo_work),
     };
     match crate::db_ops::update_scheduled_prompt(&state.db, id, &patch).await {

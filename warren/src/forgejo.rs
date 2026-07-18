@@ -126,15 +126,121 @@ async fn fetch_unblocked_assigned_for_config(
     .await
 }
 
-/// Fetch unblocked-assigned items across every forgejo config row
-/// belonging to a specific agent. Used by the per-agent
-/// `/api/agents/:id/action-items` endpoint. Per-config failures are
-/// logged and the config's items are dropped (consistent with the
-/// agents-page dashboard behavior — one broken repo must not blank
-/// the rest).
-pub async fn unblocked_assigned_for_agent(
+/// Fetch one (host, owner, repo) triple's open, *unassigned* items
+/// that carry any of the given labels (OR semantics), skipping any
+/// whose dependency list still has an open blocker. Empty `labels`
+/// short-circuits with `(vec![], vec![])` — sending `labels=""` to
+/// forgejo is undefined and would otherwise pull the whole open
+/// issue list at scale.
+///
+/// The forgejo-api `IssueListIssuesQuery` has no `assignee` field,
+/// so the "unassigned" filter has to happen client-side. An item is
+/// considered assigned if `issue.assignee.is_some()` or
+/// `issue.assignees` is non-empty. Same dependency-skip semantics as
+/// `fetch_unblocked_assigned`.
+pub async fn fetch_unblocked_unassigned_with_label(
+    config_id: Uuid,
+    host: &str,
+    base_url: &str,
+    owner: &str,
+    repo: &str,
+    access_token: &str,
+    labels: &[String],
+) -> AppResult<(Vec<ActionItem>, Vec<ActionItem>)> {
+    if labels.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let api = client(base_url, access_token)?;
+    let issues = api
+        .issue_list_issues(
+            owner,
+            repo,
+            IssueListIssuesQuery {
+                state: Some(IssueListIssuesQueryState::Open),
+                labels: Some(labels.join(",")),
+                ..Default::default()
+            },
+        )
+        .all()
+        .await?;
+
+    let mut issue_items = Vec::new();
+    let mut pr_items = Vec::new();
+    for issue in issues {
+        if issue.assignee.is_some()
+            || issue
+                .assignees
+                .as_ref()
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let number = match issue.number {
+            Some(n) => n,
+            None => continue,
+        };
+        let deps = match api
+            .issue_list_issue_dependencies(owner, repo, number)
+            .send()
+            .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "forgejo: cfg {} ({}/{}) issue #{} dep lookup failed ({e}); treating as unblocked",
+                    config_id,
+                    owner,
+                    repo,
+                    number
+                );
+                Vec::new()
+            }
+        };
+        if deps_have_open(&deps) {
+            continue;
+        }
+        let is_pr = issue.pull_request.is_some();
+        let item = issue_to_item(config_id, host, owner, repo, issue);
+        if is_pr {
+            pr_items.push(item);
+        } else {
+            issue_items.push(item);
+        }
+    }
+    Ok((issue_items, pr_items))
+}
+
+/// Per-config wrapper around `fetch_unblocked_unassigned_with_label`.
+async fn fetch_unblocked_unassigned_for_config(
+    config: &crate::entity::agent_forgejo_config::Model,
+    labels: &[String],
+) -> AppResult<(Vec<ActionItem>, Vec<ActionItem>)> {
+    fetch_unblocked_unassigned_with_label(
+        config.id,
+        &config.base_url,
+        &config.base_url,
+        &config.owner,
+        &config.repo,
+        &config.access_token,
+        labels,
+    )
+    .await
+}
+
+/// Fetch unblocked work items (assigned + unassigned-with-label)
+/// across every forgejo config row belonging to a specific agent.
+/// Used by the per-agent `/api/agents/:id/action-items` endpoint.
+/// Pass `&[]` for the labels slice to keep assigned-only semantics —
+/// the JSON contract currently has no place to surface schedule
+/// labels, so callers without a schedule context pass `&[]`.
+/// Per-config failures are logged and the config's items are dropped
+/// (consistent with the agents-page dashboard behavior — one broken
+/// repo must not blank the rest).
+pub async fn unblocked_work_items_for_agent(
     db: &Db,
     agent_id: Uuid,
+    additional_labels: &[String],
 ) -> AppResult<((Vec<ActionItem>, Vec<ActionItem>), Vec<String>)> {
     let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
     let mut issues = Vec::new();
@@ -158,7 +264,7 @@ pub async fn unblocked_assigned_for_agent(
             }
             Err(e) => {
                 log::error!(
-                    "forgejo: cfg {} ({}@{}/{}) fetch failed: {e}",
+                    "forgejo: cfg {} ({}@{}/{}) assigned fetch failed: {e}",
                     cfg.id,
                     cfg.forgejo_username,
                     cfg.owner,
@@ -173,21 +279,46 @@ pub async fn unblocked_assigned_for_agent(
                 ));
             }
         }
+        if !additional_labels.is_empty() {
+            match fetch_unblocked_unassigned_for_config(cfg, additional_labels).await {
+                Ok((mut iss, mut prs)) => {
+                    issues.append(&mut iss);
+                    pull_requests.append(&mut prs);
+                }
+                Err(e) => {
+                    log::error!(
+                        "forgejo: cfg {} ({}@{}/{}) unassigned-by-label fetch failed: {e}",
+                        cfg.id,
+                        cfg.forgejo_username,
+                        cfg.owner,
+                        cfg.repo
+                    );
+                    log::debug!("forgejo: cfg {} detail: {e:?}", cfg.id);
+                    errors.push(format!(
+                        "{}/{}: {}",
+                        cfg.owner,
+                        cfg.repo,
+                        truncate(&e.to_string(), 120)
+                    ));
+                }
+            }
+        }
     }
     issues.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     pull_requests.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     Ok(((issues, pull_requests), errors))
 }
 
-/// Count-only variant of `unblocked_assigned_for_agent`. The
+/// Count-only variant of `unblocked_work_items_for_agent`. The
 /// scheduler's pre-fire gate needs to know whether the target agent
 /// has *any* unblocked forgejo item — list materialization would be
 /// wasteful. Per-config errors are similarly swallowed (counted as
 /// zero) so a transient forgejo outage doesn't continuously skip the
 /// schedule.
-pub async fn count_unblocked_assigned_for_agent(
+pub async fn count_work_items_for_agent(
     db: &Db,
     agent_id: Uuid,
+    additional_labels: &[String],
 ) -> AppResult<((u64, u64), Vec<String>)> {
     let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
     let mut issues = 0u64;
@@ -211,7 +342,7 @@ pub async fn count_unblocked_assigned_for_agent(
             }
             Err(e) => {
                 log::error!(
-                    "forgejo: cfg {} ({}@{}/{}) count failed: {e}",
+                    "forgejo: cfg {} ({}@{}/{}) assigned count failed: {e}",
                     cfg.id,
                     cfg.forgejo_username,
                     cfg.owner,
@@ -224,6 +355,30 @@ pub async fn count_unblocked_assigned_for_agent(
                     cfg.repo,
                     truncate(&e.to_string(), 120)
                 ));
+            }
+        }
+        if !additional_labels.is_empty() {
+            match fetch_unblocked_unassigned_for_config(cfg, additional_labels).await {
+                Ok((iss, pr)) => {
+                    issues += iss.len() as u64;
+                    prs += pr.len() as u64;
+                }
+                Err(e) => {
+                    log::error!(
+                        "forgejo: cfg {} ({}@{}/{}) unassigned-by-label count failed: {e}",
+                        cfg.id,
+                        cfg.forgejo_username,
+                        cfg.owner,
+                        cfg.repo
+                    );
+                    log::debug!("forgejo: cfg {} detail: {e:?}", cfg.id);
+                    errors.push(format!(
+                        "{}/{}: {}",
+                        cfg.owner,
+                        cfg.repo,
+                        truncate(&e.to_string(), 120)
+                    ));
+                }
             }
         }
     }

@@ -164,6 +164,12 @@ pub struct ScheduledPromptNew {
     pub session_safety_buffer_pct: i32,
     #[serde(default)]
     pub context_clear_threshold_tokens: Option<i64>,
+    /// Forgejo labels whose open *unassigned* issues/PRs also count
+    /// toward this schedule's pre-fire gate. OR semantics. Empty
+    /// (the default) keeps "assigned items only" semantics. Stored
+    /// on the entity as `text[]` via the blanket `ValueType` impl.
+    #[serde(default)]
+    pub additional_labels: Vec<String>,
     /// Agent-scope only: when true the schedule fires regardless of
     /// whether the target agent has unblocked forgejo items. Has no
     /// effect for `scope='team'`.
@@ -199,6 +205,10 @@ pub struct ScheduledPromptPatch {
     pub session_safety_buffer_pct: Option<i32>,
     #[serde(default)]
     pub context_clear_threshold_tokens: Option<i64>,
+    /// `Some(vec)` replaces the label set; `None` leaves it
+    /// untouched. Empty `vec` clears it.
+    #[serde(default)]
+    pub additional_labels: Option<Vec<String>>,
     #[serde(default)]
     pub ignore_pending_forgejo_work: Option<bool>,
 }

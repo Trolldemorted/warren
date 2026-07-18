@@ -96,6 +96,17 @@
       <small class="text-muted">Send <code>/clear</code> before submitting when <code>ctx_used_tokens</code> ≥ this. Empty or <code>0</code> disables.</small>
     </div>
   </div>
+  <div class="mb-3" data-scope-panel="agent" {% if scope != "agent" %}hidden{% endif %}>
+    <label class="form-label">Additional labels for unassigned work</label>
+    <input class="form-control" name="additional_labels" value="{{ additional_labels_csv }}">
+    <small class="text-muted">
+      Comma-separated forgejo labels. Open issues and PRs that are
+      <em>unassigned</em> but carry any of these labels count toward
+      this schedule's pre-fire gate (same as assigned items do).
+      Empty = assigned work only. Labels containing commas aren't
+      supported.
+    </small>
+  </div>
   <button type="submit" class="btn btn-primary">Save</button>
   {% if let Some(p) = prompt %}
     <button type="submit" formaction="/admin/scheduled-prompts/{{ p.id }}/run-now" class="btn btn-outline-secondary">Run now</button>

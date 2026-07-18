@@ -900,6 +900,7 @@ pub async fn create_scheduled_prompt(
         session_safety_buffer_pct: Set(new.session_safety_buffer_pct),
         next_fire_at: Set(Some(chrono::Utc::now())),
         context_clear_threshold_tokens: Set(new.context_clear_threshold_tokens),
+        additional_labels: Set(new.additional_labels.clone()),
         ..Default::default()
     };
     Ok(am.insert(db).await?)
@@ -942,6 +943,9 @@ pub async fn update_scheduled_prompt(
     }
     if let Some(c) = patch.context_clear_threshold_tokens {
         am.context_clear_threshold_tokens = Set(Some(c));
+    }
+    if let Some(labels) = &patch.additional_labels {
+        am.additional_labels = Set(labels.clone());
     }
     if let Some(f) = patch.ignore_pending_forgejo_work {
         am.ignore_pending_forgejo_work = Set(f);

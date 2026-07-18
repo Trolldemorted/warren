@@ -46,6 +46,24 @@ pub struct Model {
     /// `DeriveEntityModel` `Eq` bound is satisfied (floats are not `Eq`)
     /// while still covering the largest model contexts.
     pub context_clear_threshold_tokens: Option<i64>,
+    /// Forgejo labels whose open *unassigned* issues/PRs also count
+    /// toward this schedule's pre-fire gate, on top of the
+    /// `forgejo_username`-assigned items the fetch helper normally
+    /// surfaces. OR semantics — an item is enough if it carries any
+    /// one of these labels. Empty (the default) keeps today's
+    /// "assigned items only" gate semantics exactly. Comma-separated in
+    /// the form UI; see `parse_label_list` in `routes::ui`.
+    /// Forgejo labels whose open *unassigned* issues/PRs also count
+    /// toward this schedule's pre-fire gate, on top of the
+    /// `forgejo_username`-assigned items the fetch helper normally
+    /// surfaces. OR semantics — an item is enough if it carries any
+    /// one of these labels. Empty (the default) keeps today's
+    /// "assigned items only" gate semantics exactly. Comma-separated in
+    /// the form UI; see `parse_label_list` in `routes::ui`. The
+    /// `Vec<String>` field type materializes as `text[]` via the
+    /// blanket `ValueType` impl in `sea-query`.
+    #[sea_orm(default_expr = "Expr::cust(\"'{}'::text[]\")")]
+    pub additional_labels: Vec<String>,
     /// `team` keeps the historical `(target_class, target_kind)` pool
     /// semantics — at fire time any connected idle agent matching
     /// the pool picks the prompt up. `agent` targets a specific

@@ -264,6 +264,11 @@ pub struct ScheduledPromptFormTemplate {
     pub weekly_safety_buffer_pct: i32,
     pub session_safety_buffer_pct: i32,
     pub context_clear_threshold_tokens: Option<i64>,
+    /// Pre-joined as a comma-separated string for the `<input value="…">`
+    /// binding; the route handler trims, splits, and re-validates on
+    /// submit so a malformed list round-trips through the same parse
+    /// path as the API.
+    pub additional_labels_csv: String,
     pub runs: Vec<ScheduledPromptRunRow>,
 }
 
