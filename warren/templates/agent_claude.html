@@ -185,13 +185,36 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     min-height: 0;
     overflow: auto;
     overscroll-behavior: contain;
-    touch-action: pan-x pan-y;
+    /* `pan-x pan-y pinch-zoom` (rather than `manipulation`) keeps the
+       double-tap-to-zoom delay enabled — operators rely on it for
+       quick zoom-and-pan, and `manipulation` would also strip the
+       ~300ms tap-delay on every touch, eating legitimate terminal
+       clicks. */
+    touch-action: pan-x pan-y pinch-zoom;
   }
-  /* xterm's own `.xterm-viewport` is an absolute overlay with
-     `overflow-y: scroll` for scrollback a full-screen TUI never uses; it
-     otherwise captures the vertical swipe before the wrap can. Disable
-     that capture so the wrap owns the vertical pan. */
-  .claude-grid .xterm-viewport { overflow-y: hidden !important; }
+  /* xterm's own `.xterm-viewport` is an absolute `inset:0` overlay with
+     `overflow-y: scroll` for scrollback a full-screen TUI never uses.
+     Two things wrong with it for touch scrolling here:
+
+     1. Even with `overflow-y: hidden`, Firefox mobile still treats it
+        as a scroll container (it's `position: absolute` with the
+        canvas at exactly content-size — so it has 0px of scrollable
+        range and dead-ends the vertical swipe before it can bubble to
+        `.term-wrap`).
+     2. It sits on top of the canvas in the stacking order, so it
+        *intercepts* the touch instead of passing it through.
+
+     `pointer-events: none` makes it transparent to input; the browser
+     then hit-tests the canvas (which has no handlers under
+     `mouseEvents: false`) and walks the ancestor chain past viewport
+     into `.term-wrap` (overflow: auto) — which IS a vertical scroll
+     container with real overflow, and that's the one we want. Combined
+     with `overflow-y: hidden`, the bogus scrollback scrollbar is also
+     gone, so nothing visual competes with the wrap's scrollbar. */
+  .claude-grid .xterm-viewport {
+    overflow-y: hidden !important;
+    pointer-events: none !important;
+  }
   .claude-grid aside {
     flex: 0 0 auto;
     max-height: 38vh;
