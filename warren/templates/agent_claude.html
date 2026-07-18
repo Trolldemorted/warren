@@ -156,6 +156,11 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     height: auto;
     overflow: visible;
   }
+  /* Bound the wrap's height so a vertical swipe pans inside the terminal
+     (via its own `overflow: auto`) exactly like horizontal panning does,
+     instead of falling through to the whole page. The sidebar stacks
+     below and is still reachable by scrolling the page. */
+  .claude-grid .term-wrap { height: 70vh; }
   .claude-grid aside { overflow-y: visible; }
 }
 
