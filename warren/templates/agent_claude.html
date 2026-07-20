@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}warren - {{ agent.name }}{% endblock %}
+{% block title %}{{ agent.name }}{% endblock %}
 {% block body %}
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <style>
@@ -18,6 +18,26 @@
 .claude-grid #term {
   width: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+/* §A.6 / FF-mobile helper-textarea fix (mirrors agent_shell.html).
+   xterm.js's bundled CSS parks the focusable helper textarea at
+   `left: -9999em` so Chromium doesn't blink a caret over the canvas.
+   `-9999em` resolves to ~160k px — fine on Chromium, but Firefox
+   Mobile (Desktop Mode) refuses to deliver keydown events to an
+   element that far outside the viewport, so neither xterm's
+   helper-textarea handler NOR the document-level Backspace
+   fallback fires — the soft-keyboard Backspace silently vanishes.
+   Pull the textarea back to (0,0) of the wrap (inside the 0.5rem
+   padding, so it can't intercept canvas clicks) and shrink it to
+   1×1 to keep Chromium's caret hidden. `!important` overrides
+   xterm.css. */
+.claude-grid .xterm-helper-textarea {
+  left: 0 !important;
+  top: 0 !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: 1px !important;
+  height: 1px !important;
 }
 .claude-grid .offline-overlay {
   position: absolute;
@@ -112,6 +132,43 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .action-toast-info {
   background: rgba(13, 110, 253, .95);
 }
+
+/* §Mobile modifier-key toolbar: Android virtual keyboards usually
+   have no Esc / Ctrl / arrow keys. The toolbar surfaces single-shot
+   keys + a sticky Ctrl toggle for the next letter on the soft
+   keyboard. Hidden on fine-pointer devices (desktop mouse /
+   trackpad) — only emerges where it's actually needed. */
+#mobile-keys {
+  display: none;
+  flex-wrap: wrap;
+  gap: .25rem;
+  margin-top: .25rem;
+  margin-bottom: .25rem;
+}
+@media (pointer: coarse) {
+  #mobile-keys { display: flex; }
+}
+#mobile-keys button {
+  min-width: 44px;
+  min-height: 36px;
+  padding: 0 .75rem;
+  border: 1px solid #30363d;
+  background: #21262d;
+  color: #c9d1d9;
+  border-radius: .375rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .9rem;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+#mobile-keys button:active { background: #30363d; }
+#mobile-keys button.armed,
+#mobile-keys button.armed:active {
+  background: #1f6feb;
+  color: #fff;
+  border-color: #1f6feb;
+}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>
@@ -144,6 +201,15 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 <div class="mb-2">
   <button class="btn btn-sm btn-outline-secondary" id="copy-btn" type="button">Copy</button>
   <button class="btn btn-sm btn-outline-secondary" id="copy-selection-btn" type="button" disabled title="Copy selected text — Shift+drag to select">Copy selection</button>
+</div>
+<div id="mobile-keys" aria-label="Terminal modifier keys">
+  <button type="button" data-keys="escape">Esc</button>
+  <button type="button" data-keys="ctrl" id="mk-ctrl" aria-pressed="false">Ctrl</button>
+  <button type="button" data-keys="tab">Tab</button>
+  <button type="button" data-keys="left" aria-label="Left">←</button>
+  <button type="button" data-keys="up" aria-label="Up">↑</button>
+  <button type="button" data-keys="down" aria-label="Down">↓</button>
+  <button type="button" data-keys="right" aria-label="Right">→</button>
 </div>
 <div class="claude-grid {% if !connected %}disconnected{% endif %}" id="claude-grid">
   <div class="term-wrap">
@@ -354,9 +420,13 @@ function emitBackspace() {
 // double-fire when xterm's handler also runs, and skip form fields.
 document.addEventListener('keydown', e => {
   if (!isBackspaceEvent(e)) return;
-  const a = document.activeElement;
-  if (a && a.classList && a.classList.contains('xterm-helper-textarea')) return;
-  if (a && (a.tagName === 'INPUT' || a.isContentEditable)) return;
+  // Use e.target (not activeElement) — on FF Mobile desktop mode
+  // the soft keyboard can route the keydown to <body> while the
+  // helper textarea remains "focused". activeElement is the
+  // (unreachable) helper textarea in that case, but xterm's
+  // handler never sees the event; only this fallback runs.
+  if (e.target && e.target.classList && e.target.classList.contains('xterm-helper-textarea')) return;
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.isContentEditable)) return;
   e.preventDefault();
   e.stopPropagation();
   emitBackspace();
@@ -924,6 +994,52 @@ function showActionToast(msg, kind = 'info') {
 // by the `TuiConfig` envelope warren sends to rabbit on connect.
 // There is no per-tab resize, no leader, and no `Resize` frame
 // originating from the browser.
+
+// §Mobile modifier-key toolbar: single-shot keys (Esc / Tab / arrows)
+// take the same `term.onData → WS → claude` path as typed keys via
+// `term.input(data, true)`. The Ctrl button is sticky: a single tap
+// arms it, the next printable letter on the soft keyboard is sent as
+// `\x01`..`\x1a` and the toggle disarms. Capture-phase listener (runs
+// before xterm's helper-textarea handler) so the soft-keyboard letter
+// never reaches the unmodified pipeline after arming.
+const mkCtrlBtn = document.getElementById('mk-ctrl');
+let mkCtrlArmed = false;
+if (mkCtrlBtn) {
+  mkCtrlBtn.addEventListener('click', () => {
+    mkCtrlArmed = !mkCtrlArmed;
+    mkCtrlBtn.classList.toggle('armed', mkCtrlArmed);
+    mkCtrlBtn.setAttribute('aria-pressed', String(mkCtrlArmed));
+  });
+  document.addEventListener('keydown', e => {
+    if (!mkCtrlArmed) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key.length !== 1) return;
+    const upper = e.key.toUpperCase();
+    const ch = upper.charCodeAt(0);
+    if (ch < 0x41 || ch > 0x5a) return;
+    e.preventDefault();
+    e.stopPropagation();
+    term.input(String.fromCharCode(ch - 0x40), true);
+    mkCtrlArmed = false;
+    mkCtrlBtn.classList.remove('armed');
+    mkCtrlBtn.setAttribute('aria-pressed', 'false');
+  }, true);
+  document.querySelectorAll('#mobile-keys button[data-keys]').forEach(btn => {
+    if (btn === mkCtrlBtn) return;
+    btn.addEventListener('click', () => {
+      let seq = null;
+      switch (btn.dataset.keys) {
+        case 'escape': seq = '\x1b'; break;
+        case 'tab':    seq = '\t'; break;
+        case 'left':   seq = '\x1b[D'; break;
+        case 'right':  seq = '\x1b[C'; break;
+        case 'up':     seq = '\x1b[A'; break;
+        case 'down':   seq = '\x1b[B'; break;
+      }
+      if (seq) term.input(seq, true);
+    });
+  });
+}
 
 connectWs();
 </script>

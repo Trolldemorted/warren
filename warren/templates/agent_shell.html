@@ -230,9 +230,14 @@ term.attachCustomKeyEventHandler(e => {
 function isBackspaceEvent(e) { return e.key === 'Backspace' || e.keyCode === 8; }
 document.addEventListener('keydown', e => {
   if (!isBackspaceEvent(e)) return;
-  const a = document.activeElement;
-  if (a && a.classList && a.classList.contains('xterm-helper-textarea')) return;
-  if (a && (a.tagName === 'INPUT' || a.isContentEditable)) return;
+  // Use e.target (not activeElement) — on FF Mobile desktop mode
+  // the soft keyboard can route the keydown to <body> while the
+  // helper textarea remains "focused". activeElement is the
+  // (unreachable) helper textarea in that case, but the helper
+  // textarea's own handler never sees the event; only this
+  // fallback runs.
+  if (e.target && e.target.classList && e.target.classList.contains('xterm-helper-textarea')) return;
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.isContentEditable)) return;
   e.preventDefault();
   e.stopPropagation();
   if (!connected || !ws || viewerMode) return;
