@@ -274,10 +274,11 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   //      hit a freshly-cleared VT, so the `applyMeta` reset on the browser
   //      writes an empty grid → terminal pane goes blank.
   //   3. The spurious SGR reports also trickle back through `term.onData`,
-  //      which is why Backspace was unreliable on Firefox mobile (the
-  //      `attachCustomKeyEventHandler` shim below was finding itself
-  //      side-by-side with mouse-driven noise that confuses xterm's
-  //      internal keymap).
+  //      where they used to be mistaken for Backspace bytes by the
+  //      now-removed `attachCustomKeyEventHandler` shim. With the shim
+  //      gone, `onData` forwards the raw bytes xterm produces; xterm's
+  //      own keymap is the only source of truth for what Backspace
+  //      should emit.
   //
   // Setting `mouseEvents: false` disables the canvas MouseEvent listeners
   // while keeping keyboard event handling, click-to-focus, and the helper
@@ -333,46 +334,14 @@ function writeBinaryFrame(seq, data) {
 // the exact Backspace key combo on both `keydown` and `keypress`, emit
 // `\x7f` as a raw byte on the WS, and `preventDefault` even if the WS
 // isn't currently connected (so the browser doesn't trigger history
-// navigation). A short timestamp debounce collapses the keydown→keypress
-// pair into a single 0x7f frame so a double-fire doesn't reach claude.
-const BACKSPACE_DEBOUNCE_MS = 50;
-let lastBackspaceSentAt = 0;
-function isBackspaceEvent(e) {
-  return e.key === 'Backspace' || e.keyCode === 8;
-}
-function emitBackspace() {
-  if (!connected || !ws || viewerMode) return;
-  const buf = new Uint8Array(2);
-  buf[0] = 0x01;
-  buf[1] = 0x7f;
-  ws.send(buf);
-}
-term.attachCustomKeyEventHandler(e => {
-  if (e.type !== 'keydown' && e.type !== 'keypress') return true;
-  // §Copy affordance: xterm renders to a <canvas>, so the browser can't
-  // natively select text and Ctrl+C is wired to ETX (interrupts the
-  // agent). Ctrl/Cmd+Shift+C copies the full scrollback. Only keydown
-  // — keypress would double-fire for the same combo and clip the
-  // Backspace path below (the keypress branch fires after keydown for
-  // printable chars). `e.code === 'KeyC'` is the physical key, so
-  // non-US layouts and IME states still trigger.
-  if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.shiftKey &&
-      e.code === 'KeyC') {
-    e.preventDefault();
-    e.stopPropagation();
-    copyAll();
-    return false;
-  }
-  if (!isBackspaceEvent(e)) return true;
-  e.preventDefault();
-  e.stopPropagation();
-  const now = (typeof performance !== 'undefined' && performance.now)
-    ? performance.now() : Date.now();
-  if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return false;
-  lastBackspaceSentAt = now;
-  emitBackspace();
-  return false;
-});
+// navigation). The `attachCustomKeyEventHandler` shim that used to live
+// here was removed: it intercepted Backspace at xterm's boundary on the
+// theory that xterm's own keymap didn't round-trip DEL on FF Mobile,
+// which turned out to be unsubstantiated (no upstream issue tracker
+// entry, no documented quirk). The shim was the source of the
+// intermittent double-fire races that made Backspace unreliable. Trust
+// xterm's built-in handling now; `term.onData` below is the single path
+// for every byte that reaches claude's PTY.
 
 // §Copy affordance: full-scrollback copy via the Clipboard API with a
 // document.execCommand fallback for non-secure contexts. Status surfaces
