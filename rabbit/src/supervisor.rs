@@ -509,6 +509,30 @@ pub async fn run(config: Config) -> Result<()> {
                                 let scrape_incomplete =
                                     !snap.is_empty() && !snap.all_populated();
                                 let scrape_empty = snap.is_empty();
+                                // §Context-window: surface the scrape
+                                // outcome to operator logs so the
+                                // next time the UI shows the
+                                // "returned no data" hint we have
+                                // a concrete signal of which stage
+                                // failed (slash never landed,
+                                // modal didn't paint inside the
+                                // budget, parser saw bytes but no
+                                // shape matched, or operator
+                                // interrupted). Logged once per
+                                // scrape, regardless of outcome —
+                                // successful scrapes confirm the
+                                // budget is sufficient and
+                                // timestamp the regression frontier.
+                                log::info!(
+                                    "context_check: empty={scrape_empty} \
+                                     incomplete={scrape_incomplete} aborted={aborted} \
+                                     used={:?} total={:?} pct={:?} free={:?} window={:?}",
+                                    snap.used_tokens,
+                                    snap.total_tokens,
+                                    snap.used_pct,
+                                    snap.free_pct,
+                                    snap.window_tokens,
+                                );
                                 // Merge the modal fields on top of
                                 // the most-recent transcript
                                 // snapshot. The supervisor doesn't
