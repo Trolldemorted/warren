@@ -19,26 +19,6 @@
   width: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-/* §A.6 / FF-mobile helper-textarea fix (mirrors agent_shell.html).
-   xterm.js's bundled CSS parks the focusable helper textarea at
-   `left: -9999em` so Chromium doesn't blink a caret over the canvas.
-   `-9999em` resolves to ~160k px — fine on Chromium, but Firefox
-   Mobile (Desktop Mode) refuses to deliver keydown events to an
-   element that far outside the viewport, so neither xterm's
-   helper-textarea handler NOR the document-level Backspace
-   fallback fires — the soft-keyboard Backspace silently vanishes.
-   Pull the textarea back to (0,0) of the wrap (inside the 0.5rem
-   padding, so it can't intercept canvas clicks) and shrink it to
-   1×1 to keep Chromium's caret hidden. `!important` overrides
-   xterm.css. */
-.claude-grid .xterm-helper-textarea {
-  left: 0 !important;
-  top: 0 !important;
-  right: auto !important;
-  bottom: auto !important;
-  width: 1px !important;
-  height: 1px !important;
-}
 .claude-grid .offline-overlay {
   position: absolute;
   inset: .5rem;
@@ -416,15 +396,18 @@ function emitBackspace() {
 // Mobile FF desktop-mode fallback: when the soft keyboard dispatches
 // Backspace to body (not to xterm's helper textarea), the
 // attachCustomKeyEventHandler above never sees the event. Catch it at
-// document level (capture phase). activeElement-guarded so we don't
-// double-fire when xterm's handler also runs, and skip form fields.
+// document level (capture phase). `e.target`-guarded (not
+// `activeElement` — see comment below) so we don't double-fire when
+// xterm's handler also runs, and skip form fields.
 document.addEventListener('keydown', e => {
   if (!isBackspaceEvent(e)) return;
   // Use e.target (not activeElement) — on FF Mobile desktop mode
   // the soft keyboard can route the keydown to <body> while the
-  // helper textarea remains "focused". activeElement is the
-  // (unreachable) helper textarea in that case, but xterm's
-  // handler never sees the event; only this fallback runs.
+  // helper textarea remains "focused". `activeElement` is the
+  // (unreachable) helper textarea in that case, so an
+  // activeElement check would skip this fallback and the
+  // keystroke would vanish; xterm's handler doesn't see it
+  // either because the event never reached the helper textarea.
   if (e.target && e.target.classList && e.target.classList.contains('xterm-helper-textarea')) return;
   if (e.target && (e.target.tagName === 'INPUT' || e.target.isContentEditable)) return;
   e.preventDefault();
