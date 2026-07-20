@@ -8,47 +8,16 @@
   grid-template-columns: minmax(0, 1fr) 18rem;
   gap: 1rem;
   margin-top: 1rem;
-  /* §Fill the viewport below the fixed navbar (4.5rem from base.html).
-     Caps the page at one screen so wheel scroll stays inside the
-     terminal wrap / sidebar and can't push the whole layout off-screen.
-     `min-height: 0` overrides the grid default so a tall xterm canvas
-     can't force the grid past its calc() height (which would otherwise
-     scroll the body up on FF Mobile as soon as the helper textarea
-     gains focus). */
-  height: calc(100vh - 4.5rem);
-  min-height: 0;
-  overflow: hidden;
 }
 .claude-grid .term-wrap {
   background: #0d1117;
   border-radius: .375rem;
   padding: .5rem;
   position: relative;
-  /* `min-height: 0` lets a flex/grid child shrink below its content's
-     intrinsic size — without it, the xterm canvas forces the wrap past
-     the grid's `calc(100vh - 4.5rem)` cap. */
-  min-height: 0;
-  /* Center the canvas horizontally when there's room, fall back to
-     left-align when the wrap is narrower than the canvas (so the
-     scrollbar lands on the right edge instead of the left). `safe
-     center` is the keyword that avoids the "centered but truncated"
-     footgun on narrow viewports. */
-  display: flex;
-  justify-content: safe center;
-  align-items: flex-start;
 }
 .claude-grid #term {
+  width: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.claude-grid .tui-dim {
-  position: absolute;
-  top: .65rem;
-  right: .85rem;
-  font-family: ui-monospace, monospace;
-  font-size: .75rem;
-  color: rgba(201, 209, 217, .35);
-  pointer-events: none;
-  user-select: none;
 }
 .claude-grid .offline-overlay {
   position: absolute;
@@ -67,14 +36,6 @@
 .claude-grid.disconnected .offline-overlay { display: flex; }
 .claude-grid .status { font-family: ui-monospace, monospace; }
 button.action { width: 100%; margin-bottom: .25rem; }
-
-/* Sidebar scrolls independently of the terminal so a tall panel
-   stack (Status + Usage + Context + Actions) can't push the page
-   beyond the viewport. */
-aside {
-  overflow-y: auto;
-  min-height: 0;
-}
 
 /* §D prompt-rejection banner. Driven by `prompt_rejected` meta events from
    rabbit (EnvelopeBody::PromptRejected). Distinct from `Log { warn }` so
@@ -118,118 +79,6 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    grid and the kernel winsize is fixed. */
 .claude-grid .term-wrap { overflow: auto; }
 .claude-grid #term { display: block; }
-
-/* §A.6 / FF-mobile helper-textarea fix. xterm.js's bundled CSS parks
-   the focusable helper textarea at `left: -9999em` so Chromium doesn't
-   blink a caret over the canvas. `-9999em` resolves to ~160k px — fine
-   on Chromium, but Firefox mobile (Desktop Mode) refuses to deliver
-   keydown events to an element that far outside the viewport, so the
-   `attachCustomKeyEventHandler` shim below never fires and Backspace
-   stops working whenever the canvas overflows the wrap. Pull the
-   textarea back to (0,0) of the wrap (inside the 0.5rem padding, so
-   it can't intercept canvas clicks) and shrink it to 1×1 to keep
-   Chromium's caret hidden. `!important` overrides xterm.css. Also
-   reset `right`/`bottom` in case xterm.js (or the wrapped input
-   direction) sets a negative coordinate that would still leave the
-   element outside the visible rect on FF mobile. */
-.claude-grid .xterm-helper-textarea {
-  left: 0 !important;
-  top: 0 !important;
-  right: auto !important;
-  bottom: auto !important;
-  width: 1px !important;
-  height: 1px !important;
-}
-
-/* §FF-mobile scroll fix. The previous `overscroll-behavior: contain`
-   here trapped touch-scroll inside the terminal wrap so the page could
-   never scroll on Firefox for Android. It's gone. On narrow viewports
-   we also drop the one-screen `overflow: hidden` grid and stack the
-   sidebar below the terminal, so the whole page scrolls naturally
-   instead of pinning everything inside a `100vh` box. */
-.claude-grid .term-wrap {
-  scroll-padding: 0 !important;
-}
-/* §Pan the terminal on touch devices. The first condition matches
-   narrow mobile-mode viewports; the second is the standard MDN-
-   recommended touch-device check (no hover, coarse pointer), which
-   fires on Firefox Android *regardless* of the user's
-   mobile/Desktop Mode toggle. Firefox's desktop mode sets the layout
-   viewport to ~1280px (which would otherwise defeat a
-   `max-width: 700px` rule), but the primary input is still a finger,
-   so `hover: none and pointer: coarse` is the right hook here.
-   Applied as a comma-OR so both shapes get the same scroll-locking
-   treatment from one block. */
-@media (max-width: 700px), (hover: none) and (pointer: coarse) {
-  /* Lock the document so a swipe can't scroll the page out from under
-     the terminal. This is the crux of the mobile scroll fix: with the
-     page unable to move, the only scrollable surface a swipe can act on
-     is the terminal wrap below, so the gesture pans the terminal instead
-     of falling through to the document. */
-  html, body { height: 100%; overflow: hidden; }
-  /* App-like column layout below the fixed navbar: the terminal fills
-     the remaining space and pans internally (both axes — the fixed
-     160×50 grid is larger than a phone), and the sidebar takes a bounded
-     strip beneath it with its own independent scroll. `dvh` tracks the
-     real viewport as the mobile address bar shows/hides; `vh` is the
-     fallback for engines without `dvh`. */
-  .claude-grid {
-    display: flex;
-    flex-direction: column;
-    height: calc(100vh - 4.5rem);
-    height: calc(100dvh - 4.5rem);
-    overflow: hidden;
-  }
-  .claude-grid .term-wrap {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: auto;
-    overscroll-behavior: contain;
-    /* `pan-x pan-y pinch-zoom` (rather than `manipulation`) keeps the
-       double-tap-to-zoom delay enabled — operators rely on it for
-       quick zoom-and-pan, and `manipulation` would also strip the
-       ~300ms tap-delay on every touch, eating legitimate terminal
-       clicks. */
-    touch-action: pan-x pan-y pinch-zoom;
-  }
-  /* xterm's own `.xterm-viewport` is an absolute `inset:0` overlay with
-     `overflow-y: scroll` for scrollback a full-screen TUI never uses.
-     Two things wrong with it for touch scrolling here:
-
-     1. Even with `overflow-y: hidden`, Firefox mobile still treats it
-        as a scroll container (it's `position: absolute` with the
-        canvas at exactly content-size — so it has 0px of scrollable
-        range and dead-ends the vertical swipe before it can bubble to
-        `.term-wrap`).
-     2. It sits on top of the canvas in the stacking order, so it
-        *intercepts* the touch instead of passing it through.
-
-     `pointer-events: none` makes it transparent to input; the browser
-     then hit-tests the canvas (which has no handlers under
-     `mouseEvents: false`) and walks the ancestor chain past viewport
-     into `.term-wrap` (overflow: auto) — which IS a vertical scroll
-     container with real overflow, and that's the one we want. Combined
-     with `overflow-y: hidden`, the bogus scrollback scrollbar is also
-     gone, so nothing visual competes with the wrap's scrollbar. */
-  .claude-grid .xterm-viewport {
-    overflow-y: hidden !important;
-    pointer-events: none !important;
-  }
-  .claude-grid aside {
-    flex: 0 0 auto;
-    max-height: 38vh;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-  /* Pin xterm's focusable helper textarea to the viewport so focusing it
-     — and the caret move on every keystroke — never triggers a
-     scroll-into-view that pans the terminal to the top. */
-  .claude-grid .xterm-helper-textarea {
-    position: fixed !important;
-    top: 0 !important;
-    left: 0 !important;
-  }
-}
 
 /* Action-button toast: bottom-right, fades in on `.visible`, auto-dismisses.
    See `showActionToast` for the JS that emits one on every action-button
@@ -299,10 +148,6 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 <div class="claude-grid {% if !connected %}disconnected{% endif %}" id="claude-grid">
   <div class="term-wrap">
     <div id="term"></div>
-    {# Grid-size badge. Marks the dark chrome around the canvas as
-       deliberate viewport, not a broken layout, and tells the operator
-       what TUI size warren is presenting. #}
-    <div class="tui-dim">{{ tui_cols }} × {{ tui_rows }}</div>
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its terminal</div>
   </div>
   <div id="prompt-rejected-banner" role="status" aria-live="polite"></div>
@@ -444,103 +289,7 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   mouseEvents: false,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
-// §FF-mobile fix. Two device-specific problems on Firefox for Android,
-// both handled here:
-//
-//   Scroll — the previous build restored `window.scrollTo` on every
-//   helper-textarea focusin AND set `overscroll-behavior: contain` on
-//   the wrap. Since the textarea is auto-focused, that pinned the page
-//   at the top and swallowed touch scroll. Both are gone (the focusin
-//   handler is deleted, the CSS rule removed), and on touch we no longer
-//   auto-focus on load — so the page scrolls normally and the soft
-//   keyboard only opens when the operator taps the terminal.
-//
-//   Backspace — xterm keeps its helper textarea empty, and Firefox
-//   mobile fires NO `keydown`/`beforeinput` for Backspace on an empty
-//   field, so the delete never reached the document-level handlers
-//   below. Keeping the textarea "armed" with a sentinel prefix means a
-//   Backspace always has something to delete, so `beforeinput`
-//   (`deleteContentBackward`) fires and the existing handler turns it
-//   into a `\x7f` byte. xterm forwards only `e.data` on insert and
-//   anchors composition to the value length at compositionstart, so the
-//   sentinel prefix is never sent to the PTY.
-const isTouchDevice = (navigator.maxTouchPoints || 0) > 0 ||
-  (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
-
-function focusTerm(opts = { preventScroll: true }) {
-  const ta = document.querySelector('.claude-grid .xterm-helper-textarea');
-  if (ta) ta.focus(opts);
-  else term.focus();
-}
-if (!isTouchDevice) focusTerm();
-
-const KEEPALIVE_SENTINEL = '        ';
-let imeComposing = false;
-function armHelperTextarea() {
-  if (!isTouchDevice || imeComposing) return;
-  const ta = document.querySelector('.claude-grid .xterm-helper-textarea');
-  if (!ta) return;
-  if (ta.value !== KEEPALIVE_SENTINEL) ta.value = KEEPALIVE_SENTINEL;
-  const end = KEEPALIVE_SENTINEL.length;
-  try { ta.setSelectionRange(end, end); } catch (e) {}
-}
-if (isTouchDevice) {
-  const ta = document.querySelector('.claude-grid .xterm-helper-textarea');
-  if (ta) {
-    ta.setAttribute('autocapitalize', 'none');
-    ta.setAttribute('autocomplete', 'off');
-    ta.setAttribute('autocorrect', 'off');
-    ta.setAttribute('spellcheck', 'false');
-    ta.addEventListener('compositionstart', () => { imeComposing = true; });
-    ta.addEventListener('compositionend', () => {
-      imeComposing = false;
-      setTimeout(armHelperTextarea, 0);
-    });
-    // xterm clears the textarea (value = "") after every accepted
-    // keystroke and on blur; re-arm on the bubble phase — which runs
-    // after xterm's own capture-phase input handler — so it's ready for
-    // the next Backspace. Setting `.value` programmatically doesn't
-    // refire `input`, so this can't loop or leak the sentinel.
-    ta.addEventListener('input', () => { if (!imeComposing) armHelperTextarea(); });
-    ta.addEventListener('focus', () => setTimeout(armHelperTextarea, 0));
-    armHelperTextarea();
-  }
-}
-
-// §Pan the terminal on touch/wheel input. xterm.js installs
-// `passive: false` listeners for `touchmove` and `wheel` directly on
-// its viewport (see the grep-set in xterm.js v5 —
-// `addEventListener("touchmove", …, { passive: !1 })` and
-// `addEventListener("wheel", n.wheel, { passive: !1 })`). Their
-// internals fall through to `this.cancel(e)` which calls
-// `e.preventDefault()`, killing the browser's default "scroll the
-// closest scroll container" behavior even when our `.term-wrap` has
-// `overflow: auto`. Result: on FF mobile the swipe dies inside xterm
-// without ever reaching `.term-wrap`, and on desktop mouse-wheel
-// pan never bubbles there either.
-//
-// CSS-only fixes (`pointer-events: none` on `.xterm-viewport`,
-// `touch-action: pan-x pan-y pinch-zoom` on `.term-wrap`) can't help:
-// `pointer-events` controls hit-test targeting but xterm's listeners
-// are already attached to the viewport's children, so the events still
-// hit xterm; `touch-action` is an ancestor-scoped intersection that
-// doesn't strip preventDefault from a descendant listener.
-//
-// Capture-phase `stopImmediatePropagation` on the wrap is the right
-// lever: it runs BEFORE xterm's bubble-phase listener on the
-// viewport, aborts the chain, never calls preventDefault on the
-// browser's default scroll pipeline, and `.term-wrap`'s `overflow:
-// auto` finally gets to pan the canvas content. Same hook also fixes
-// desktop wheel-pan (free of charge). Listening on `.term-wrap`
-// bounds the suppression to inside-the-terminal; the `<aside>`
-// scroll area below is unaffected.
-(function blockXtermScrollListeners() {
-  const wrap = document.querySelector('.claude-grid .term-wrap');
-  if (!wrap) return;
-  const swallow = e => { e.stopImmediatePropagation(); };
-  wrap.addEventListener('touchmove', swallow, { capture: true });
-  wrap.addEventListener('wheel', swallow, { capture: true });
-})();
+term.focus();
 
 // §A.7 / seq-numbered snapshot protocol — buffer that holds live binary
 // frames between WS open and the first `screen_snapshot` apply, so the
@@ -588,33 +337,16 @@ function writeBinaryFrame(seq, data) {
 // pair into a single 0x7f frame so a double-fire doesn't reach claude.
 const BACKSPACE_DEBOUNCE_MS = 50;
 let lastBackspaceSentAt = 0;
-// §A.6 / soft-keyboard detection. `e.code === 'Backspace'` is the
-// physical-key fallback for the FF mobile soft keyboard, which on recent
-// builds sometimes leaves `e.key` empty and never sets `e.keyCode`.
-// `e.which === 8` covers the same hole on older webkit-based mobile
-// builds. Without these, the shim silently fails to recognise the
-// keystroke at all and Backspace "does nothing".
 function isBackspaceEvent(e) {
-  return e.key === 'Backspace' || e.code === 'Backspace' ||
-         e.keyCode === 8 || e.which === 8;
+  return e.key === 'Backspace' || e.keyCode === 8;
 }
 function emitBackspace() {
-  if (viewerMode) return;
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    if (debugTyping) console.log('[typing] dropped 0x7f: ws=', ws ? ws.readyState : 'null');
-    return;
-  }
+  if (!connected || !ws || viewerMode) return;
   const buf = new Uint8Array(2);
   buf[0] = 0x01;
   buf[1] = 0x7f;
   ws.send(buf);
-  if (debugTyping) console.log('[typing] sent 0x7f at', Date.now());
 }
-// §A.6 / FF-mobile diagnostic. `?debug_typing=1` on the URL enables
-// per-event console logs so we can confirm whether the shim sees the
-// keystroke, where it ended up routed, and whether `ws.readyState` was
-// OPEN at send time. Cheap; only enabled on demand.
-const debugTyping = new URLSearchParams(location.search).get('debug_typing') === '1';
 term.attachCustomKeyEventHandler(e => {
   if (e.type !== 'keydown' && e.type !== 'keypress') return true;
   // §Copy affordance: xterm renders to a <canvas>, so the browser can't
@@ -638,89 +370,9 @@ term.attachCustomKeyEventHandler(e => {
     ? performance.now() : Date.now();
   if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return false;
   lastBackspaceSentAt = now;
-  if (debugTyping) console.log('[typing] shim', e.type, 'key=' + JSON.stringify(e.key),
-    'code=' + JSON.stringify(e.code), 'keyCode=' + e.keyCode, 'active=' + (document.activeElement && document.activeElement.tagName + '.' + (document.activeElement.className || '')));
   emitBackspace();
   return false;
 });
-
-// §A.6 / Firefox-mobile fallback. Even with the helper textarea in the
-// viewport (CSS override above), Firefox mobile Desktop Mode sometimes
-// routes Backspace to <body> instead of the focused element when the
-// soft keyboard is up — `attachCustomKeyEventHandler` never sees it.
-// Add a document-level keydown that fires for Backspace whenever focus
-// is NOT on a real input (so we don't eat keystrokes in the form
-// fields above the terminal). xterm.js's helper textarea is excluded —
-// it's a `<textarea>` by tag, but it's the terminal's focus target, not
-// user-editable form content. Debounce is shared with the helper path
-// so the two can never double-fire.
-function isFormFieldFocused() {
-  const a = document.activeElement;
-  if (!a) return false;
-  if (a.classList && a.classList.contains('xterm-helper-textarea')) return false;
-  const tag = a.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-  if (a.isContentEditable) return true;
-  return false;
-}
-// §A.6 / focus-inside-terminal-grid detection. Used by the document-level
-// fallback so we always handle Backspace when the operator is interacting
-// with the terminal area — even if xterm.js's helper-textarea path didn't
-// run (the original failure mode on FF mobile: focus on body, soft
-// keyboard input, keydown only reaches `<document>` and never reaches
-// xterm's textarea). The terminal grid is uniquely identifiable via its
-// own class; walking up to it is O(depth-from-target) and bounded by
-// the page's small DOM tree.
-function focusInsideTerminalGrid() {
-  const a = document.activeElement;
-  if (!a) return true;
-  if (a === document.body || a === document.documentElement) return true;
-  let n = a;
-  while (n) {
-    if (n.classList && n.classList.contains('claude-grid')) return true;
-    n = n.parentElement;
-  }
-  return false;
-}
-document.addEventListener('keydown', e => {
-  if (e.type !== 'keydown') return;
-  if (!isBackspaceEvent(e)) return;
-  if (isFormFieldFocused()) return;
-  if (!focusInsideTerminalGrid()) return;
-  e.preventDefault();
-  e.stopPropagation();
-  const now = (typeof performance !== 'undefined' && performance.now)
-    ? performance.now() : Date.now();
-  if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return;
-  lastBackspaceSentAt = now;
-  if (debugTyping) console.log('[typing] doc-fallback', 'active=' + (document.activeElement && document.activeElement.tagName + '.' + (document.activeElement.className || '')));
-  emitBackspace();
-}, true);
-
-// §A.6 / soft-keyboard `beforeinput` fallback. Modern mobile FF fires
-// the soft keyboard's Backspace as a `beforeinput` event with
-// `inputType === 'deleteContentBackward'` even when no keydown reaches
-// xterm.js's helper textarea. The xterm shim and the document-level
-// keydown both miss that path on soft-kb-only builds. Listen at the
-// document level with capture so we get the event before xterm.js
-// does anything with it; emit `\x7f` and block the default. The shared
-// debounce still collapses a hypothetical keydown→beforeinput double-fire.
-document.addEventListener('beforeinput', e => {
-  if (e.inputType !== 'deleteContentBackward' &&
-      e.inputType !== 'deleteWordBackward' &&
-      e.inputType !== 'deleteSoftLineBackward') return;
-  if (viewerMode) return;
-  if (isFormFieldFocused()) return;
-  if (!focusInsideTerminalGrid()) return;
-  e.preventDefault();
-  const now = (typeof performance !== 'undefined' && performance.now)
-    ? performance.now() : Date.now();
-  if (now - lastBackspaceSentAt < BACKSPACE_DEBOUNCE_MS) return;
-  lastBackspaceSentAt = now;
-  if (debugTyping) console.log('[typing] beforeinput', e.inputType,
-    'active=' + (document.activeElement && document.activeElement.tagName + '.' + (document.activeElement.className || '')));
-  emitBackspace();
-}, true);
 
 // §Copy affordance: full-scrollback copy via the Clipboard API with a
 // document.execCommand fallback for non-secure contexts. Status surfaces
@@ -936,7 +588,7 @@ function applyMeta(env) {
           env.ctx_window_tokens.toLocaleString() + ' tokens';
       }
       if (env.context_pct_est != null) {
-        ctxPctEst.innerHTML =
+        ctxPctEst.textContent =
           env.context_pct_est.toFixed(1) + '%' +
           ' <span class="text-muted">(est.)</span>';
       }
