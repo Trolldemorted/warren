@@ -331,17 +331,24 @@ function writeBinaryFrame(seq, data) {
 // keystroke only as `keypress` with `keyCode === 8` (no preceding keydown
 // reaches xterm.js's helper textarea) when the soft keyboard is shown
 // over an off-screen focusable. Bypass xterm.js's internal keymap for
-// the exact Backspace key combo on both `keydown` and `keypress`, emit
-// `\x7f` as a raw byte on the WS, and `preventDefault` even if the WS
-// isn't currently connected (so the browser doesn't trigger history
-// navigation). The `attachCustomKeyEventHandler` shim that used to live
-// here was removed: it intercepted Backspace at xterm's boundary on the
-// theory that xterm's own keymap didn't round-trip DEL on FF Mobile,
-// which turned out to be unsubstantiated (no upstream issue tracker
-// entry, no documented quirk). The shim was the source of the
-// intermittent double-fire races that made Backspace unreliable. Trust
-// xterm's built-in handling now; `term.onData` below is the single path
-// for every byte that reaches claude's PTY.
+// the exact Backspace key combo: emit `\x7f` as a raw byte on the WS,
+// and `preventDefault` even if the WS isn't currently connected (so
+// the browser doesn't trigger history navigation). Returning `false`
+// from the handler suppresses xterm's broken case-8 path on FF Mobile
+// (where `term.onData` for Backspace silently never fires — letters
+// work, Backspace never does, per user test on the no-handler build).
+term.attachCustomKeyEventHandler(e => {
+  if (e.type !== 'keydown') return true;
+  if (e.key !== 'Backspace' && e.keyCode !== 8) return true;
+  e.preventDefault();
+  e.stopPropagation();
+  if (!connected || !ws || viewerMode) return false;
+  const buf = new Uint8Array(2);
+  buf[0] = 0x01;
+  buf[1] = 0x7f;
+  ws.send(buf);
+  return false;
+});
 
 // §Copy affordance: full-scrollback copy via the Clipboard API with a
 // document.execCommand fallback for non-secure contexts. Status surfaces
