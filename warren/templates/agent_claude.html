@@ -350,13 +350,19 @@ function emitBackspace() {
 // Mobile FF desktop-mode fallback: when the soft keyboard dispatches
 // Backspace to body (not to xterm's helper textarea), the
 // attachCustomKeyEventHandler above never sees the event. Catch it at
-// document level (capture phase). activeElement-guarded so we don't
+// document level (capture phase). e.target-guarded so we don't
 // double-fire when xterm's handler also runs, and skip form fields.
 document.addEventListener('keydown', e => {
   if (!isBackspaceEvent(e)) return;
-  const a = document.activeElement;
-  if (a && a.classList && a.classList.contains('xterm-helper-textarea')) return;
-  if (a && (a.tagName === 'INPUT' || a.isContentEditable)) return;
+  // Use e.target (not activeElement) — on FF Mobile desktop mode the
+  // soft keyboard can route the keydown to <body> while the helper
+  // textarea remains "focused". `activeElement` is the (unreachable)
+  // helper textarea in that case, so an activeElement check would skip
+  // this fallback and the keystroke would vanish; xterm's handler
+  // doesn't see it either because the event never reached the helper
+  // textarea. `e.target` reports who actually got the event.
+  if (e.target && e.target.classList && e.target.classList.contains('xterm-helper-textarea')) return;
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.isContentEditable)) return;
   e.preventDefault();
   e.stopPropagation();
   emitBackspace();
