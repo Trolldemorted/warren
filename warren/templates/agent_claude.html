@@ -347,6 +347,20 @@ function emitBackspace() {
   buf[1] = 0x7f;
   ws.send(buf);
 }
+// Mobile FF desktop-mode fallback: when the soft keyboard dispatches
+// Backspace to body (not to xterm's helper textarea), the
+// attachCustomKeyEventHandler above never sees the event. Catch it at
+// document level (capture phase). activeElement-guarded so we don't
+// double-fire when xterm's handler also runs, and skip form fields.
+document.addEventListener('keydown', e => {
+  if (!isBackspaceEvent(e)) return;
+  const a = document.activeElement;
+  if (a && a.classList && a.classList.contains('xterm-helper-textarea')) return;
+  if (a && (a.tagName === 'INPUT' || a.isContentEditable)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  emitBackspace();
+}, true);
 term.attachCustomKeyEventHandler(e => {
   if (e.type !== 'keydown' && e.type !== 'keypress') return true;
   // §Copy affordance: xterm renders to a <canvas>, so the browser can't

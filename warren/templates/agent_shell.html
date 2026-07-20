@@ -223,6 +223,26 @@ term.attachCustomKeyEventHandler(e => {
   return true;
 });
 
+// Mobile FF desktop-mode fallback (mirrors agent_claude.html): when the
+// soft keyboard dispatches Backspace to body, not to xterm's helper
+// textarea, the attachCustomKeyEventHandler above never sees it. Catch
+// it at document level (capture phase), activeElement-guarded.
+function isBackspaceEvent(e) { return e.key === 'Backspace' || e.keyCode === 8; }
+document.addEventListener('keydown', e => {
+  if (!isBackspaceEvent(e)) return;
+  const a = document.activeElement;
+  if (a && a.classList && a.classList.contains('xterm-helper-textarea')) return;
+  if (a && (a.tagName === 'INPUT' || a.isContentEditable)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (!connected || !ws || viewerMode) return;
+  const buf = new Uint8Array(2);
+  // TERM_CHAN_SHELL = 0x02 — must match rabbit_lib::wire.
+  buf[0] = 0x02;
+  buf[1] = 0x7f;
+  ws.send(buf);
+}, true);
+
 document.getElementById('copy-btn').addEventListener('click', copyAll);
 
 // Copy-selection: xterm canvas selection requires Shift+drag, which is
