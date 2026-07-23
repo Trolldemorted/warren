@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>xterm Backspace Repro (self-contained)</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css">
+  <style>
+    /* Pull xterm's helper textarea back into the viewport — without
+       this, FF Mobile won't open the soft keyboard for an element
+       parked at left: -9999em / 0x0px. The wrap is the positioning
+       context (#term-wrap { position: relative }), so left:0/top:0
+       puts the textarea inside the wrap's padding. 1x1 keeps it
+       visible enough for the IME to attach but small enough not to
+       interfere with clicks on the canvas. */
+    #term-wrap .xterm-helper-textarea {
+      left: 0 !important;
+      top: 0 !important;
+      right: auto !important;
+      bottom: auto !important;
+      width: 1px !important;
+      height: 1px !important;
+    }
+    /* Page bg is intentionally different from the terminal bg, so
+       you can tell at a glance whether xterm rendered. If you see
+       just the page background where the terminal should be, xterm
+       failed to load (CDN blocked, script error, etc.). */
+    body { background:#21262d; color:#c9d1d9; font-family:ui-monospace,monospace; padding:1rem; margin:0; }
+    h1 { font-size:1.1rem; margin:.25rem 0; }
+    p, li { font-size:.85rem; line-height:1.35; }
+    ul { margin:.25rem 0 .75rem 1.25rem; padding:0; }
+    code { background:#161b22; padding:0 .25rem; border-radius:.2rem; }
+    .row { display:flex; gap:.5rem; flex-wrap:wrap; margin:.5rem 0; align-items:center; }
+    button { background:#21262d; color:#c9d1d9; border:1px solid #30363d; border-radius:.25rem; padding:.35rem .7rem; font:inherit; cursor:pointer; }
+    button:active { background:#30363d; }
+    #term-wrap { background:#0d1117; border:2px solid #58a6ff; border-radius:.375rem; padding:.5rem; position:relative; }
+    #term { width:min(800px, 100%); height:180px; }
+    /* Visible IME target — some mobile browsers refuse to attach the
+       soft keyboard to an opacity:0 / 1x1px element regardless of
+       position. A normal visible <input> guarantees IME attachment
+       so we can observe what events the keyboard actually emits. */
+    #ime-input {
+      width:min(800px, 100%); box-sizing:border-box;
+      background:#0d1117; color:#c9d1d9; border:2px solid #d2a8ff;
+      border-radius:.375rem; padding:.5rem; font:inherit;
+      margin-top:.5rem;
+    }
+    #ime-input:focus { outline:none; border-color:#7ee787; }
+    .panes { display:grid; grid-template-columns:1fr 1fr; gap:.75rem; margin-top:.75rem; }
+    .pane { background:#000; border:1px solid #30363d; border-radius:.375rem; padding:.5rem; min-height:120px; max-height:280px; overflow:auto; font-size:.75rem; white-space:pre-wrap; word-break:break-all; }
+    .pane h2 { font-size:.8rem; margin:0 0 .25rem 0; color:#8b949e; font-weight:600; }
+    #counts { background:#000; border:1px solid #30363d; border-radius:.375rem; padding:.5rem; margin-top:.5rem; font-size:.75rem; }
+    #status { background:#000; border:1px solid #30363d; border-radius:.375rem; padding:.5rem; margin-top:.5rem; font-size:.75rem; }
+    #status.fail { color:#ff7b72; border-color:#ff7b72; }
+    #status.ok { color:#7ee787; border-color:#7ee787; }
+    .ev-keydown    { color:#ff7b72; }
+    .ev-keypress   { color:#d2a8ff; }
+    .ev-beforeinput{ color:#ffa657; }
+    .ev-input      { color:#7ee787; }
+    .ev-handler    { color:#79c0ff; }
+    .ev-info       { color:#8b949e; }
+    .counts span { display:inline-block; margin-right:.75rem; }
+    .counts .c-keydown { color:#ff7b72; }
+    .counts .c-keypress { color:#d2a8ff; }
+    .counts .c-beforeinput { color:#ffa657; }
+    .counts .c-input { color:#7ee787; }
+    .counts .c-onData { color:#79c0ff; }
+  </style>
+</head>
+<body>
+  <h1>xterm Backspace Repro</h1>
+  <p>Three targets to test, in order of IME-attachment reliability:</p>
+  <ol style="font-size:.85rem;line-height:1.35;margin:.25rem 0 .75rem 1.5rem;padding:0;">
+    <li><b>The visible purple input below</b> — guaranteed IME attach. Tap it, the soft keyboard opens, type something including Backspace.</li>
+    <li><b>The terminal area</b> — same xterm-on-canvas setup warren uses. If xterm rendered, you'll see a blue-bordered box; tap inside it.</li>
+    <li><b>The "programmatic backspace" button</b> — dispatches synthetic events for offline sanity-checking the listener wiring.</li>
+  </ol>
+  <div class="row">
+    <button id="focus">focus terminal</button>
+    <button id="test-bs" title="Synthetic backspace dispatched on the helper textarea">programmatic backspace</button>
+    <button id="toggle-ime-ta" title="Toggle xterm's helper textarea between hidden (1x1, opacity 0) and IME-friendly (visible-ish, with autocomplete/autocorrect/spellcheck off). Tests whether the IME refuses to deliver Backspace to invisible elements.">make xterm ta IME-friendly</button>
+    <button id="prefill-ta" title="Write 'hello' into xterm's helper textarea value, then focus it. Tests whether LatinIME refuses to fire Backspace on an empty input but fires it once the input has content.">prefill ta with 'hello'</button>
+    <button id="clear">clear log</button>
+    <span style="font-size:.75rem;color:#8b949e;">IME-attached targets: <span style="color:#d2a8ff">input</span>, <span style="color:#58a6ff">xterm</span></span>
+  </div>
+  <div id="term-wrap"><div id="term"></div></div>
+  <input id="ime-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="tap here - guaranteed IME attach - type then press Backspace" />
+  <div id="status">loading xterm…</div>
+  <div id="counts">
+    <span class="c-keydown">keydown ta: <b id="c-kd-ta">0</b></span>
+    <span class="c-keydown">keydown ime: <b id="c-kd-ime">0</b></span>
+    <span class="c-keydown">keydown doc: <b id="c-kd-doc">0</b></span>
+    <span class="c-keypress">keypress ta: <b id="c-kp-ta">0</b></span>
+    <span class="c-keypress">keypress ime: <b id="c-kp-ime">0</b></span>
+    <span class="c-beforeinput">beforeinput(BS) ta: <b id="c-bi-bs">0</b></span>
+    <span class="c-beforeinput">beforeinput(BS) ime: <b id="c-bi-bs-ime">0</b></span>
+    <span class="c-beforeinput">beforeinput(other): <b id="c-bi-other">0</b></span>
+    <span class="c-input">input ta: <b id="c-in-ta">0</b></span>
+    <span class="c-input">input ime: <b id="c-in-ime">0</b></span>
+    <span class="c-onData">onData(BS): <b id="c-od-bs">0</b></span>
+    <span class="c-onData">onData(other): <b id="c-od-other">0</b></span>
+    <span class="c-onData">attachCustomKeyEventHandler(BS): <b id="c-hk-bs">0</b></span>
+    <span class="c-onData">attachCustomKeyEventHandler(other): <b id="c-hk-other">0</b></span>
+    <span style="color:#7ee787;font-weight:600">FIX caught BS (beforeinput): <b id="c-fix-bi-bs">0</b></span>
+    <span style="color:#7ee787;font-weight:600">FIX caught BS (input shrink): <b id="c-fix-in-bs">0</b></span>
+    <span style="color:#7ee787;font-weight:600">FIX caught BS (polling): <b id="c-fix-poll">0</b></span>
+    <span style="color:#7ee787;font-weight:600">FIX emitted \x7f: <b id="c-fix-emit">0</b></span>
+  </div>
+  <div class="panes">
+    <div class="pane"><h2>events on .xterm-helper-textarea</h2><div id="log-ta"></div></div>
+    <div class="pane"><h2>events on #ime-input</h2><div id="log-ime"></div></div>
+    <div class="pane" style="grid-column:span 2;"><h2>events on document (capture)</h2><div id="log-doc"></div></div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
+  <script>
+    const status = document.getElementById('status');
+    if (typeof Terminal === 'undefined') {
+      status.textContent = 'xterm.js failed to load — check network / CDN reachability. The visible IME input below still works for event observation.';
+      status.className = 'fail';
+    } else {
+      status.textContent = 'xterm.js loaded OK';
+      status.className = 'ok';
+    }
+
+    let term, ta;
+    if (typeof Terminal !== 'undefined') {
+      term = new Terminal({
+        cols: 80, rows: 10,
+        fontFamily: 'ui-monospace, monospace',
+        fontSize: 13,
+        theme: { background: '#0d1117', foreground: '#c9d1d9' },
+      });
+      term.open(document.getElementById('term'));
+      term.focus();
+      ta = term.element.querySelector('.xterm-helper-textarea');
+    }
+
+    const imeInput = document.getElementById('ime-input');
+    const logTA  = document.getElementById('log-ta');
+    const logIME = document.getElementById('log-ime');
+    const logDOC = document.getElementById('log-doc');
+    const counts = { kdTa:0, kdIme:0, kdDoc:0, kpTa:0, kpIme:0, biBS:0, biBSIme:0, biOther:0, inTa:0, inIme:0, odBS:0, odOther:0, hkBS:0, hkOther:0, fixBiBS:0, fixInBS:0, fixPoll:0, fixEmit:0 };
+    const idMap = {
+      'c-kd-ta':'kdTa','c-kd-ime':'kdIme','c-kd-doc':'kdDoc',
+      'c-kp-ta':'kpTa','c-kp-ime':'kpIme',
+      'c-bi-bs':'biBS','c-bi-bs-ime':'biBSIme','c-bi-other':'biOther',
+      'c-in-ta':'inTa','c-in-ime':'inIme',
+      'c-od-bs':'odBS','c-od-other':'odOther',
+      'c-hk-bs':'hkBS','c-hk-other':'hkOther',
+      'c-fix-bi-bs':'fixBiBS','c-fix-in-bs':'fixInBS','c-fix-poll':'fixPoll','c-fix-emit':'fixEmit',
+    };
+    function inc(key){ counts[key]++; const id=Object.entries(idMap).find(([,k])=>k===key)[0]; document.getElementById(id).textContent=counts[key]; }
+    function reset(){ for (const k of Object.keys(counts)) counts[k]=0; Object.keys(idMap).forEach(id=>document.getElementById(id).textContent='0'); }
+
+    let n=0;
+    function log(target, cls, label, obj){
+      const line = document.createElement('div');
+      line.className = cls;
+      n++;
+      const bits=[];
+      for (const k of Object.keys(obj||{})) bits.push(`${k}=${JSON.stringify(obj[k])}`);
+      line.textContent = `[${n}] ${label} ` + bits.join(' ');
+      (target==='doc' ? logDOC : target==='ime' ? logIME : logTA).appendChild(line);
+      logDOC.scrollTop=logDOC.scrollHeight;
+      logIME.scrollTop=logIME.scrollHeight;
+      logTA.scrollTop=logTA.scrollHeight;
+    }
+
+    if (term) {
+      let hookN=0;
+      term.attachCustomKeyEventHandler(e=>{
+        hookN++;
+        const isBS=(e.key==='Backspace'||e.keyCode===8);
+        log('ta','ev-handler',`attachCustomKeyEventHandler #${hookN}`,{
+          type:e.type,key:e.key,keyCode:e.keyCode,code:e.code,
+          target: e.target && e.target.className,
+        });
+        if (isBS) inc('hkBS'); else inc('hkOther');
+        return true;
+      });
+
+      term.onData(data=>{
+        const isBS=(data==='\b'||data==='\x7f'||data.charCodeAt(0)===127);
+        log('ta','ev-handler',`onData(${JSON.stringify(data)})`,{});
+        if (isBS) inc('odBS'); else inc('odOther');
+        // §Repro echo: in warren, the backend (PTY/claude) echoes typed
+        // characters back. The standalone repro has no backend, so without
+        // this line letters silently vanish into the log pane and the user
+        // thinks nothing happens. Skip backspace so we don't double-erase
+        // with the FIX's own `term.write('\b \b')`.
+        if (!isBS) term.write(data);
+      });
+    }
+
+    function attachInputListeners(el, name) {
+      el.addEventListener('keydown', e=>{
+        if (name==='ta') inc('kdTa'); else inc('kdIme');
+        log(name,'ev-keydown','keydown',{key:e.key,keyCode:e.keyCode,code:e.code});
+      }, true);
+      el.addEventListener('keypress', e=>{
+        if (name==='ta') inc('kpTa'); else inc('kpIme');
+        log(name,'ev-keypress','keypress',{key:e.key,keyCode:e.keyCode,charCode:e.charCode});
+      }, true);
+      el.addEventListener('beforeinput', e=>{
+        const isBS=(e.inputType==='deleteContentBackward');
+        if (isBS) { if (name==='ta') inc('biBS'); else inc('biBSIme'); }
+        else inc('biOther');
+        log(name,'ev-beforeinput',`beforeinput (${e.inputType})`,{inputType:e.inputType,data:e.data});
+      });
+      el.addEventListener('input', e=>{
+        if (name==='ta') inc('inTa'); else inc('inIme');
+        log(name,'ev-input',`input (${e.inputType||''})`,{inputType:e.inputType,data:e.data});
+      });
+    }
+
+    if (ta) {
+      log('ta','ev-info','helper textarea found',{className: ta.className});
+      attachInputListeners(ta, 'ta');
+
+      // ─────────────────────────────────────────────────────────────────
+      // §FIX: prefill + beforeinput + input-shrink backspace listener
+      // ─────────────────────────────────────────────────────────────────
+      // Root cause (verified empirically): LatinIME refuses to fire
+      // `beforeinput{deleteContentBackward}` on an empty input. xterm.js
+      // `preventDefault`s letter keydowns before they reach the helper
+      // textarea value, so the value stays empty, so Backspace stays
+      // silent. Prefilling with a zero-width-space placeholder gives the
+      // IME something to delete, which opens the path.
+      //
+      // Two listeners, both feeding the same `\x7f` emit:
+      //  1. beforeinput{deleteContentBackward} — preferred; IME composition
+      //     path, fires once per Backspace press on LatinIME.
+      //  2. input event with value-shrink — fallback for IMEs that fire
+      //     `input` without a preceding `beforeinput`. Re-prefills the
+      //     textarea when the placeholder is consumed.
+      //
+      // In warren, `term.write('\b \b')` would be replaced by sending
+      // `\x7f` over the WebSocket on the claude channel (0x01) or shell
+      // channel (0x02). Here in the standalone repro we just call
+      // term.write to make the deletion visible on the canvas.
+      // PREFILL must be a real character LatinIME recognises as
+      // content. U+200B (zero-width space) didn't work on FF Mobile
+      // + LineageOS — even with it in ta.value, the IME refused to
+      // fire beforeinput{BS} (verified empirically). A regular ASCII
+      // space (' ') does fire, per the earlier test-C result with
+      // the 'prefill ta with hello' button. The space is invisible
+      // to the user because the helper textarea is positioned off-
+      // canvas at 1×1 / opacity:0, so the placeholder is harmless.
+      const PREFILL = ' ';
+      let lastTaValue = '';
+      let fixActive = false;
+
+      // Init prefill. term.focus() is called at line 133 BEFORE
+      // this listener block runs, so the focus event has already
+      // fired by the time we attach the focus listener — moving
+      // prefill off init broke backspace entirely. We do BOTH:
+      // init prefill covers the case where focus happened before
+      // we attached, and the focus listener handles re-focus
+      // after blur.
+      ta.value = PREFILL;
+      lastTaValue = ta.value;
+      fixActive = true;
+      log('ta', 'ev-info', `init → prefill activated (ta.value length=${ta.value.length})`, {});
+
+      function emitBackspaceToTerminal(source) {
+        if (source === 'beforeinput') inc('fixBiBS');
+        else if (source === 'input-shrink') inc('fixInBS');
+        else if (source === 'polling') inc('fixPoll');
+        inc('fixEmit');
+        if (term) term.write('\b \b');
+        log('ta', 'ev-handler', `FIX caught backspace via ${source}, emitted \\x7f to terminal`, {
+          source, taValue: JSON.stringify(ta.value), taLength: ta.value.length,
+        });
+      }
+
+      // Track whether beforeinput emitted for the most recent BS so
+      // the input-event fallback doesn't double-emit when both fire.
+      let bsEmittedThisCycle = false;
+
+      // Listener 1: beforeinput{deleteContentBackward}.
+      // CRITICAL: do NOT call preventDefault. LatinIME on FF Mobile
+      // tracks whether its backspace was 'accepted' (value shrank) or
+      // 'rejected' (preventDefault'd). After a few rejections it stops
+      // firing beforeinput(BS) entirely until the user does something
+      // else (type a letter, refocus, etc.) — which matches the
+      // 'gets stuck' symptom. Letting the deletion proceed and then
+      // re-prefilling on the input event keeps the IME in 'accepted'
+      // mode and firing for every press.
+      ta.addEventListener('beforeinput', e => {
+        if (e.inputType !== 'deleteContentBackward') return;
+        emitBackspaceToTerminal('beforeinput');
+        bsEmittedThisCycle = true;
+      });
+
+      // Listener 2: input event. Two responsibilities:
+      //  (a) Fallback emit if beforeinput didn't fire (some IMEs skip
+      //      it on empty input, hardware keyboards too). The
+      //      bsEmittedThisCycle flag prevents double-counting when
+      //      both fire for the same press.
+      //  (b) Re-prefill if the IME consumed the placeholder space.
+      //      This is the load-bearing part of the fix: after every
+      //      deletion, ta.value is non-empty again so the IME keeps
+      //      firing beforeinput(BS).
+      ta.addEventListener('input', e => {
+        const newVal = ta.value;
+        if (fixActive && !bsEmittedThisCycle && newVal.length < lastTaValue.length) {
+          emitBackspaceToTerminal('input-shrink');
+        }
+        if (fixActive && newVal.length === 0) {
+          ta.value = PREFILL;
+          log('ta', 'ev-info', `re-prefilled ta.value (IME deleted placeholder)`, {});
+        }
+        bsEmittedThisCycle = false;
+        lastTaValue = ta.value;
+      });
+
+
+      // Visual marker so it's obvious the fix is loaded. Writes to
+      // the terminal on init (after xterm.open() finished); harmless
+      // because in the repro there's no backend to receive it.
+      // Activate the FIX on focus (re-prefill), deactivate on blur
+      // (clear ta.value so we don't leave stale state for the next
+      // focus session).
+      ta.addEventListener('focus', () => {
+        if (fixActive) return;
+        ta.value = PREFILL;
+        lastTaValue = ta.value;
+        fixActive = true;
+        log('ta', 'ev-info', `focus → prefill activated (ta.value length=${ta.value.length})`, {});
+      });
+      ta.addEventListener('blur', () => {
+        if (!fixActive) return;
+        fixActive = false;
+        ta.value = '';
+        lastTaValue = '';
+        log('ta', 'ev-info', `blur → fix deactivated, ta cleared`, {});
+      });
+
+      // Polling fallback. Some IME/keyboard paths fire neither
+      // beforeinput nor input for backspace, especially on FF Mobile.
+      // Poll ta.value every 50ms; if it shrank since the last tick
+      // and we haven't already emitted via beforeinput/input, emit.
+      // The pendingPoll flag ensures one shrink = one emit, not one
+      // per tick. Re-prefill on empty regardless.
+      let pollPrevValue = ta.value;
+      let pendingPoll = false;
+      setInterval(() => {
+        if (!fixActive) { pollPrevValue = ta.value; pendingPoll = false; return; }
+        if (ta.value.length < pollPrevValue.length) {
+          if (!pendingPoll) {
+            pendingPoll = true;
+            emitBackspaceToTerminal('polling');
+          }
+        } else {
+          pendingPoll = false;
+        }
+        if (ta.value.length === 0) {
+          ta.value = PREFILL;
+        }
+        pollPrevValue = ta.value;
+      }, 50);
+
+
+      // Visual marker so it's obvious the fix is loaded. Writes to
+      // the terminal on init (after xterm.open() finished); harmless
+      // because in the repro there's no backend to receive it.
+      if (term) term.write('\x1b[33m[FIX ACTIVE — no preventDefault + re-prefill + polling fallback]\x1b[0m\r\n');
+    }
+    log('ime','ev-info','ime input visible + listeners attached',{});
+    attachInputListeners(imeInput, 'ime');
+
+    document.addEventListener('keydown', e=>{
+      const isBS=(e.key==='Backspace'||e.keyCode===8);
+      if (isBS) inc('kdDoc');
+      log('doc','ev-keydown',isBS?'keydown (BACKSPACE)':'keydown',{
+        key:e.key,keyCode:e.keyCode,
+        target: e.target && (e.target.tagName + (e.target.className ? '.'+e.target.className : '')),
+        activeElement: document.activeElement && (document.activeElement.tagName + (document.activeElement.className ? '.'+document.activeElement.className : '')),
+      });
+    }, true);
+
+    document.getElementById('focus').addEventListener('click', ()=>{
+      if (term) term.focus();
+      else imeInput.focus();
+    });
+    document.getElementById('prefill-ta').addEventListener('click', ()=>{
+      if (!ta) return;
+      ta.value = 'hello';
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      log('ta', 'ev-info', 'prefilled ta with "hello", focused + caret at end', {});
+    });
+    document.getElementById('clear').addEventListener('click', ()=>{
+      logTA.textContent=''; logIME.textContent=''; logDOC.textContent=''; n=0; reset();
+    });
+    document.getElementById('test-bs').addEventListener('click', ()=>{
+      const target = ta || imeInput;
+      target.focus();
+      if (ta) ta.value='X';
+      target.dispatchEvent(new InputEvent('beforeinput',{inputType:'deleteContentBackward',bubbles:true,cancelable:true}));
+    });
+
+    // §Toggle the xterm helper textarea into an IME-friendly state.
+    //   Hypothesis: the LineageOS soft keyboard refuses to deliver
+    //   Backspace events (any kind — keydown, keypress, beforeinput)
+    //   to a textarea that's invisible (opacity:0) and 1x1. Pulling it
+    //   into a visible-ish region with IME-friendly attributes
+    //   (autocomplete/correct/spellcheck all off) should let the IME
+    //   attach and deliver beforeinput(BS), like it does for the
+    //   purple <input> below.
+    let taImeMode = false;
+    const toggleBtn = document.getElementById('toggle-ime-ta');
+    toggleBtn.addEventListener('click', () => {
+      if (!ta) return;
+      taImeMode = !taImeMode;
+      if (taImeMode) {
+        // Move into view + make it large enough for IME to attach.
+        // Width is a fixed pixel value (not min()/%) because the
+        // textarea's offsetParent is `.xterm-helpers` which has no
+        // explicit width — `width: 100%` resolves to 0 there.
+        ta.style.cssText = 'position:absolute!important;left:0!important;top:0!important;right:auto!important;bottom:auto!important;width:600px!important;height:32px!important;opacity:0.1!important;background:#1f6feb!important;color:#fff!important;z-index:10!important;outline:2px dashed #ffa657!important;';
+        ta.setAttribute('autocomplete', 'off');
+        ta.setAttribute('autocapitalize', 'off');
+        ta.setAttribute('autocorrect', 'off');
+        ta.setAttribute('spellcheck', 'false');
+        ta.setAttribute('inputmode', 'text');
+        toggleBtn.textContent = 'revert xterm ta to hidden';
+        log('ta', 'ev-info', 'IME-friendly mode ON (600x32px @ opacity 0.1, IME attrs set)', {});
+      } else {
+        ta.style.cssText = '';
+        ta.removeAttribute('autocomplete');
+        ta.removeAttribute('autocapitalize');
+        ta.removeAttribute('autocorrect');
+        ta.removeAttribute('spellcheck');
+        ta.removeAttribute('inputmode');
+        toggleBtn.textContent = 'make xterm ta IME-friendly';
+        log('ta', 'ev-info', 'IME-friendly mode OFF (reverted to xterm defaults)', {});
+      }
+    });
+
+    // §Autotest mode — `#autotest` URL hash runs a deterministic event
+    //   sequence after load and writes the resulting counter state into
+    //   #test-results. Used to validate the listener wiring in headless
+    //   browsers; doesn't replace real-device IME testing.
+    if (location.hash === '#autotest') {
+      const results = document.createElement('div');
+      results.id = 'test-results';
+      results.style.cssText = 'background:#000;border:2px solid #7ee787;padding:.5rem;margin-top:.5rem;font-size:.85rem;white-space:pre-wrap;';
+      document.body.appendChild(results);
+      setTimeout(() => {
+        const out = [];
+        out.push('--- autotest ---');
+        out.push('before: ' + JSON.stringify(counts));
+        if (ta) {
+          ta.focus();
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key:'Backspace', keyCode:8, code:'Backspace', bubbles:true, cancelable:true }));
+          ta.dispatchEvent(new InputEvent('beforeinput', { inputType:'deleteContentBackward', bubbles:true, cancelable:true }));
+          ta.dispatchEvent(new KeyboardEvent('keypress', { key:'Backspace', keyCode:8, charCode:8, bubbles:true, cancelable:true }));
+        }
+        imeInput.focus();
+        imeInput.dispatchEvent(new KeyboardEvent('keydown', { key:'Backspace', keyCode:8, code:'Backspace', bubbles:true, cancelable:true }));
+        imeInput.dispatchEvent(new InputEvent('beforeinput', { inputType:'deleteContentBackward', bubbles:true, cancelable:true }));
+        imeInput.dispatchEvent(new KeyboardEvent('keypress', { key:'Backspace', keyCode:8, charCode:8, bubbles:true, cancelable:true }));
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key:'Backspace', keyCode:8, code:'Backspace', bubbles:true, cancelable:true }));
+        out.push('after:  ' + JSON.stringify(counts));
+        out.push('xterm loaded: ' + (typeof Terminal !== 'undefined'));
+        out.push('helper ta found: ' + (ta ? 'yes' : 'no'));
+        results.textContent = out.join('\n');
+        document.title = 'autotest-done';
+      }, 300);
+    }
+  </script>
+</body>
+</html>

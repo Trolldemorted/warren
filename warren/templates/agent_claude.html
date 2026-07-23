@@ -634,7 +634,7 @@ function applyMeta(env) {
           env.ctx_window_tokens.toLocaleString() + ' tokens';
       }
       if (env.context_pct_est != null) {
-        ctxPctEst.textContent =
+        ctxPctEst.innerHTML =
           env.context_pct_est.toFixed(1) + '%' +
           ' <span class="text-muted">(est.)</span>';
       }
