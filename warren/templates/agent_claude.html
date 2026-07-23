@@ -275,10 +275,10 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   //      writes an empty grid → terminal pane goes blank.
   //   3. The spurious SGR reports also trickle back through `term.onData`,
   //      where they used to be mistaken for Backspace bytes by the
-  //      now-removed `attachCustomKeyEventHandler` shim. With the shim
-  //      gone, `onData` forwards the raw bytes xterm produces; xterm's
-  //      own keymap is the only source of truth for what Backspace
-  //      should emit.
+  //      now-removed `attachCustomKeyEventHandler` shim. `onData` now
+  //      forwards the raw bytes xterm produces; the Backspace fix below
+  //      pre-fills the helper textarea so LatinIME fires
+  //      `beforeinput{deleteContentBackward}` reliably.
   //
   // Setting `mouseEvents: false` disables the canvas MouseEvent listeners
   // while keeping keyboard event handling, click-to-focus, and the helper
@@ -321,34 +321,104 @@ function writeBinaryFrame(seq, data) {
   term.write(bytesToUtf8(data));
 }
 
-// §A.6 / Firefox-quirk fix: claude's TUI handles `\x7f` correctly when
-// xterm.js's `_keyDown → _evaluateKeyboardEvent` codepath emits `o.key =
-// s.C0.DEL` (the normal case). But Firefox mobile (Desktop Mode), and
-// sometimes Firefox desktop with certain input layouts, delivers Backspace
-// to the canvas with `key === "Backspace"` AND `keyCode === 8` while
-// still letting the browser default action run (Backspace-navigates-back
-// to the prior page). Newer Firefox mobile builds sometimes deliver the
-// keystroke only as `keypress` with `keyCode === 8` (no preceding keydown
-// reaches xterm.js's helper textarea) when the soft keyboard is shown
-// over an off-screen focusable. Bypass xterm.js's internal keymap for
-// the exact Backspace key combo: emit `\x7f` as a raw byte on the WS,
-// and `preventDefault` even if the WS isn't currently connected (so
-// the browser doesn't trigger history navigation). Returning `false`
-// from the handler suppresses xterm's broken case-8 path on FF Mobile
-// (where `term.onData` for Backspace silently never fires — letters
-// work, Backspace never does, per user test on the no-handler build).
-term.attachCustomKeyEventHandler(e => {
-  if (e.type !== 'keydown') return true;
-  if (e.key !== 'Backspace' && e.keyCode !== 8) return true;
-  e.preventDefault();
-  e.stopPropagation();
-  if (!connected || !ws || viewerMode) return false;
+// LatinIME backspace fix. Some Android soft keyboards (LatinIME on
+// LineageOS in particular) refuse to fire
+// `beforeinput{deleteContentBackward}` on an empty input. xterm.js's
+// helper textarea starts empty, so Backspace silently does nothing —
+// letters work, Backspace never does. Fix: prefill the helper textarea
+// with a single space so the IME sees content, then re-prefill on each
+// input event after the IME deletes it. CRITICAL: do NOT call
+// preventDefault on the beforeinput event — LatinIME tracks whether
+// each backspace was accepted (value shrank) or rejected
+// (preventDefault'd), and stops firing after a few rejections. Letting
+// the deletion proceed keeps the IME in "accepted" mode for every press.
+function sendBackspaceByte() {
+  if (!connected || !ws || viewerMode) return;
   const buf = new Uint8Array(2);
   buf[0] = 0x01;
   buf[1] = 0x7f;
   ws.send(buf);
-  return false;
-});
+}
+const __xtermTextarea = term.element.querySelector('.xterm-helper-textarea');
+if (__xtermTextarea) {
+  const BS_PREFILL = ' ';
+  let bsFixActive = false;
+  let bsLastValue = '';
+  let bsEmittedThisCycle = false;
+
+  // Init prefill covers the case where term.focus() at line 293 fires
+  // the focus event before we get to attach a focus listener. Without
+  // this, the helper textarea stays empty and LatinIME refuses to fire.
+  __xtermTextarea.value = BS_PREFILL;
+  bsLastValue = __xtermTextarea.value;
+  bsFixActive = true;
+
+  __xtermTextarea.addEventListener('beforeinput', e => {
+    if (e.inputType !== 'deleteContentBackward') return;
+    sendBackspaceByte();
+    bsEmittedThisCycle = true;
+  });
+
+  __xtermTextarea.addEventListener('input', e => {
+    const newVal = __xtermTextarea.value;
+    // Fallback for IMEs that fire input without a preceding beforeinput.
+    // The flag prevents double-emit when both fire for the same press.
+    if (bsFixActive && !bsEmittedThisCycle && newVal.length < bsLastValue.length) {
+      sendBackspaceByte();
+    }
+    // Re-prefill if the IME consumed the placeholder, so the next press
+    // has content to delete.
+    if (bsFixActive && newVal.length === 0) {
+      __xtermTextarea.value = BS_PREFILL;
+    }
+    bsEmittedThisCycle = false;
+    bsLastValue = __xtermTextarea.value;
+  });
+
+  __xtermTextarea.addEventListener('focus', () => {
+    if (bsFixActive) return;
+    __xtermTextarea.value = BS_PREFILL;
+    bsLastValue = __xtermTextarea.value;
+    bsFixActive = true;
+  });
+
+  __xtermTextarea.addEventListener('blur', () => {
+    if (!bsFixActive) return;
+    bsFixActive = false;
+    __xtermTextarea.value = '';
+    bsLastValue = '';
+    bsEmittedThisCycle = false;
+  });
+
+  // Polling fallback. Some IME/keyboard paths fire neither beforeinput
+  // nor input for backspace (FF Mobile on certain soft keyboards in
+  // particular). Poll ta.value every 50ms; if it shrank since the last
+  // tick and neither of the listeners above emitted for the cycle,
+  // emit. `pendingPoll` ensures one shrink = one emit, not one per tick.
+  // Re-prefill on empty regardless so the IME keeps firing on the next
+  // press.
+  let pollPrevValue = __xtermTextarea.value;
+  let pendingPoll = false;
+  setInterval(() => {
+    if (!bsFixActive) {
+      pollPrevValue = __xtermTextarea.value;
+      pendingPoll = false;
+      return;
+    }
+    if (__xtermTextarea.value.length < pollPrevValue.length) {
+      if (!pendingPoll && !bsEmittedThisCycle) {
+        pendingPoll = true;
+        sendBackspaceByte();
+      }
+    } else {
+      pendingPoll = false;
+    }
+    if (__xtermTextarea.value.length === 0) {
+      __xtermTextarea.value = BS_PREFILL;
+    }
+    pollPrevValue = __xtermTextarea.value;
+  }, 50);
+}
 
 // §Copy affordance: full-scrollback copy via the Clipboard API with a
 // document.execCommand fallback for non-secure contexts. Status surfaces

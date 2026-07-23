@@ -27,20 +27,19 @@
 }
 .shell-grid #term { width: 100%; font-family: ui-monospace, monospace; display: block; }
 
-/* §A.6 / FF-mobile helper-textarea fix (matches agent_claude.html).
-   xterm.js's bundled CSS parks the focusable helper textarea at
-   `left: -9999em` so Chromium doesn't blink a caret over the canvas.
-   `-9999em` resolves to ~160k px — fine on Chromium, but Firefox
-   Mobile (Desktop Mode) refuses to deliver keydown events to an
-   element that far outside the viewport, so the
-   `attachCustomKeyEventHandler` shim never fires and Backspace
-   stops working. Pull the textarea back to (0,0) of the wrap
-   (inside the 0.5rem padding, so it can't intercept canvas clicks)
-   and shrink it to 1×1 to keep Chromium's caret hidden.
-   `!important` overrides xterm.css. Also reset `right`/`bottom` in
-   case xterm.js (or the wrapped input direction) sets a negative
-   coordinate that would still leave the element outside the
-   visible rect on FF mobile. */
+/* §A.6 / FF-mobile helper-textarea positioning. xterm.js's bundled CSS
+   parks the focusable helper textarea at `left: -9999em` so Chromium
+   doesn't blink a caret over the canvas. `-9999em` resolves to ~160k px
+   — fine on Chromium, but Firefox Mobile (Desktop Mode) refuses to
+   attach the soft keyboard to an element that far outside the viewport,
+   so the backspace fix below (which pre-fills ta.value with a placeholder
+   and listens for `beforeinput{deleteContentBackward}`) would never see
+   any input. Pull the textarea back to (0,0) of the wrap (inside the
+   0.5rem padding, so it can't intercept canvas clicks) and shrink it to
+   1×1 to keep Chromium's caret hidden. `!important` overrides xterm.css.
+   Also reset `right`/`bottom` in case xterm.js (or the wrapped input
+   direction) sets a negative coordinate that would still leave the
+   element outside the visible rect on FF mobile. */
 .shell-grid .xterm-helper-textarea {
   left: 0 !important;
   top: 0 !important;
@@ -223,30 +222,106 @@ term.attachCustomKeyEventHandler(e => {
   return true;
 });
 
-// Mobile FF desktop-mode fallback (mirrors agent_claude.html): when the
-// soft keyboard dispatches Backspace to body, not to xterm's helper
-// textarea, the attachCustomKeyEventHandler above never sees it. Catch
-// it at document level (capture phase), activeElement-guarded.
-function isBackspaceEvent(e) { return e.key === 'Backspace' || e.keyCode === 8; }
-document.addEventListener('keydown', e => {
-  if (!isBackspaceEvent(e)) return;
-  // Use e.target (not activeElement) — on FF Mobile desktop mode
-  // the soft keyboard can route the keydown to <body> while the
-  // helper textarea remains "focused". activeElement is the
-  // (unreachable) helper textarea in that case, but the helper
-  // textarea's own handler never sees the event; only this
-  // fallback runs.
-  if (e.target && e.target.classList && e.target.classList.contains('xterm-helper-textarea')) return;
-  if (e.target && (e.target.tagName === 'INPUT' || e.target.isContentEditable)) return;
-  e.preventDefault();
-  e.stopPropagation();
+// LatinIME backspace fix. Some Android soft keyboards (LatinIME on
+// LineageOS in particular) refuse to fire
+// `beforeinput{deleteContentBackward}` on an empty input. xterm.js's
+// helper textarea starts empty, so Backspace silently does nothing —
+// letters work, Backspace never does. Fix: prefill the helper textarea
+// with a single space so the IME sees content, then re-prefill on each
+// input event after the IME deletes it. CRITICAL: do NOT call
+// preventDefault on the beforeinput event — LatinIME tracks whether
+// each backspace was accepted (value shrank) or rejected
+// (preventDefault'd), and stops firing after a few rejections. Letting
+// the deletion proceed keeps the IME in "accepted" mode for every press.
+function sendBackspaceByte() {
   if (!connected || !ws || viewerMode) return;
   const buf = new Uint8Array(2);
   // TERM_CHAN_SHELL = 0x02 — must match rabbit_lib::wire.
   buf[0] = 0x02;
   buf[1] = 0x7f;
   ws.send(buf);
-}, true);
+}
+const __xtermTextarea = document.querySelector('.shell-grid .xterm-helper-textarea');
+if (__xtermTextarea) {
+  const BS_PREFILL = ' ';
+  let bsFixActive = false;
+  let bsLastValue = '';
+  let bsEmittedThisCycle = false;
+
+  // Init prefill covers the case where term.focus() earlier in the file
+  // fires the focus event before we get to attach a focus listener.
+  // Without this, the helper textarea stays empty and LatinIME refuses
+  // to fire.
+  __xtermTextarea.value = BS_PREFILL;
+  bsLastValue = __xtermTextarea.value;
+  bsFixActive = true;
+
+  __xtermTextarea.addEventListener('beforeinput', e => {
+    if (e.inputType !== 'deleteContentBackward') return;
+    sendBackspaceByte();
+    bsEmittedThisCycle = true;
+  });
+
+  __xtermTextarea.addEventListener('input', e => {
+    const newVal = __xtermTextarea.value;
+    // Fallback for IMEs that fire input without a preceding beforeinput.
+    // The flag prevents double-emit when both fire for the same press.
+    if (bsFixActive && !bsEmittedThisCycle && newVal.length < bsLastValue.length) {
+      sendBackspaceByte();
+    }
+    // Re-prefill if the IME consumed the placeholder, so the next press
+    // has content to delete.
+    if (bsFixActive && newVal.length === 0) {
+      __xtermTextarea.value = BS_PREFILL;
+    }
+    bsEmittedThisCycle = false;
+    bsLastValue = __xtermTextarea.value;
+  });
+
+  __xtermTextarea.addEventListener('focus', () => {
+    if (bsFixActive) return;
+    __xtermTextarea.value = BS_PREFILL;
+    bsLastValue = __xtermTextarea.value;
+    bsFixActive = true;
+  });
+
+  __xtermTextarea.addEventListener('blur', () => {
+    if (!bsFixActive) return;
+    bsFixActive = false;
+    __xtermTextarea.value = '';
+    bsLastValue = '';
+    bsEmittedThisCycle = false;
+  });
+
+  // Polling fallback. Some IME/keyboard paths fire neither beforeinput
+  // nor input for backspace (FF Mobile on certain soft keyboards in
+  // particular). Poll ta.value every 50ms; if it shrank since the last
+  // tick and neither of the listeners above emitted for the cycle,
+  // emit. `pendingPoll` ensures one shrink = one emit, not one per tick.
+  // Re-prefill on empty regardless so the IME keeps firing on the next
+  // press.
+  let pollPrevValue = __xtermTextarea.value;
+  let pendingPoll = false;
+  setInterval(() => {
+    if (!bsFixActive) {
+      pollPrevValue = __xtermTextarea.value;
+      pendingPoll = false;
+      return;
+    }
+    if (__xtermTextarea.value.length < pollPrevValue.length) {
+      if (!pendingPoll && !bsEmittedThisCycle) {
+        pendingPoll = true;
+        sendBackspaceByte();
+      }
+    } else {
+      pendingPoll = false;
+    }
+    if (__xtermTextarea.value.length === 0) {
+      __xtermTextarea.value = BS_PREFILL;
+    }
+    pollPrevValue = __xtermTextarea.value;
+  }, 50);
+}
 
 document.getElementById('copy-btn').addEventListener('click', copyAll);
 
