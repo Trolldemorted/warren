@@ -219,6 +219,14 @@ term.attachCustomKeyEventHandler(e => {
     copyAll();
     return false;
   }
+  // Suppress xterm's default keymap for Backspace so it doesn't emit
+  // \x7f via `onData` on top of the byte `sendBackspaceByte` already
+  // sends — one Backspace keypress was producing two PTY erases.
+  // Returning `false` stops xterm's internal keymap; we deliberately
+  // do NOT call preventDefault or stopPropagation because the IME
+  // still needs the keydown to drive the textarea value deletion
+  // that fires `beforeinput{deleteContentBackward}` / `input`.
+  if (e.key === 'Backspace' || e.keyCode === 8) return false;
   return true;
 });
 
@@ -292,35 +300,6 @@ if (__xtermTextarea) {
     bsLastValue = '';
     bsEmittedThisCycle = false;
   });
-
-  // Polling fallback. Some IME/keyboard paths fire neither beforeinput
-  // nor input for backspace (FF Mobile on certain soft keyboards in
-  // particular). Poll ta.value every 50ms; if it shrank since the last
-  // tick and neither of the listeners above emitted for the cycle,
-  // emit. `pendingPoll` ensures one shrink = one emit, not one per tick.
-  // Re-prefill on empty regardless so the IME keeps firing on the next
-  // press.
-  let pollPrevValue = __xtermTextarea.value;
-  let pendingPoll = false;
-  setInterval(() => {
-    if (!bsFixActive) {
-      pollPrevValue = __xtermTextarea.value;
-      pendingPoll = false;
-      return;
-    }
-    if (__xtermTextarea.value.length < pollPrevValue.length) {
-      if (!pendingPoll && !bsEmittedThisCycle) {
-        pendingPoll = true;
-        sendBackspaceByte();
-      }
-    } else {
-      pendingPoll = false;
-    }
-    if (__xtermTextarea.value.length === 0) {
-      __xtermTextarea.value = BS_PREFILL;
-    }
-    pollPrevValue = __xtermTextarea.value;
-  }, 50);
 }
 
 document.getElementById('copy-btn').addEventListener('click', copyAll);

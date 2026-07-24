@@ -273,12 +273,11 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   //   2. Each render storms in turn lets the late-arriving `screen_snapshot`
   //      hit a freshly-cleared VT, so the `applyMeta` reset on the browser
   //      writes an empty grid → terminal pane goes blank.
-  //   3. The spurious SGR reports also trickle back through `term.onData`,
-  //      where they used to be mistaken for Backspace bytes by the
-  //      now-removed `attachCustomKeyEventHandler` shim. `onData` now
-  //      forwards the raw bytes xterm produces; the Backspace fix below
-  //      pre-fills the helper textarea so LatinIME fires
-  //      `beforeinput{deleteContentBackward}` reliably.
+  //   3. The spurious SGR reports also trickle back through `term.onData`.
+  //      `onData` forwards the raw bytes xterm produces, except for
+  //      Backspace: a small `attachCustomKeyEventHandler` below returns
+  //      false for Backspace to suppress xterm's default keymap so it
+  //      can't double-emit on top of the `\x7f` the LatinIME fix sends.
   //
   // Setting `mouseEvents: false` disables the canvas MouseEvent listeners
   // while keeping keyboard event handling, click-to-focus, and the helper
@@ -339,6 +338,19 @@ function sendBackspaceByte() {
   buf[1] = 0x7f;
   ws.send(buf);
 }
+// Suppress xterm's default keymap for Backspace so it doesn't emit
+// \x7f via `onData` on top of the byte `sendBackspaceByte` already
+// sends — one Backspace keypress was producing two PTY erases. We
+// return `false` (stop xterm's internal keymap) but do NOT call
+// preventDefault or stopPropagation: the IME still needs the keydown
+// to drive the textarea value deletion that fires
+// `beforeinput{deleteContentBackward}` / `input`, which is what
+// `sendBackspaceByte` listens for.
+term.attachCustomKeyEventHandler(e => {
+  if (e.type !== 'keydown') return true;
+  if (e.key !== 'Backspace' && e.keyCode !== 8) return true;
+  return false;
+});
 const __xtermTextarea = term.element.querySelector('.xterm-helper-textarea');
 if (__xtermTextarea) {
   const BS_PREFILL = ' ';
@@ -389,35 +401,6 @@ if (__xtermTextarea) {
     bsLastValue = '';
     bsEmittedThisCycle = false;
   });
-
-  // Polling fallback. Some IME/keyboard paths fire neither beforeinput
-  // nor input for backspace (FF Mobile on certain soft keyboards in
-  // particular). Poll ta.value every 50ms; if it shrank since the last
-  // tick and neither of the listeners above emitted for the cycle,
-  // emit. `pendingPoll` ensures one shrink = one emit, not one per tick.
-  // Re-prefill on empty regardless so the IME keeps firing on the next
-  // press.
-  let pollPrevValue = __xtermTextarea.value;
-  let pendingPoll = false;
-  setInterval(() => {
-    if (!bsFixActive) {
-      pollPrevValue = __xtermTextarea.value;
-      pendingPoll = false;
-      return;
-    }
-    if (__xtermTextarea.value.length < pollPrevValue.length) {
-      if (!pendingPoll && !bsEmittedThisCycle) {
-        pendingPoll = true;
-        sendBackspaceByte();
-      }
-    } else {
-      pendingPoll = false;
-    }
-    if (__xtermTextarea.value.length === 0) {
-      __xtermTextarea.value = BS_PREFILL;
-    }
-    pollPrevValue = __xtermTextarea.value;
-  }, 50);
 }
 
 // §Copy affordance: full-scrollback copy via the Clipboard API with a

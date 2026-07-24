@@ -103,7 +103,6 @@
     <span class="c-onData">attachCustomKeyEventHandler(other): <b id="c-hk-other">0</b></span>
     <span style="color:#7ee787;font-weight:600">FIX caught BS (beforeinput): <b id="c-fix-bi-bs">0</b></span>
     <span style="color:#7ee787;font-weight:600">FIX caught BS (input shrink): <b id="c-fix-in-bs">0</b></span>
-    <span style="color:#7ee787;font-weight:600">FIX caught BS (polling): <b id="c-fix-poll">0</b></span>
     <span style="color:#7ee787;font-weight:600">FIX emitted \x7f: <b id="c-fix-emit">0</b></span>
   </div>
   <div class="panes">
@@ -139,7 +138,7 @@
     const logTA  = document.getElementById('log-ta');
     const logIME = document.getElementById('log-ime');
     const logDOC = document.getElementById('log-doc');
-    const counts = { kdTa:0, kdIme:0, kdDoc:0, kpTa:0, kpIme:0, biBS:0, biBSIme:0, biOther:0, inTa:0, inIme:0, odBS:0, odOther:0, hkBS:0, hkOther:0, fixBiBS:0, fixInBS:0, fixPoll:0, fixEmit:0 };
+    const counts = { kdTa:0, kdIme:0, kdDoc:0, kpTa:0, kpIme:0, biBS:0, biBSIme:0, biOther:0, inTa:0, inIme:0, odBS:0, odOther:0, hkBS:0, hkOther:0, fixBiBS:0, fixInBS:0, fixEmit:0 };
     const idMap = {
       'c-kd-ta':'kdTa','c-kd-ime':'kdIme','c-kd-doc':'kdDoc',
       'c-kp-ta':'kpTa','c-kp-ime':'kpIme',
@@ -147,7 +146,7 @@
       'c-in-ta':'inTa','c-in-ime':'inIme',
       'c-od-bs':'odBS','c-od-other':'odOther',
       'c-hk-bs':'hkBS','c-hk-other':'hkOther',
-      'c-fix-bi-bs':'fixBiBS','c-fix-in-bs':'fixInBS','c-fix-poll':'fixPoll','c-fix-emit':'fixEmit',
+      'c-fix-bi-bs':'fixBiBS','c-fix-in-bs':'fixInBS','c-fix-emit':'fixEmit',
     };
     function inc(key){ counts[key]++; const id=Object.entries(idMap).find(([,k])=>k===key)[0]; document.getElementById(id).textContent=counts[key]; }
     function reset(){ for (const k of Object.keys(counts)) counts[k]=0; Object.keys(idMap).forEach(id=>document.getElementById(id).textContent='0'); }
@@ -176,6 +175,13 @@
           target: e.target && e.target.className,
         });
         if (isBS) inc('hkBS'); else inc('hkOther');
+        // Mirrors warren/templates/agent_claude.html: return false for
+        // Backspace so xterm's default keymap doesn't emit \x7f via
+        // onData on top of the byte the FIX sends. We do NOT call
+        // preventDefault — the IME still needs the keydown to drive
+        // the textarea value deletion that fires
+        // beforeinput{deleteContentBackward} / input.
+        if (isBS) return false;
         return true;
       });
 
@@ -265,7 +271,6 @@
       function emitBackspaceToTerminal(source) {
         if (source === 'beforeinput') inc('fixBiBS');
         else if (source === 'input-shrink') inc('fixInBS');
-        else if (source === 'polling') inc('fixPoll');
         inc('fixEmit');
         if (term) term.write('\b \b');
         log('ta', 'ev-handler', `FIX caught backspace via ${source}, emitted \\x7f to terminal`, {
@@ -336,35 +341,11 @@
         log('ta', 'ev-info', `blur → fix deactivated, ta cleared`, {});
       });
 
-      // Polling fallback. Some IME/keyboard paths fire neither
-      // beforeinput nor input for backspace, especially on FF Mobile.
-      // Poll ta.value every 50ms; if it shrank since the last tick
-      // and we haven't already emitted via beforeinput/input, emit.
-      // The pendingPoll flag ensures one shrink = one emit, not one
-      // per tick. Re-prefill on empty regardless.
-      let pollPrevValue = ta.value;
-      let pendingPoll = false;
-      setInterval(() => {
-        if (!fixActive) { pollPrevValue = ta.value; pendingPoll = false; return; }
-        if (ta.value.length < pollPrevValue.length) {
-          if (!pendingPoll) {
-            pendingPoll = true;
-            emitBackspaceToTerminal('polling');
-          }
-        } else {
-          pendingPoll = false;
-        }
-        if (ta.value.length === 0) {
-          ta.value = PREFILL;
-        }
-        pollPrevValue = ta.value;
-      }, 50);
-
 
       // Visual marker so it's obvious the fix is loaded. Writes to
       // the terminal on init (after xterm.open() finished); harmless
       // because in the repro there's no backend to receive it.
-      if (term) term.write('\x1b[33m[FIX ACTIVE — no preventDefault + re-prefill + polling fallback]\x1b[0m\r\n');
+      if (term) term.write('\x1b[33m[FIX ACTIVE — no preventDefault + re-prefill + xterm keymap suppressed]\x1b[0m\r\n');
     }
     log('ime','ev-info','ime input visible + listeners attached',{});
     attachInputListeners(imeInput, 'ime');
