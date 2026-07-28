@@ -37,6 +37,18 @@ pub enum ShellCmd {
         cols: u16,
         rows: u16,
     },
+    /// §D shell WS late-join repaint: force bash to redraw its prompt
+    /// via SIGWINCH jiggle (widen by 1, settle, restore). Triggered by
+    /// `EnvelopeBody::ShellRepaint` from warren when a fresh browser
+    /// pane opens, so the bash prompt reaches the screen even if the
+    /// bounded term_ring has rolled over the initial prompt or bash
+    /// hadn't yet emitted it. `cols, rows` are the current PTY size —
+    /// rabbit passes them to `pty.jiggle()` which uses them as the
+    /// restore target after the widen.
+    Repaint {
+        cols: u16,
+        rows: u16,
+    },
 }
 
 /// Supervisor-side handle to the shell task: a sender for inbound bytes.
@@ -201,6 +213,16 @@ fn run_generation(
             Ok(ShellCmd::Resize { cols, rows }) => {
                 let _ = pty.resize(cols, rows);
             }
+            Ok(ShellCmd::Repaint { cols, rows }) => {
+                // Best-effort: jiggle failures (e.g. transient EBADF on
+                // a respawning PTY) are warnings, not errors — the
+                // browser will eventually see live bytes on the next
+                // event, and the bounded ring will catch up on the
+                // next reconnect.
+                if let Err(e) = pty.jiggle(cols, rows) {
+                    log::warn!("shell repaint jiggle failed: {e:?}");
+                }
+            }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
                 if !pty.alive() {
                     break;
@@ -276,6 +298,50 @@ mod tests {
             "expected the written bytes to echo back from the pty"
         );
         assert_eq!(first_seq, Some(1), "first shell read must carry seq=1");
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = gen.await;
+    }
+
+    /// `ShellCmd::Repaint { cols, rows }` must dispatch into the
+    /// `pty.jiggle()` call without panicking or terminating the
+    /// generation. Pinned because the wiring is non-obvious — the
+    /// manager loop has to recognize the new variant, take the PTY
+    /// mutex, and call jiggle (50 ms widen + 50 ms restore). A
+    /// `/bin/cat` child doesn't redraw on SIGWINCH (no prompt), so
+    /// this test only proves the plumbing round-trips — a visual
+    /// SIGWINCH-prompt contract would need a real `bash -i` test,
+    /// which lives at the integration level.
+    #[tokio::test]
+    async fn repaint_does_not_crash_generation() {
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<LinkCmd>(64);
+        let (gen_tx, gen_rx) = std_mpsc::channel::<ShellCmd>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let shutdown_g = shutdown.clone();
+        let gen = tokio::task::spawn_blocking(move || {
+            run_generation("/bin/cat", &[], ".", 80, 24, cmd_tx, gen_rx, shutdown_g)
+        });
+
+        // Send a write so cat is alive and the PTY is open before
+        // we hit it with a Repaint — jiggle on a not-yet-ready PTY
+        // would be racy.
+        gen_tx.send(ShellCmd::Write(b"hi\n".to_vec())).unwrap();
+        // Wait briefly so the manager loop is parked in recv_timeout.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gen_tx
+            .send(ShellCmd::Repaint { cols: 80, rows: 24 })
+            .unwrap();
+        // Settle enough for the jiggle (50 ms widen + 50 ms restore
+        // = 100 ms inside the manager loop).
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        // If the Repaint arm panics or breaks out of the loop, the
+        // generation task would have ended — assert it's still
+        // parked in recv_timeout by sending another write.
+        gen_tx
+            .send(ShellCmd::Write(b"still alive\n".to_vec()))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         shutdown.store(true, Ordering::SeqCst);
         let _ = gen.await;

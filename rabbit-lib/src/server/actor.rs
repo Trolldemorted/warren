@@ -74,6 +74,15 @@ pub enum Command {
     /// (jiggle by one column, settle, restore). Used after a late-join
     /// replay buffer has landed in a fresh xterm.js pane.
     Repaint,
+    /// §D shell WS late-join repaint: ask rabbit to SIGWINCH-jiggle the
+    /// shell PTY so bash repaints its prompt for a fresh browser pane.
+    /// Distinct from `Repaint` (which targets the claude PTY only) so
+    /// the two channels can grow independently. `cols, rows` are the
+    /// current bash PTY size — rabbit uses them as the jiggle target.
+    ShellRepaint {
+        cols: u16,
+        rows: u16,
+    },
     /// Raw bytes typed into a terminal pane, tagged with the channel they
     /// belong to (`TERM_CHAN_CLAUDE` for the claude pane, `TERM_CHAN_SHELL`
     /// for the `/shell` pane). The actor prepends `chan` on the wire so rabbit
@@ -652,6 +661,15 @@ async fn dispatch<T: WsTransport>(
             sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
                 .await?;
         }
+        Command::ShellRepaint { cols, rows } => {
+            let env = Envelope {
+                v: PROTOCOL_VERSION,
+                seq: 0,
+                body: EnvelopeBody::ShellRepaint { cols, rows },
+            };
+            sink.send(TransportMsg::Text(serde_json::to_string(&env)?))
+                .await?;
+        }
         Command::SendKeys { chan, data } => {
             // Bytes always reach the PTY — the kernel FIFO + writer actor
             // serialize concurrent typers. No leader gate at this layer.
@@ -694,6 +712,7 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::Restart { .. } => "restart",
         EnvelopeBody::Resize { .. } => "resize",
         EnvelopeBody::Repaint => "repaint",
+        EnvelopeBody::ShellRepaint { .. } => "shell_repaint",
         EnvelopeBody::StopHook { .. } => "stop_hook",
         EnvelopeBody::NeedsInput { .. } => "needs_input",
         EnvelopeBody::PromptRejected { .. } => "prompt_rejected",

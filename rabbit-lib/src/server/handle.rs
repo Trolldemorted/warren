@@ -1,8 +1,15 @@
-use crate::server::actor::{Command, TurnOutcomeMsg};
+pub use crate::server::actor::Command;
+use crate::server::actor::TurnOutcomeMsg;
 use crate::wire::{AgentState, EnvelopeBody, StateFrame, TermFrame, TermSize, UsageSnapshot};
 use anyhow::Result as AnyResult;
 use bytes::Bytes;
 use std::collections::VecDeque;
+
+// §D Re-export `Command` so integration tests in `tests/` can
+// pattern-match on the variants `ws_shell::handle`'s repaint path
+// emits without having to peek at the `pub(crate) actor` module. The
+// full actor is an implementation detail; `Command` is the public
+// API for callers like `AgentHandle::cmd_tx()`.
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
@@ -363,6 +370,21 @@ impl AgentHandle {
         Ok(())
     }
 
+    /// §D shell WS late-join repaint: ask rabbit to SIGWINCH-jiggle the
+    /// shell PTY so bash repaints its prompt for a fresh browser pane.
+    /// Called by `ws_shell::handle` once the bounded replay buffer has
+    /// been flushed into xterm. `cols, rows` are the bash PTY's current
+    /// size — rabbit uses them as the jiggle target. Fire-and-forget
+    /// (no reply channel) — the resulting prompt bytes flow back as
+    /// regular `LinkCmd::SendBinary` frames on the shell channel.
+    pub async fn shell_repaint(&self, cols: u16, rows: u16) -> AnyResult<()> {
+        self.cmd_tx()
+            .send(Command::ShellRepaint { cols, rows })
+            .await
+            .map_err(|_| anyhow::anyhow!("actor not running"))?;
+        Ok(())
+    }
+
     /// §D Milestone 5 (Phase B): ask rabbit to emit a `ScreenSnapshot`
     /// envelope for the given channel. Called by the browser WS right after
     /// flushing the bounded replay buffer; the resulting snapshot lets the
@@ -494,6 +516,35 @@ mod tests {
             !from_stale.same_channel(&original_sender),
             "stale clone must NOT still point at the original sender"
         );
+    }
+
+    /// `shell_repaint(cols, rows)` must enqueue `Command::ShellRepaint`
+    /// with the same `cols, rows` on the live `cmd_tx`. Mirror of the
+    /// existing `install_cmd_tx_*` tests: install a fresh sender, call
+    /// `shell_repaint`, drain the channel, and assert the variant + the
+    /// payload round-tripped untouched. Pinned because the field shape
+    /// is the wire contract — if a future refactor renames or drops
+    /// `cols`/`rows` (e.g. by collapsing them to a single `TermSize`),
+    /// the rabbit-side `pty.jiggle` target breaks silently.
+    #[tokio::test]
+    async fn shell_repaint_enqueues_command_with_cols_rows() {
+        let handle = h();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Command>(8);
+        handle.install_cmd_tx(tx);
+
+        handle.shell_repaint(160, 50).await.expect("actor live");
+
+        let cmd = rx
+            .recv()
+            .await
+            .expect("receiver got the ShellRepaint command");
+        match cmd {
+            Command::ShellRepaint { cols, rows } => {
+                assert_eq!(cols, 160, "cols must round-trip untouched");
+                assert_eq!(rows, 50, "rows must round-trip untouched");
+            }
+            other => panic!("expected ShellRepaint, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------

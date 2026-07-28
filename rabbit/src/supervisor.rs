@@ -617,6 +617,33 @@ pub async fn run(config: Config) -> Result<()> {
                                     "snapshot request for chan {chan} not yet wired (only claude has a VT)"
                                 );
                             }
+                        } else if let EnvelopeBody::ShellRepaint { cols, rows } = &env.body {
+                            // §D shell WS late-join repaint: warren
+                            // asked us to SIGWINCH-jiggle the shell
+                            // PTY so bash repaints its prompt for a
+                            // fresh browser pane. Routed here (not
+                            // through `dispatch_to_pty`) because the
+                            // shell has a separate command channel
+                            // (`ShellHandle.tx`) — `dispatch_to_pty`
+                            // only knows about the claude PTY's
+                            // `pty_tx`. The handler is a no-op when
+                            // `RABBIT_ENABLE_SHELL=1` was not set
+                            // (no shell PTY to jiggle).
+                            if let Some(sh) = &shell {
+                                crate::dispatch::send_or_warn(
+                                    "ShellCmd::Repaint",
+                                    &sh.tx,
+                                    ShellCmd::Repaint {
+                                        cols: *cols,
+                                        rows: *rows,
+                                    },
+                                )
+                                .await;
+                            } else {
+                                log::debug!(
+                                    "shell repaint for agent {agent_id} ignored: shell PTY not enabled"
+                                );
+                            }
                         } else if let Some(tx) = &active_link_tx {
                             // The actor already decided the prompt's
                             // fate (`PromptEcho` accepts, `PromptRejected`

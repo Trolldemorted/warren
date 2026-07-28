@@ -122,6 +122,20 @@ pub enum EnvelopeBody {
         rows: u16,
     },
     Repaint,
+    /// §D shell WS late-join repaint: ask rabbit to SIGWINCH-jiggle the
+    /// shell PTY so bash repaints its prompt. Shell has no VT snapshot
+    /// (no `TermTracker` — see supervisor.rs:602-606), so the v1
+    /// SIGWINCH-jiggle heuristic is still the right tool here, unlike
+    /// the claude channel which now uses `ScreenSnapshot`. `cols, rows`
+    /// match the bash PTY's current size; rabbit uses these as the
+    /// jiggle target (widen by 1, settle, restore — see `pty.rs::jiggle`).
+    /// Distinct from `Repaint` (which targets the claude PTY only) so
+    /// the v1 envelope shape stays unchanged and both channels can grow
+    /// independently.
+    ShellRepaint {
+        cols: u16,
+        rows: u16,
+    },
     StopHook {
         prompt_id: uuid::Uuid,
         usage: Option<UsageSnapshot>,

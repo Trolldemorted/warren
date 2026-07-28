@@ -12,11 +12,20 @@
 use crate::server::registry::AgentRegistry;
 use crate::server::transport::TransportMsg;
 use crate::server::WsTransport;
-use crate::wire::TermFrame;
+use crate::wire::{TermFrame, TermSize};
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use uuid::Uuid;
+
+/// §D shell WS late-join repaint — defaults when warren hasn't yet
+/// shipped a `TuiConfig` for this agent. Mirrors rabbit's
+/// `DEFAULT_TUI_COLS`/`DEFAULT_TUI_ROWS` (rabbit/src/link.rs:30-31)
+/// and warren's `TUI_WIDTH`/`TUI_HEIGHT` defaults. The bash PTY was
+/// spawned with these same defaults, so the jiggle target is correct
+/// for any shell started before warren advertised a real size.
+const DEFAULT_SHELL_COLS: u16 = 160;
+const DEFAULT_SHELL_ROWS: u16 = 50;
 
 /// Framework-agnostic shell-side session loop. Public so the
 /// `rabbit-lib-axum` adapter can call it after wrapping an axum
@@ -67,6 +76,34 @@ pub async fn handle(
             break;
         }
     }
+
+    // §D shell WS late-join repaint: bash doesn't redraw its prompt
+    // without a SIGWINCH, and the bounded term_ring can roll over the
+    // initial prompt if the rabbit has been alive long enough or
+    // hasn't yet emitted it by the time the browser connects. After
+    // flushing the replay buffer, ask rabbit to SIGWINCH-jiggle the
+    // shell PTY so a fresh prompt flows back as a regular
+    // `LinkCmd::SendBinary` frame. Fire-and-forget on `tokio::spawn`
+    // — same shape as `ws_browser::handle`'s post-replay snapshot
+    // request (ws_browser.rs:91-103) so the WS loop returns to
+    // pumping immediately. Source `cols, rows` from the handle's
+    // cached `term_size` (populated from the rabbit's HelloUp and
+    // refreshed on every TuiConfig); fall back to (160, 50) — the
+    // size rabbit uses when warren hasn't shipped a TuiConfig yet.
+    let snapshot = handle.snapshot();
+    let term_size = snapshot.term_size.unwrap_or(TermSize {
+        cols: DEFAULT_SHELL_COLS,
+        rows: DEFAULT_SHELL_ROWS,
+    });
+    let repaint_handle = handle.clone();
+    tokio::spawn(async move {
+        if let Err(e) = repaint_handle
+            .shell_repaint(term_size.cols, term_size.rows)
+            .await
+        {
+            log::debug!("shell repaint failed for agent {agent_id}: {e:?}");
+        }
+    });
 
     loop {
         tokio::select! {
