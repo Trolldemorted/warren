@@ -412,28 +412,63 @@ async fn agents_page(
                 // issue-dependency lookups) HTTP calls. If that ever
                 // becomes a hot path, memoize on (config_id, fetched_at)
                 // with a short TTL — see
-                // `forgejo::count_work_items_for_agent`. The dashboard
-                // has no schedule context so it passes `&[]` (assigned
-                // only) — unassigned-by-label counts only ever feed the
-                // scheduler pre-fire gate per schedule.
-                let ((forgejo_issues, forgejo_prs), forgejo_errors) =
-                    crate::forgejo::count_work_items_for_agent(&state.db, a.id, &[])
+                // `forgejo::assigned_work_items_for_agent`. The
+                // dashboard has no schedule context so it fetches the
+                // assigned pool only — unassigned-by-label items go to
+                // the separate Claimable column below.
+                let ((f_iss_items, f_prs_items), forgejo_errors) =
+                    crate::forgejo::assigned_work_items_for_agent(&state.db, a.id)
                         .await
                         .unwrap_or_else(|e| {
                             log::warn!(
-                                "forgejo: count_work_items_for_agent({}) outer error: {e}",
+                                "forgejo: assigned_work_items_for_agent({}) outer error: {e}",
                                 a.id
                             );
-                            log::debug!("forgejo: count outer detail: {e:?}");
+                            log::debug!("forgejo: assigned outer detail: {e:?}");
                             (
-                                (0, 0),
+                                (Vec::new(), Vec::new()),
                                 vec!["failed to load forgejo configs — see logs".to_string()],
                             )
                         });
+                let forgejo_issues = f_iss_items.len() as u64;
+                let forgejo_prs = f_prs_items.len() as u64;
                 let forgejo_error = if forgejo_errors.is_empty() {
                     None
                 } else {
                     Some(forgejo_errors.join(" | "))
+                };
+                // §D Claimable column: unassigned forgejo items whose
+                // labels match the agent's `class` (the convention for
+                // "team label" — no `team_label` column exists). Mirrors
+                // the scheduler pre-fire gate's `additional_labels`
+                // filter so the dashboard and the scheduler see the same
+                // pool. Two extra HTTP calls per config per render — fine
+                // at current scale (≤10 configs/agent × small fleet);
+                // memoize with a short TTL if it ever becomes a hot path.
+                let ((unclaimed_issues_items, unclaimed_prs_items), unclaimed_errors) =
+                    crate::forgejo::unclaimed_work_items_for_agent(
+                        &state.db,
+                        a.id,
+                        std::slice::from_ref(&a.class),
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        log::warn!(
+                            "forgejo: unclaimed_work_items_for_agent({}) outer error: {e}",
+                            a.id
+                        );
+                        log::debug!("forgejo: unclaimed outer detail: {e:?}");
+                        (
+                            (Vec::new(), Vec::new()),
+                            vec!["failed to load forgejo configs — see logs".to_string()],
+                        )
+                    });
+                let unclaimed_issues = unclaimed_issues_items.len() as u64;
+                let unclaimed_prs = unclaimed_prs_items.len() as u64;
+                let unclaimed_error = if unclaimed_errors.is_empty() {
+                    None
+                } else {
+                    Some(unclaimed_errors.join(" | "))
                 };
                 rows.push(AgentRow {
                     agent: a,
@@ -442,6 +477,11 @@ async fn agents_page(
                     forgejo_issues,
                     forgejo_prs,
                     forgejo_error,
+                    unclaimed_issues,
+                    unclaimed_prs,
+                    unclaimed_error,
+                    unclaimed_issues_items,
+                    unclaimed_prs_items,
                 });
             }
             let t = AgentsTemplate {

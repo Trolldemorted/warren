@@ -54,6 +54,27 @@ pub struct AgentRow {
     /// full message(s) available in the title attribute. Truncated to
     /// ~120 chars per config so the cell stays compact.
     pub forgejo_error: Option<String>,
+    /// "Claimable" column counts: unassigned forgejo issues + PRs whose
+    /// labels include any of the team's labels (currently derived from
+    /// `agent.class` by the route handler). Counts come from the same
+    /// pool that the scheduler gate uses to decide whether to fire a
+    /// `pending_forgejo_work` prompt, so the dashboard and the
+    /// scheduler see consistent numbers. Per-config errors are
+    /// swallowed into `unclaimed_error` (same pattern as
+    /// `forgejo_error`).
+    pub unclaimed_issues: u64,
+    pub unclaimed_prs: u64,
+    /// Most-recent per-config error string for the unclaimed fetch, or
+    /// `None` when every config succeeded (or there were no configs).
+    /// Mirrors `forgejo_error`'s contract so the dashboard can render
+    /// the same `err` badge style for either column.
+    pub unclaimed_error: Option<String>,
+    /// Per-item lists for the Claimable column. Sorted by `updated_at`
+    /// desc by the helper. The template caps each list at 5 entries
+    /// with a "+N more" tail so the cell stays scannable; the full
+    /// list is still available for any follow-up deep-link route.
+    pub unclaimed_issues_items: Vec<crate::models::ActionItem>,
+    pub unclaimed_prs_items: Vec<crate::models::ActionItem>,
 }
 
 #[derive(Template)]

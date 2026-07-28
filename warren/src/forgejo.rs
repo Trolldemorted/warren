@@ -296,19 +296,23 @@ async fn fetch_unblocked_unassigned_for_config(
     .await
 }
 
-/// Fetch unblocked work items (assigned + unassigned-with-label)
-/// across every forgejo config row belonging to a specific agent.
-/// Used by the per-agent `/api/agents/:id/action-items` endpoint.
-/// Pass `&[]` for the labels slice to keep assigned-only semantics —
-/// the JSON contract currently has no place to surface schedule
-/// labels, so callers without a schedule context pass `&[]`.
-/// Per-config failures are logged and the config's items are dropped
-/// (consistent with the agents-page dashboard behavior — one broken
-/// repo must not blank the rest).
-pub async fn unblocked_work_items_for_agent(
+/// Two-pole aggregator pair — replaced the old
+/// `unblocked_work_items_for_agent` + `count_work_items_for_agent`
+/// pair, which merged assigned and unassigned-by-label into a single
+/// response. Callers that needed the two pools separately (the agents
+/// page's assigned column vs. Claimable column) had to either fetch
+/// twice or split the merged response downstream — both ugly. These
+/// two helpers each return a single pool, sorted by `updated_at`
+/// desc, and share the per-config error-swallowing contract so a
+/// single broken forgejo config doesn't blank the response.
+///
+/// Callers that need a count of both pools (e.g. the scheduler's
+/// pre-fire gate) call both helpers and sum the `.len()`s — one extra
+/// `Vec::len()` per call, no extra HTTP round-trips vs. today because
+/// both pools were already fetched into separate vectors internally.
+pub async fn assigned_work_items_for_agent(
     db: &Db,
     agent_id: Uuid,
-    additional_labels: &[String],
 ) -> AppResult<((Vec<ActionItem>, Vec<ActionItem>), Vec<String>)> {
     let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
     let mut issues = Vec::new();
@@ -347,50 +351,42 @@ pub async fn unblocked_work_items_for_agent(
                 ));
             }
         }
-        if !additional_labels.is_empty() {
-            match fetch_unblocked_unassigned_for_config(cfg, additional_labels).await {
-                Ok((mut iss, mut prs)) => {
-                    issues.append(&mut iss);
-                    pull_requests.append(&mut prs);
-                }
-                Err(e) => {
-                    log::error!(
-                        "forgejo: cfg {} ({}@{}/{}) unassigned-by-label fetch failed: {e}",
-                        cfg.id,
-                        cfg.forgejo_username,
-                        cfg.owner,
-                        cfg.repo
-                    );
-                    log::debug!("forgejo: cfg {} detail: {e:?}", cfg.id);
-                    errors.push(format!(
-                        "{}/{}: {}",
-                        cfg.owner,
-                        cfg.repo,
-                        truncate(&e.to_string(), PER_CONFIG_ERROR_MAX)
-                    ));
-                }
-            }
-        }
     }
     issues.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     pull_requests.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     Ok(((issues, pull_requests), errors))
 }
 
-/// Count-only variant of `unblocked_work_items_for_agent`. The
-/// scheduler's pre-fire gate needs to know whether the target agent
-/// has *any* unblocked forgejo item — list materialization would be
-/// wasteful. Per-config errors are similarly swallowed (counted as
-/// zero) so a transient forgejo outage doesn't continuously skip the
-/// schedule.
-pub async fn count_work_items_for_agent(
+/// Companion to `assigned_work_items_for_agent`: fetches only the
+/// unassigned-by-label items across every forgejo config row belonging
+/// to `agent_id`, filtered to items whose labels match any element of
+/// `additional_labels` (OR semantics — mirrors the scheduler gate).
+///
+/// `additional_labels` is required (the function will return no items
+/// when it's empty — callers that want a label-less "all unassigned"
+/// view should pass a sentinel like `&["*".into()]`). Per-config
+/// errors are swallowed into the `errors` Vec (same semantics as
+/// `assigned_work_items_for_agent`) so a single broken forgejo config
+/// doesn't blank the whole column.
+pub async fn unclaimed_work_items_for_agent(
     db: &Db,
     agent_id: Uuid,
     additional_labels: &[String],
-) -> AppResult<((u64, u64), Vec<String>)> {
+) -> AppResult<((Vec<ActionItem>, Vec<ActionItem>), Vec<String>)> {
+    if additional_labels.is_empty() {
+        // §Self-defense: the agents page always passes a label list
+        // (the agent's `class`), so empty here would mean a caller
+        // misuse. Return zero items + no errors so the UI shows a
+        // clean "0" badge rather than masking the bug behind a fetch
+        // that hits every config and returns nothing meaningful.
+        log::warn!(
+            "forgejo: unclaimed_work_items_for_agent called with empty additional_labels for agent {agent_id}; returning empty"
+        );
+        return Ok(((Vec::new(), Vec::new()), Vec::new()));
+    }
     let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
-    let mut issues = 0u64;
-    let mut prs = 0u64;
+    let mut issues = Vec::new();
+    let mut pull_requests = Vec::new();
     let mut errors = Vec::new();
     for cfg in &configs {
         if cfg.forgejo_username.trim().is_empty() {
@@ -403,14 +399,14 @@ pub async fn count_work_items_for_agent(
             );
             continue;
         }
-        match fetch_unblocked_assigned_for_config(cfg).await {
-            Ok((iss, pr)) => {
-                issues += iss.len() as u64;
-                prs += pr.len() as u64;
+        match fetch_unblocked_unassigned_for_config(cfg, additional_labels).await {
+            Ok((mut iss, mut prs)) => {
+                issues.append(&mut iss);
+                pull_requests.append(&mut prs);
             }
             Err(e) => {
                 log::error!(
-                    "forgejo: cfg {} ({}@{}/{}) assigned count failed: {e}",
+                    "forgejo: cfg {} ({}@{}/{}) unclaimed fetch failed: {e}",
                     cfg.id,
                     cfg.forgejo_username,
                     cfg.owner,
@@ -425,32 +421,10 @@ pub async fn count_work_items_for_agent(
                 ));
             }
         }
-        if !additional_labels.is_empty() {
-            match fetch_unblocked_unassigned_for_config(cfg, additional_labels).await {
-                Ok((iss, pr)) => {
-                    issues += iss.len() as u64;
-                    prs += pr.len() as u64;
-                }
-                Err(e) => {
-                    log::error!(
-                        "forgejo: cfg {} ({}@{}/{}) unassigned-by-label count failed: {e}",
-                        cfg.id,
-                        cfg.forgejo_username,
-                        cfg.owner,
-                        cfg.repo
-                    );
-                    log::debug!("forgejo: cfg {} detail: {e:?}", cfg.id);
-                    errors.push(format!(
-                        "{}/{}: {}",
-                        cfg.owner,
-                        cfg.repo,
-                        truncate(&e.to_string(), PER_CONFIG_ERROR_MAX)
-                    ));
-                }
-            }
-        }
     }
-    Ok(((issues, prs), errors))
+    issues.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+    pull_requests.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+    Ok(((issues, pull_requests), errors))
 }
 
 #[allow(dead_code)]

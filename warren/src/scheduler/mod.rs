@@ -215,13 +215,25 @@ pub async fn fire_prompt(
     //     is set, mirroring `ignore_inbox_state` for team schedules.
     if prompt.scope == "agent" {
         if !prompt.ignore_pending_forgejo_work {
-            let ((issues, prs), _errors) = crate::forgejo::count_work_items_for_agent(
+            // Fetch assigned + unassigned-by-label separately and sum
+            // the lengths. The two helpers replace the old
+            // `count_work_items_for_agent` aggregator (which returned a
+            // merged count from a single config loop). Same network
+            // round-trips, same per-config error swallowing, no
+            // list-vs-count trade-off because we only need the count.
+            let ((a_iss, a_prs), _e1) =
+                crate::forgejo::assigned_work_items_for_agent(&state.db, agent_id)
+                    .await
+                    .unwrap_or(((Vec::new(), Vec::new()), Vec::new()));
+            let ((u_iss, u_prs), _e2) = crate::forgejo::unclaimed_work_items_for_agent(
                 &state.db,
                 agent_id,
                 &prompt.additional_labels,
             )
             .await
-            .unwrap_or(((0, 0), Vec::new()));
+            .unwrap_or(((Vec::new(), Vec::new()), Vec::new()));
+            let issues = a_iss.len() + u_iss.len();
+            let prs = a_prs.len() + u_prs.len();
             if issues + prs == 0 {
                 skip(
                     &state,

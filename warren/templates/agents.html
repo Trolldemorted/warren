@@ -18,7 +18,7 @@
     <tr>
       <th>Name</th><th>Class</th><th>Kind</th><th>Model</th>
       <th>Status</th>
-      <th>Action items</th><th>Forgejo issues</th><th>Forgejo PRs</th>
+      <th>Action items</th><th>Forgejo issues</th><th>Forgejo PRs</th><th>Claimable</th>
       <th>Created</th><th></th>
     </tr>
   </thead>
@@ -77,6 +77,45 @@
           <span class="badge bg-danger" title="{{ e }}">err</span>
         {% else if r.forgejo_prs > 0 %}
           <a class="badge bg-warning text-dark text-decoration-none" href="/admin/agents/{{ r.agent.id }}/edit" title="Unblocked assigned PRs">{{ r.forgejo_prs }}</a>
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </td>
+      {# §D Claimable column: unassigned forgejo items whose labels
+         match the agent's `class` — the same pool the scheduler gate
+         uses to decide whether to fire a `pending_forgejo_work`
+         prompt, so the dashboard and the scheduler see the same
+         numbers. Same badge palette + err-fallback shape as the
+         adjacent assigned columns; the count badge deep-links to the
+         agent's edit page (no dedicated `/unclaimed` route today).
+         On a non-zero count, a collapsible `<details>` lists up to 5
+         issues + 5 PRs by title with the forgejo `html_url`; any
+         overflow shows as `+N more` so the cell stays scannable. #}
+      <td>
+        {% if let Some(e) = r.unclaimed_error %}
+          <span class="badge bg-danger" title="{{ e }}">err</span>
+        {% else if r.unclaimed_issues > 0 || r.unclaimed_prs > 0 %}
+          {% let total = r.unclaimed_issues + r.unclaimed_prs %}
+          <a class="badge bg-warning text-dark text-decoration-none" href="/admin/agents/{{ r.agent.id }}/edit" title="Unassigned items matching class label">{{ total }}</a>
+          <details class="mt-1">
+            <summary class="small text-muted">show items</summary>
+            <ul class="list-unstyled mb-0 small">
+              {% for it in r.unclaimed_issues_items %}
+                {% if loop.index0 < 5 %}
+                  <li><a href="{{ it.html_url }}" target="_blank" rel="noopener">#{{ it.number }}</a> {{ it.title }}</li>
+                {% else if loop.index0 == 5 %}
+                  <li class="text-muted">+{{ r.unclaimed_issues_items.len() - 5 }} more issue{% if r.unclaimed_issues_items.len() - 5 != 1 %}s{% endif %}…</li>
+                {% endif %}
+              {% endfor %}
+              {% for it in r.unclaimed_prs_items %}
+                {% if loop.index0 < 5 %}
+                  <li><a href="{{ it.html_url }}" target="_blank" rel="noopener">#{{ it.number }}</a> {{ it.title }}</li>
+                {% else if loop.index0 == 5 %}
+                  <li class="text-muted">+{{ r.unclaimed_prs_items.len() - 5 }} more PR{% if r.unclaimed_prs_items.len() - 5 != 1 %}s{% endif %}…</li>
+                {% endif %}
+              {% endfor %}
+            </ul>
+          </details>
         {% else %}
           <span class="text-muted">—</span>
         {% endif %}
