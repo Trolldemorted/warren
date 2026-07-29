@@ -22,6 +22,18 @@ pub struct Model {
     pub authtoken: String,
     #[sea_orm(default_expr = "Expr::cust(\"now()\")")]
     pub created_at: ChronoDateTimeUtc,
+    /// Forgejo labels whose open *unassigned* issues/PRs this agent's
+    /// team can claim — surfaced on the agents-page "Claimable"
+    /// column and consulted by the scheduler pre-fire gate as a
+    /// fallback when the firing schedule has no `additional_labels` of
+    /// its own. OR semantics — an unassigned item counts if it carries
+    /// any one of these labels. Empty (the default) preserves today's
+    /// "fall back to `[class]`" behavior so existing rows don't change.
+    /// The `Vec<String>` field type materializes as `text[]` via the
+    /// blanket `ValueType` impl in `sea-query` — mirrors
+    /// `scheduled_prompts.additional_labels`.
+    #[sea_orm(default_expr = "Expr::cust(\"'{}'::text[]\")")]
+    pub claimable_labels: Vec<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

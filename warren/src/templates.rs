@@ -86,6 +86,11 @@ pub struct AgentFormTemplate {
     pub agent: Option<crate::entity::agent::Model>,
     pub form_action: String,
     pub forgejo_configs: Vec<crate::entity::agent_forgejo_config::Model>,
+    /// Comma-separated render of `agent.claimable_labels` (or empty when
+    /// creating a new agent). Askama can't call `join_label_list_csv`
+    /// directly; the route handler pre-renders. Mirrors
+    /// `ScheduledPromptNewTemplate::additional_labels_csv`.
+    pub claimable_labels_csv: String,
 }
 
 #[derive(Template)]

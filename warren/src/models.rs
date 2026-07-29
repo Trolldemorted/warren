@@ -48,6 +48,13 @@ pub struct AgentNew {
     pub model: String,
     #[serde(default)]
     pub prompt: String,
+    /// Per-agent override for the labels used by the agents-page
+    /// Claimable column and the scheduler's pre-fire gate fallback.
+    /// Empty (the default) keeps today's "fall back to `[class]`"
+    /// semantics; populated entries use OR semantics in the
+    /// forgejo-label filter. Mirrors `scheduled_prompts.additional_labels`.
+    #[serde(default)]
+    pub claimable_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -62,6 +69,11 @@ pub struct AgentPatch {
     pub model: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// `None` leaves the per-agent label override untouched; `Some(vec)`
+    /// replaces it (pass an empty vec to clear back to the
+    /// "fall back to class" default).
+    #[serde(default)]
+    pub claimable_labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -15,6 +15,20 @@
           {% if let Some(a) = agent %}value="{{ a.class }}"{% endif %}>
       </div>
       <div class="mb-3">
+        <label class="form-label">Claimable labels (optional)</label>
+        <input type="text" name="claimable_labels" class="form-control"
+          value="{{ claimable_labels_csv }}"
+          placeholder="frontend,area:auth,team-alpha">
+        <small class="text-muted">
+          Comma-separated forgejo labels. Open issues and PRs that are
+          <em>unassigned</em> but carry any of these labels surface on
+          the agents-page Claimable column AND count toward this
+          agent's scheduler pre-fire gate (as the fallback when the
+          firing schedule has no labels of its own). Empty falls back
+          to the agent's <code>class</code>.
+        </small>
+      </div>
+      <div class="mb-3">
         <label class="form-label">Kind (optional)</label>
         <input type="text" name="kind" class="form-control"
           {% if let Some(a) = agent %}{% if let Some(k) = a.kind %}value="{{ k }}"{% endif %}{% endif %}>

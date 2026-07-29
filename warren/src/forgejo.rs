@@ -1,6 +1,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use forgejo_api::structs::{Issue, IssueListIssuesQuery, IssueListIssuesQueryState, StateType};
 use forgejo_api::{Auth, Forgejo};
+use std::borrow::Cow;
 use url::Url;
 use uuid::Uuid;
 
@@ -296,6 +297,43 @@ async fn fetch_unblocked_unassigned_for_config(
     .await
 }
 
+/// Resolve the forgejo label list to use for "what could this agent's
+/// team claim" lookups. Fallback chain:
+///   1. `override_labels` — the caller's own per-scope override
+///      (e.g. `scheduled_prompts.additional_labels`, when a schedule
+///      has its own label list set by the operator).
+///   2. `agent_claimable_labels` — the per-agent override on
+///      `agents.claimable_labels` (set via the agent edit form).
+///   3. `[agent_class]` — the historical default; preserves today's
+///      "single team per `class`" semantics for any agent that hasn't
+///      been migrated.
+///
+/// Returns the labels to pass to `unclaimed_work_items_for_agent`.
+/// Used by both the agents-page Claimable column and the scheduler's
+/// pre-fire gate so the dashboard and the scheduler agree on the same
+/// pool of items. Documented in `entity::agent::Model::claimable_labels`.
+pub fn resolve_claimable_labels<'a>(
+    override_labels: &'a [String],
+    agent_claimable_labels: &'a [String],
+    agent_class: &'a str,
+) -> Cow<'a, [String]> {
+    if !override_labels.is_empty() {
+        Cow::Borrowed(override_labels)
+    } else if !agent_claimable_labels.is_empty() {
+        Cow::Borrowed(agent_claimable_labels)
+    } else if agent_class.is_empty() {
+        Cow::Borrowed(&[])
+    } else {
+        // No agent-class to materialize into a `String`; the only
+        // call sites that pass an empty class are the scheduler's
+        // deleted-agent fallback, which today would also have hit the
+        // empty-label guard. Borrow a synthetic single-element slice
+        // by allocating once here — happens at most once per fire
+        // tick, not in a hot loop.
+        Cow::Owned(vec![agent_class.to_string()])
+    }
+}
+
 /// Two-pole aggregator pair — replaced the old
 /// `unblocked_work_items_for_agent` + `count_work_items_for_agent`
 /// pair, which merged assigned and unassigned-by-label into a single
@@ -487,5 +525,38 @@ mod tests {
             url,
             "https://git.example/api/v1/repos/owner/repo/issues/116/dependencies"
         );
+    }
+
+    /// §D fallback chain: per-schedule override beats per-agent
+    /// override beats `[class]`. Pinned so a future refactor that
+    /// changes the precedence is caught at the unit-test level rather
+    /// than as a dashboard/scheduler disagreement.
+    #[test]
+    fn resolve_claimable_labels_precedence() {
+        let sched = vec!["sched-label".to_string()];
+        let agent = vec!["agent-label".to_string()];
+        let class = "default-class";
+
+        // 1. schedule override wins even when the agent row has its
+        //    own labels and the class differs.
+        assert_eq!(
+            resolve_claimable_labels(&sched, &agent, class).as_ref(),
+            &sched[..],
+        );
+        // 2. schedule empty → fall back to agent override.
+        assert_eq!(
+            resolve_claimable_labels(&[], &agent, class).as_ref(),
+            &agent[..],
+        );
+        // 3. both empty → fall back to single-element class slice.
+        assert_eq!(
+            resolve_claimable_labels(&[], &[], class).as_ref(),
+            &[class.to_string()][..],
+        );
+        // 4. scheduler's "agent row gone" fallback (empty class) →
+        //    empty slice, so the unclaimed call returns no items and
+        //    matches today's pre-fire behavior.
+        let empty: &[String] = &[];
+        assert_eq!(resolve_claimable_labels(&[], &[], "").as_ref(), empty,);
     }
 }

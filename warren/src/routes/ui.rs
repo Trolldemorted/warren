@@ -217,6 +217,10 @@ struct AgentForm {
     kind: Option<String>,
     model: String,
     prompt: String,
+    /// Per-agent forgejo label override for the agents-page Claimable
+    /// column + scheduler pre-fire gate fallback. Empty (the default)
+    /// preserves today's "fall back to `[class]`" semantics.
+    claimable_labels: Vec<String>,
     cfg: HashMap<Uuid, AgentForgejoConfigPatchForm>,
     new: HashMap<String, AgentForgejoConfigNewForm>,
 }
@@ -251,6 +255,7 @@ fn parse_agent_form(mut form: HashMap<String, String>) -> Result<AgentForm, AppE
         .ok_or_else(|| AppError::BadRequest("model required".into()))?;
     let prompt = form.remove("prompt").unwrap_or_default();
     let kind = form.remove("kind").filter(|v| !v.is_empty());
+    let claimable_labels = parse_label_list(&form.remove("claimable_labels").unwrap_or_default());
 
     let mut cfg: HashMap<Uuid, AgentForgejoConfigPatchForm> = HashMap::new();
     let mut new_map: HashMap<String, AgentForgejoConfigNewForm> = HashMap::new();
@@ -292,6 +297,7 @@ fn parse_agent_form(mut form: HashMap<String, String>) -> Result<AgentForm, AppE
         kind,
         model,
         prompt,
+        claimable_labels,
         cfg,
         new: new_map,
     })
@@ -438,18 +444,22 @@ async fn agents_page(
                     Some(forgejo_errors.join(" | "))
                 };
                 // §D Claimable column: unassigned forgejo items whose
-                // labels match the agent's `class` (the convention for
-                // "team label" — no `team_label` column exists). Mirrors
-                // the scheduler pre-fire gate's `additional_labels`
-                // filter so the dashboard and the scheduler see the same
-                // pool. Two extra HTTP calls per config per render — fine
-                // at current scale (≤10 configs/agent × small fleet);
-                // memoize with a short TTL if it ever becomes a hot path.
+                // labels match the resolved team-label list. The
+                // dashboard has no per-schedule override, so the
+                // helper resolves: `agents.claimable_labels` if non-empty,
+                // else `[agent.class]`. The scheduler uses the same
+                // helper with `prompt.additional_labels` as the
+                // override (see `scheduler::fire_prompt`). Two extra
+                // HTTP calls per config per render — fine at current
+                // scale (≤10 configs/agent × small fleet); memoize
+                // with a short TTL if it ever becomes a hot path.
+                let claimable_labels =
+                    crate::forgejo::resolve_claimable_labels(&[], &a.claimable_labels, &a.class);
                 let ((unclaimed_issues_items, unclaimed_prs_items), unclaimed_errors) =
                     crate::forgejo::unclaimed_work_items_for_agent(
                         &state.db,
                         a.id,
-                        std::slice::from_ref(&a.class),
+                        &claimable_labels,
                     )
                     .await
                     .unwrap_or_else(|e| {
@@ -508,6 +518,7 @@ async fn agent_new_page(State(state): State<AppState>, headers: HeaderMap) -> Re
         agent: None,
         form_action: "/admin/agents".into(),
         forgejo_configs: vec![],
+        claimable_labels_csv: join_label_list_csv(&[]),
     };
     render(t)
 }
@@ -530,6 +541,7 @@ async fn agent_create(
         kind: form.kind.filter(|s| !s.is_empty()),
         model: form.model,
         prompt: form.prompt,
+        claimable_labels: form.claimable_labels,
     };
     match crate::db_ops::create_agent(&state.db, &new).await {
         Ok(agent) => {
@@ -538,9 +550,14 @@ async fn agent_create(
                 title: Some("Agent created"),
                 nav: Some("agents"),
                 flash: Some(Flash::success("agent created")),
-                agent: Some(agent),
+                agent: Some(agent.clone()),
                 form_action: format!("/admin/agents/{id}/edit"),
                 forgejo_configs: vec![],
+                // Re-render with the just-persisted labels so the
+                // operator sees the value that was actually saved
+                // (the form's submitted CSV has already been parsed
+                // into `agent.claimable_labels`).
+                claimable_labels_csv: join_label_list_csv(&agent.claimable_labels),
             };
             render(t)
         }
@@ -567,9 +584,10 @@ async fn agent_edit_page(
                 title: Some("Edit agent"),
                 nav: Some("agents"),
                 flash: None,
-                agent: Some(agent),
+                agent: Some(agent.clone()),
                 form_action: format!("/admin/agents/{id}"),
                 forgejo_configs,
+                claimable_labels_csv: join_label_list_csv(&agent.claimable_labels),
             };
             render(t)
         }
@@ -597,6 +615,7 @@ async fn agent_update(
         kind: Some(form.kind.filter(|s| !s.is_empty())),
         model: Some(form.model),
         prompt: Some(form.prompt),
+        claimable_labels: Some(form.claimable_labels),
     };
     if let Err(e) = crate::db_ops::update_agent(&state.db, id, &patch).await {
         return err_page(e);

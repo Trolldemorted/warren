@@ -210,9 +210,15 @@ pub async fn fire_prompt(
     // (2) Action-items gate, scoped to the schedule's address.
     //   - Team scope: warren inbox count (existing semantics).
     //   - Agent scope: count of unblocked forgejo items the agent owns
-    //     (assigned + unassigned-with-label per the schedule's
-    //     `additional_labels`). Bypassed when `ignore_pending_forgejo_work`
-    //     is set, mirroring `ignore_inbox_state` for team schedules.
+    //     (assigned + unassigned-with-label). Bypassed when
+    //     `ignore_pending_forgejo_work` is set, mirroring
+    //     `ignore_inbox_state` for team schedules.
+    //
+    // Label resolution: `prompt.additional_labels` (per-schedule
+    // override set by the operator) wins first; falls back to the
+    // agent's own `agents.claimable_labels`; falls back to `[class]`.
+    // Same chain the agents-page Claimable column uses, so the
+    // dashboard and the scheduler see the same pool.
     if prompt.scope == "agent" {
         if !prompt.ignore_pending_forgejo_work {
             // Fetch assigned + unassigned-by-label separately and sum
@@ -225,13 +231,26 @@ pub async fn fire_prompt(
                 crate::forgejo::assigned_work_items_for_agent(&state.db, agent_id)
                     .await
                     .unwrap_or(((Vec::new(), Vec::new()), Vec::new()));
-            let ((u_iss, u_prs), _e2) = crate::forgejo::unclaimed_work_items_for_agent(
-                &state.db,
-                agent_id,
+            // Resolve the agent row once so the unclaimed call uses
+            // the same labels the dashboard would show. `agent_class`
+            // is the bare minimum we need; if the row's gone (race
+            // with delete), the helper falls back to an empty class
+            // and `unclaimed_work_items_for_agent` returns nothing,
+            // which matches today's behavior.
+            let (agent_claimable_labels, agent_class) =
+                match db_ops::get_agent(&state.db, agent_id).await {
+                    Ok(Some(m)) => (m.claimable_labels, m.class),
+                    _ => (Vec::new(), String::new()),
+                };
+            let labels = crate::forgejo::resolve_claimable_labels(
                 &prompt.additional_labels,
-            )
-            .await
-            .unwrap_or(((Vec::new(), Vec::new()), Vec::new()));
+                &agent_claimable_labels,
+                &agent_class,
+            );
+            let ((u_iss, u_prs), _e2) =
+                crate::forgejo::unclaimed_work_items_for_agent(&state.db, agent_id, &labels)
+                    .await
+                    .unwrap_or(((Vec::new(), Vec::new()), Vec::new()));
             let issues = a_iss.len() + u_iss.len();
             let prs = a_prs.len() + u_prs.len();
             if issues + prs == 0 {

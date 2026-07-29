@@ -241,6 +241,7 @@ fn validate_agent_new(n: &AgentNew) -> AppResult<()> {
     if n.model.trim().is_empty() {
         return Err(AppError::BadRequest("model required".into()));
     }
+    validate_label_list(&n.claimable_labels)?;
     Ok(())
 }
 
