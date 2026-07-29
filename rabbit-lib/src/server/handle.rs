@@ -1,6 +1,9 @@
 pub use crate::server::actor::Command;
 use crate::server::actor::TurnOutcomeMsg;
-use crate::wire::{AgentState, EnvelopeBody, StateFrame, TermFrame, TermSize, UsageSnapshot};
+use crate::wire::{
+    AgentState, EnvelopeBody, Key, StateFrame, TermFrame, TermSize, UsageSnapshot,
+    TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+};
 use anyhow::Result as AnyResult;
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -308,6 +311,40 @@ impl AgentHandle {
     pub async fn interrupt(&self) -> AnyResult<()> {
         self.cmd_tx()
             .send(Command::Interrupt)
+            .await
+            .map_err(|_| anyhow::anyhow!("actor not running"))
+    }
+
+    /// §Mobile-input: translate a typed `Key` to its terminal byte
+    /// sequence and forward it to the claude PTY through the same
+    /// `Command::SendKeys` FIFO that raw `term.onData` bytes use. The
+    /// FIFO + writer-actor pipeline serialize concurrent typers, so
+    /// the mobile chip palette and a desktop tab typing at the same
+    /// time just interleave at the PTY. `Err` propagates the
+    /// `key_to_bytes` validation error (e.g. a non-ASCII `Ctrl`
+    /// payload) so the caller can surface a useful message.
+    pub async fn send_key(&self, key: Key) -> AnyResult<()> {
+        let bytes = crate::wire::key_to_bytes(&key)?;
+        self.send_keys(TERM_CHAN_CLAUDE, bytes.into()).await
+    }
+
+    /// §Mobile-input shell-channel counterpart to `send_key`. Same
+    /// translation; routes to the shell PTY so the mobile chip
+    /// palette works on `/agent/:id/shell` too (Tab completion,
+    /// arrow-history, etc. — all the things bash relies on).
+    pub async fn send_shell_key(&self, key: Key) -> AnyResult<()> {
+        let bytes = crate::wire::key_to_bytes(&key)?;
+        self.send_keys(TERM_CHAN_SHELL, bytes.into()).await
+    }
+
+    /// Shared lower-level helper: send a pre-translated byte buffer
+    /// to the actor's `Command::SendKeys` arm. `send_key` and
+    /// `send_shell_key` are the typed-entry-point wrappers; this is
+    /// the untyped escape hatch for callers that already have the
+    /// bytes (e.g. `term.onData` from the desktop path).
+    pub async fn send_keys(&self, chan: u8, data: bytes::Bytes) -> AnyResult<()> {
+        self.cmd_tx()
+            .send(Command::SendKeys { chan, data })
             .await
             .map_err(|_| anyhow::anyhow!("actor not running"))
     }

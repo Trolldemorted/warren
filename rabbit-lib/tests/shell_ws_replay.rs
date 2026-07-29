@@ -19,13 +19,15 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use rabbit_lib::server::handle::Command;
 use rabbit_lib::server::handle::{AgentHandle, AgentStateSnapshot};
 use rabbit_lib::server::registry::new_registry;
 use rabbit_lib::server::ws_shell::handle as ws_shell_handle;
 use rabbit_lib::server::WsTransport;
-use rabbit_lib::wire::{TermFrame, TermSize, TERM_CHAN_SHELL};
+use rabbit_lib::wire::{
+    Envelope, EnvelopeBody, Key, SendKey, TermFrame, TermSize, PROTOCOL_VERSION, TERM_CHAN_SHELL,
+};
 
 #[tokio::test]
 async fn shell_prompt_is_delivered_to_browser_ws_on_open() {
@@ -245,6 +247,123 @@ async fn ws_shell_handle_repaint_uses_default_term_size_when_cached_is_none() {
 
     client.close(None).await.ok();
     let _ = tokio::time::timeout(Duration::from_secs(1), server_task).await;
+}
+
+/// §Mobile-input: the shell WS must accept a typed `SendKey` envelope
+/// from the client and translate it to a `Command::SendKeys` aimed at
+/// the shell PTY (`TERM_CHAN_SHELL`). This is the contract that closes
+/// the "iOS keyboard has no Tab/Escape/Arrow keys" gap on the
+/// /agent/:id/shell page. The translation lives in `wire::key_to_bytes`
+/// — this test only pins that the shell WS wires it through.
+#[tokio::test]
+async fn ws_shell_handle_dispatches_send_key_to_shell_pty() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let registry = new_registry();
+    let agent_id = uuid::Uuid::new_v4();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let handle = AgentHandle::with_cmd_tx(agent_id, cmd_tx);
+    registry.entry(agent_id).or_insert_with(|| handle.clone());
+
+    let server_registry = registry.clone();
+    let server_task = tokio::spawn(async move {
+        let (stream, _peer) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let transport = TungsteniteTransport::new(ws);
+        let _ = ws_shell_handle(transport, server_registry, agent_id, false).await;
+    });
+
+    let connect = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut client, _upgrade) = tokio_tungstenite::client_async("ws://localhost/socket", connect)
+        .await
+        .unwrap();
+
+    // Give the server a beat to drain the post-replay ShellRepaint so
+    // cmd_rx only contains our SendKeys when we observe it.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    while cmd_rx.try_recv().is_ok() {}
+
+    // Send a typed Tab key from the mobile chip palette.
+    let env = Envelope {
+        v: PROTOCOL_VERSION,
+        seq: 1,
+        body: EnvelopeBody::SendKey(SendKey {
+            key: Key::Tab,
+            modifiers: None,
+        }),
+    };
+    let frame = serde_json::to_string(&env).unwrap();
+    client
+        .send(tokio_tungstenite::tungstenite::Message::Text(frame))
+        .await
+        .unwrap();
+
+    // Expect a Command::SendKeys aimed at the shell PTY with `\t`.
+    let cmd = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match cmd_rx.recv().await {
+                Some(Command::SendKeys { chan, data }) => return Some((chan, data)),
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    })
+    .await
+    .expect("SendKeys within 2s")
+    .expect("cmd_rx delivered a SendKeys");
+    assert_eq!(cmd.0, TERM_CHAN_SHELL, "must target shell PTY");
+    assert_eq!(cmd.1.as_ref(), b"\t", "Tab must translate to 0x09");
+
+    // Viewer-mode connections must NOT fire keys — a watcher must not
+    // be able to type into a peer's shell.
+    // (Different agent, fresh WS, viewer_mode = true.)
+    let viewer_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let viewer_addr = viewer_listener.local_addr().unwrap();
+    let viewer_agent = uuid::Uuid::new_v4();
+    let (viewer_cmd_tx, mut viewer_cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
+    let viewer_handle = AgentHandle::with_cmd_tx(viewer_agent, viewer_cmd_tx);
+    registry
+        .entry(viewer_agent)
+        .or_insert_with(|| viewer_handle.clone());
+    let server_registry2 = registry.clone();
+    let viewer_server = tokio::spawn(async move {
+        let (stream, _peer) = viewer_listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let transport = TungsteniteTransport::new(ws);
+        let _ = ws_shell_handle(transport, server_registry2, viewer_agent, true).await;
+    });
+    let viewer_connect = tokio::net::TcpStream::connect(viewer_addr).await.unwrap();
+    let (mut viewer_client, _) =
+        tokio_tungstenite::client_async("ws://localhost/socket", viewer_connect)
+            .await
+            .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    while viewer_cmd_rx.try_recv().is_ok() {}
+    let env = Envelope {
+        v: PROTOCOL_VERSION,
+        seq: 1,
+        body: EnvelopeBody::SendKey(SendKey {
+            key: Key::Escape,
+            modifiers: None,
+        }),
+    };
+    let frame = serde_json::to_string(&env).unwrap();
+    viewer_client
+        .send(tokio_tungstenite::tungstenite::Message::Text(frame))
+        .await
+        .unwrap();
+    // Wait long enough that a stray SendKeys would arrive if the
+    // server had wrongly accepted it; assert none did.
+    let stray = tokio::time::timeout(Duration::from_millis(500), viewer_cmd_rx.recv()).await;
+    assert!(
+        stray.is_err(),
+        "viewer-mode must drop SendKey envelopes, got {stray:?}"
+    );
+
+    viewer_client.close(None).await.ok();
+    client.close(None).await.ok();
+    let _ = tokio::time::timeout(Duration::from_secs(1), server_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), viewer_server).await;
 }
 
 struct TungsteniteTransport<S> {

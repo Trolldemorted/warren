@@ -60,6 +60,7 @@ button.action { width: 100%; margin-bottom: .25rem; }
 body.viewer-mode .claude-grid { grid-template-columns: minmax(0, 1fr); }
 body.viewer-mode aside { display: none; }
 body.viewer-mode #term { pointer-events: none; }
+body.viewer-mode .mobile-keypad { display: none; }
 #viewer-mode-banner {
   display: none;
   margin-top: .5rem;
@@ -112,6 +113,44 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .action-toast-info {
   background: rgba(13, 110, 253, .95);
 }
+
+/* §Mobile-input: chip palette for terminal keys the soft keyboard
+   can't produce (Tab, Esc, arrows, navigation, etc.). Bootstrap's
+   `d-md-none` keeps the strip hidden ≥768px so desktop users never see
+   it; viewer-mode (above) hides it unconditionally as a defense in
+   depth — a viewer must not be able to type into a peer's terminal. */
+.mobile-keypad {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 4px;
+  background: #161b22;
+  border-radius: .375rem;
+}
+.mobile-keypad button.chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .95rem;
+  padding: .45rem 0;
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: .25rem;
+}
+.mobile-keypad button.chip:active { background: #30363d; }
+.mobile-keypad button.chip.ctrl-pill {
+  grid-row: span 3;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  background: #4c1d95;
+  border-color: #6d28d9;
+  color: #ede9fe;
+}
+.mobile-keypad button.chip.ctrl-pill.active {
+  background: #fbbf24;
+  border-color: #f59e0b;
+  color: #1f2937;
+}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>
@@ -149,6 +188,27 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   <div class="term-wrap">
     <div id="term"></div>
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its terminal</div>
+  </div>
+  {# §Mobile-input: chip palette for keys the soft keyboard can't
+     produce. Hidden on desktop (d-md-none) and in viewer-mode
+     (body.viewer-mode .mobile-keypad above). The Ctrl pill on the
+     right is a one-shot chord modifier — toggle on, the next letter
+     typed on the soft keyboard is sent as Ctrl+letter via the typed
+     `SendKey` envelope (wire.rs::EnvelopeBody::SendKey). #}
+  <div class="mobile-keypad d-md-none" id="mobile-keypad">
+    <button class="chip" type="button" data-key="tab">Tab</button>
+    <button class="chip" type="button" data-key="escape">Esc</button>
+    <button class="chip" type="button" data-key="enter">Enter</button>
+    <button class="chip" type="button" data-key="delete">Del</button>
+    <button class="chip" type="button" data-key="arrow_up">↑</button>
+    <button class="chip" type="button" data-key="arrow_down">↓</button>
+    <button class="chip" type="button" data-key="arrow_left">←</button>
+    <button class="chip" type="button" data-key="arrow_right">→</button>
+    <button class="chip" type="button" data-key="home">Home</button>
+    <button class="chip" type="button" data-key="end">End</button>
+    <button class="chip" type="button" data-key="page_up">PgUp</button>
+    <button class="chip" type="button" data-key="page_down">PgDn</button>
+    <button class="chip ctrl-pill" type="button" id="mobile-ctrl-pill">Ctrl</button>
   </div>
   <div id="prompt-rejected-banner" role="status" aria-live="polite"></div>
 <div id="viewer-mode-banner" role="status" aria-live="polite">
@@ -514,10 +574,66 @@ term.onData(data => {
   // The server drops them, but skipping the send saves a round trip and
   // means a misconfigured proxy can't log viewer keystrokes.
   if (viewerMode) return;
+  // §Mobile-input: when the Ctrl chord pill is armed, the next letter
+  // typed on the soft keyboard is converted to Ctrl+letter (0x01+letter)
+  // instead of the bare letter. Single-shot — the pill disarms after
+  // one translation. Ctrl+non-letter is a no-op (we send the raw byte
+  // through); users who want Ctrl+C can just tap the Ctrl pill then the
+  // soft-keyboard `c`. The `data` arg from xterm is one codepoint for
+  // ASCII keys.
+  if (mobileCtrlArmed && data.length === 1) {
+    const ch = data.charCodeAt(0);
+    if (ch >= 0x61 && ch <= 0x7a) {
+      // Send `\x01{letter}` as raw bytes — xterm's typed bytes path
+      // already carries them to the Claude PTY.
+      const buf = new Uint8Array(3);
+      buf[0] = 0x01;
+      buf[1] = 0x01;
+      buf[2] = ch;
+      ws.send(buf);
+      mobileCtrlArmed = false;
+      syncCtrlPill();
+      return;
+    }
+  }
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
   ws.send(buf);
+});
+
+// §Mobile-input: typed SendKey envelopes for chip presses. Wire shape
+// matches rabbit_lib::wire::EnvelopeBody::SendKey / Key. Server-side
+// handler (ws_browser.rs::forward_browser_message) translates the typed
+// Key into terminal bytes and ships them to the Claude PTY through the
+// same Command::SendKeys FIFO used by term.onData.
+let mobileCtrlArmed = false;
+const ctrlPill = document.getElementById('mobile-ctrl-pill');
+function syncCtrlPill() {
+  if (!ctrlPill) return;
+  ctrlPill.classList.toggle('active', mobileCtrlArmed);
+}
+if (ctrlPill) {
+  ctrlPill.addEventListener('click', () => {
+    if (viewerMode) return;
+    mobileCtrlArmed = !mobileCtrlArmed;
+    syncCtrlPill();
+  });
+}
+function sendTypedKey(key) {
+  if (!connected || !ws || viewerMode) return;
+  const env = {
+    v: 2,
+    seq: 0,
+    body: { t: 'send_key', k: { key: key, modifiers: null } },
+  };
+  ws.send(JSON.stringify(env));
+}
+document.querySelectorAll('#mobile-keypad button.chip[data-key]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.key;
+    sendTypedKey(key);
+  });
 });
 
 // Envelope body shapes per rabbit_lib::wire::EnvelopeBody.

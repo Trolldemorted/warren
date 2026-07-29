@@ -75,6 +75,7 @@
    agent_claude.html: CSS hides input affordances; the server-side
    ws_shell handler drops typed bytes regardless. */
 body.viewer-mode #term { pointer-events: none; }
+body.viewer-mode .mobile-keypad { display: none; }
 #viewer-mode-banner {
   display: none;
   margin-top: .5rem;
@@ -86,6 +87,43 @@ body.viewer-mode #term { pointer-events: none; }
   font-size: .85rem;
 }
 body.viewer-mode #viewer-mode-banner { display: block; }
+
+/* §Mobile-input: same chip palette as agent_claude.html. Hidden on
+   desktop (d-md-none) and in viewer-mode (body.viewer-mode .mobile-keypad
+   above). Server-side ws_shell handler translates SendKey envelopes
+   to terminal bytes aimed at TERM_CHAN_SHELL (rabbit_lib::wire). */
+.mobile-keypad {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 4px;
+  background: #161b22;
+  border-radius: .375rem;
+}
+.mobile-keypad button.chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .95rem;
+  padding: .45rem 0;
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: .25rem;
+}
+.mobile-keypad button.chip:active { background: #30363d; }
+.mobile-keypad button.chip.ctrl-pill {
+  grid-row: span 3;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  background: #4c1d95;
+  border-color: #6d28d9;
+  color: #ede9fe;
+}
+.mobile-keypad button.chip.ctrl-pill.active {
+  background: #fbbf24;
+  border-color: #f59e0b;
+  color: #1f2937;
+}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">shell · {{ agent.name }}</h1>
@@ -103,6 +141,24 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   <div class="term-wrap">
     <div id="term"></div>
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id (with <code>RABBIT_ENABLE_SHELL=1</code>) to see its shell</div>
+  </div>
+  {# §Mobile-input: same chip palette as agent_claude.html, dispatched
+     to TERM_CHAN_SHELL by the server-side ws_shell handler when it
+     parses a SendKey envelope (handle::send_shell_key). #}
+  <div class="mobile-keypad d-md-none" id="mobile-keypad">
+    <button class="chip" type="button" data-key="tab">Tab</button>
+    <button class="chip" type="button" data-key="escape">Esc</button>
+    <button class="chip" type="button" data-key="enter">Enter</button>
+    <button class="chip" type="button" data-key="delete">Del</button>
+    <button class="chip" type="button" data-key="arrow_up">↑</button>
+    <button class="chip" type="button" data-key="arrow_down">↓</button>
+    <button class="chip" type="button" data-key="arrow_left">←</button>
+    <button class="chip" type="button" data-key="arrow_right">→</button>
+    <button class="chip" type="button" data-key="home">Home</button>
+    <button class="chip" type="button" data-key="end">End</button>
+    <button class="chip" type="button" data-key="page_up">PgUp</button>
+    <button class="chip" type="button" data-key="page_down">PgDn</button>
+    <button class="chip ctrl-pill" type="button" id="mobile-ctrl-pill">Ctrl</button>
   </div>
 </div>
 <div id="viewer-mode-banner" role="status" aria-live="polite">
@@ -167,11 +223,62 @@ term.onData(data => {
   if (!connected || !ws) return;
   // §D read-only viewer mode: skip sending typed bytes.
   if (viewerMode) return;
+  // §Mobile-input: Ctrl-chord interception mirrors the claude page —
+  // when the Ctrl pill is armed, the next letter typed on the soft
+  // keyboard is converted to Ctrl+letter (raw bytes 0x02 0x01 {letter})
+  // aimed at the shell PTY instead of the bare letter. Single-shot;
+  // the pill disarms after one translation.
+  if (mobileCtrlArmed && data.length === 1) {
+    const ch = data.charCodeAt(0);
+    if (ch >= 0x61 && ch <= 0x7a) {
+      const buf = new Uint8Array(3);
+      // TERM_CHAN_SHELL = 0x02; embedded Ctrl byte = 0x01.
+      buf[0] = 0x02;
+      buf[1] = 0x01;
+      buf[2] = ch;
+      ws.send(buf);
+      mobileCtrlArmed = false;
+      syncCtrlPill();
+      return;
+    }
+  }
   const buf = new Uint8Array(1 + data.length);
   // TERM_CHAN_SHELL = 0x02 — must match rabbit_lib::wire.
   buf[0] = 0x02;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
   ws.send(buf);
+});
+
+// §Mobile-input: typed SendKey envelopes for chip presses. Same wire
+// shape as agent_claude.html; the server's ws_shell handler dispatches
+// these via handle::send_shell_key (rabbit_lib::server::handle) which
+// translates the typed Key into terminal bytes for the shell PTY.
+let mobileCtrlArmed = false;
+const ctrlPill = document.getElementById('mobile-ctrl-pill');
+function syncCtrlPill() {
+  if (!ctrlPill) return;
+  ctrlPill.classList.toggle('active', mobileCtrlArmed);
+}
+if (ctrlPill) {
+  ctrlPill.addEventListener('click', () => {
+    if (viewerMode) return;
+    mobileCtrlArmed = !mobileCtrlArmed;
+    syncCtrlPill();
+  });
+}
+function sendTypedKey(key) {
+  if (!connected || !ws || viewerMode) return;
+  const env = {
+    v: 2,
+    seq: 0,
+    body: { t: 'send_key', k: { key: key, modifiers: null } },
+  };
+  ws.send(JSON.stringify(env));
+}
+document.querySelectorAll('#mobile-keypad button.chip[data-key]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    sendTypedKey(btn.dataset.key);
+  });
 });
 
 // Copy affordance: xterm.js renders to a <canvas>, so the browser can't

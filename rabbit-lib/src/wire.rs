@@ -122,6 +122,16 @@ pub enum EnvelopeBody {
         rows: u16,
     },
     Repaint,
+    /// §Mobile-input: typed key press for mobile clients that can't
+    /// send the bytes through their soft keyboard (Tab, Escape, arrow
+    /// keys, etc.). The server translates the named `Key` to a byte
+    /// sequence (see `key_to_bytes`) and feeds it through the same
+    /// writer-actor FIFO that `Prompt`/`Slash`/`Interrupt` use. Mobile
+    /// UI sends this over the existing WS as a JSON text frame;
+    /// desktop `term.onData` path is unaffected. Parallel to
+    /// `Interrupt` / `Slash` so viewer-mode drop logic + FIFO
+    /// ordering apply unchanged.
+    SendKey(SendKey),
     /// §D shell WS late-join repaint: ask rabbit to SIGWINCH-jiggle the
     /// shell PTY so bash repaints its prompt. Shell has no VT snapshot
     /// (no `TermTracker` — see supervisor.rs:602-606), so the v1
@@ -290,6 +300,139 @@ pub type HelloDown = HelloUp;
 pub struct TermSize {
     pub cols: u16,
     pub rows: u16,
+}
+
+/// §Mobile-input: closed enum of named keys the mobile UI can send.
+/// `Ctrl { c }` and `Alt { c }` are the only variants that carry a
+/// payload — `c` is validated server-side against an allow-list of
+/// single-byte ASCII chars (see `key_to_bytes`). Mobile clients
+/// serialize this as `{"k": "<variant>"}` for unit variants or
+/// `{"k": "ctrl", "c": "a"}` for the chord variants; serde uses the
+/// `rename_all = "snake_case"` tag on the enum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum Key {
+    Tab,
+    Backspace,
+    Escape,
+    Enter,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Delete,
+    /// `c` must be a single ASCII letter, digit, or one of
+    /// `@[]\\^{}_`. Validated by `key_to_bytes`; an out-of-range
+    /// payload returns `anyhow::Error` with a descriptive message.
+    Ctrl {
+        c: char,
+    },
+    /// `c` must be a single printable ASCII char (not ESC). ESC
+    /// itself is rejected to avoid ambiguous sequences.
+    Alt {
+        c: char,
+    },
+}
+
+/// §Mobile-input: typed key-press envelope. `modifiers` is reserved
+/// for v2 (e.g. Shift+Tab → `\x1b[Z`); v1 clients omit it and v1
+/// server ignores it because the chord information rides in-band on
+/// `Key::Ctrl` / `Key::Alt`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendKey {
+    pub key: Key,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifiers: Option<Modifiers>,
+}
+
+/// §Mobile-input: modifier overlay reserved for v2 — `Ctrl+letter`
+/// rides `Key::Ctrl { c }` directly today, so this struct is a no-op
+/// at the moment. Kept in the wire shape so adding
+/// `Shift+arrow = "\x1b[1;2A"` later doesn't need a v3 envelope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Modifiers {
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub alt: bool,
+}
+
+/// Translate a typed `Key` to the byte sequence a terminal expects.
+/// Returns `Err(anyhow::Error)` tagged `key_to_bytes::invalid` for
+/// invalid `Ctrl`/`Alt` payloads so the caller can surface a useful
+/// message instead of a generic parse error. Always returns `Vec<u8>`
+/// (never borrowed) so the writer actor can hand it straight to the
+/// FIFO without lifetime juggling.
+pub fn key_to_bytes(key: &Key) -> anyhow::Result<Vec<u8>> {
+    use Key::*;
+    let bytes: Vec<u8> = match key {
+        Tab => b"\t".to_vec(),
+        Backspace => vec![0x7f],
+        Escape => vec![0x1b],
+        Enter => b"\r".to_vec(),
+        ArrowUp => b"\x1b[A".to_vec(),
+        ArrowDown => b"\x1b[B".to_vec(),
+        ArrowRight => b"\x1b[C".to_vec(),
+        ArrowLeft => b"\x1b[D".to_vec(),
+        Home => b"\x1b[H".to_vec(),
+        End => b"\x1b[F".to_vec(),
+        PageUp => b"\x1b[5~".to_vec(),
+        PageDown => b"\x1b[6~".to_vec(),
+        Delete => b"\x1b[3~".to_vec(),
+        Ctrl { c } => {
+            if !is_ctrl_char(*c) {
+                return Err(anyhow::anyhow!(
+                    "Ctrl key requires an ASCII letter/digit/punct, got {c:?}"
+                ));
+            }
+            vec![ctrl_byte(*c)]
+        }
+        Alt { c } => {
+            if !c.is_ascii() || *c == '\x1b' {
+                return Err(anyhow::anyhow!(
+                    "Alt key requires a printable ASCII char, got {c:?}"
+                ));
+            }
+            vec![0x1b, *c as u8]
+        }
+    };
+    Ok(bytes)
+}
+
+/// Allow-list for `Key::Ctrl`. Matches xterm's `keys.CTRL_*` set:
+/// `@`, `A`–`Z`, `[`, `\`, `]`, `^`, `_`, plus `0`–`9` (which maps
+/// to 0x00..=0x09 — the same range xterm uses for Ctrl-digit). Lower
+/// case is normalised to upper by `ctrl_byte`.
+fn is_ctrl_char(c: char) -> bool {
+    matches!(
+        c,
+        '@' | 'A'..='Z' | '[' | '\\' | ']' | '^' | '_' | '0'..='9' | 'a'..='z'
+    )
+}
+
+/// Map an allow-listed ASCII char to its 0x00..=0x1F byte. Caller must
+/// have gated with `is_ctrl_char` — `unreachable!` covers the
+/// unreachable arm.
+fn ctrl_byte(c: char) -> u8 {
+    let lc = c.to_ascii_lowercase();
+    let b = match lc {
+        '@' => 0,
+        'a'..='z' => lc as u8 - b'a' + 1,
+        '[' => 27,
+        '\\' => 28,
+        ']' => 29,
+        '^' => 30,
+        '_' => 31,
+        '0'..='9' => lc as u8 - b'0',
+        _ => unreachable!("is_ctrl_char gates this"),
+    };
+    b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -752,5 +895,112 @@ mod tests {
         assert_eq!(json["t"], "context_check");
         let back: Envelope = serde_json::from_value(json).expect("deserialize");
         assert!(matches!(back.body, EnvelopeBody::ContextCheck));
+    }
+
+    // §Mobile-input: serde roundtrip for the SendKey envelope. The
+    // nested `Key` enum uses an inline `tag = "k"` so a SendKey body
+    // serializes as `{"t":"send_key","key":{"k":"arrow_up"}}`. Pin
+    // the exact shape so a future `rename_all` tweak on Key doesn't
+    // silently break the mobile JS, which sends this shape verbatim.
+    #[test]
+    fn send_key_envelope_round_trips_through_wire_shape() {
+        let env = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 0,
+            body: EnvelopeBody::SendKey(SendKey {
+                key: Key::ArrowUp,
+                modifiers: None,
+            }),
+        };
+        let json = serde_json::to_value(&env).expect("serialize");
+        assert_eq!(json["t"], "send_key");
+        assert_eq!(json["key"]["k"], "arrow_up");
+        let back: Envelope = serde_json::from_value(json).expect("deserialize");
+        match back.body {
+            EnvelopeBody::SendKey(SendKey {
+                key: Key::ArrowUp, ..
+            }) => {}
+            other => panic!("expected SendKey/ArrowUp, got {other:?}"),
+        }
+    }
+
+    // §Mobile-input: chord payloads (`Ctrl { c }`, `Alt { c }`)
+    // serialize their payload as `c` at the same nesting level as
+    // `k`. Pin the shape so a future flatten/representation refactor
+    // doesn't break the mobile JS, which reads `envelope.body.key.c`.
+    #[test]
+    fn send_key_ctrl_chord_serializes_payload() {
+        let env = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 0,
+            body: EnvelopeBody::SendKey(SendKey {
+                key: Key::Ctrl { c: 'a' },
+                modifiers: None,
+            }),
+        };
+        let json = serde_json::to_value(&env).expect("serialize");
+        assert_eq!(json["key"]["k"], "ctrl");
+        assert_eq!(json["key"]["c"], "a");
+    }
+
+    // §Mobile-input: key_to_bytes — one assertion per unit variant
+    // pinned to the byte sequence xterm.js emits for the same key.
+    // Drift here means the mobile UI and the desktop `term.onData`
+    // path would disagree on what "press Tab" means, which would
+    // confuse operators switching between devices.
+    #[test]
+    fn key_to_bytes_unit_variants() {
+        assert_eq!(key_to_bytes(&Key::Tab).unwrap(), b"\t");
+        assert_eq!(key_to_bytes(&Key::Backspace).unwrap(), vec![0x7f]);
+        assert_eq!(key_to_bytes(&Key::Escape).unwrap(), vec![0x1b]);
+        assert_eq!(key_to_bytes(&Key::Enter).unwrap(), b"\r");
+        assert_eq!(key_to_bytes(&Key::ArrowUp).unwrap(), b"\x1b[A");
+        assert_eq!(key_to_bytes(&Key::ArrowDown).unwrap(), b"\x1b[B");
+        assert_eq!(key_to_bytes(&Key::ArrowRight).unwrap(), b"\x1b[C");
+        assert_eq!(key_to_bytes(&Key::ArrowLeft).unwrap(), b"\x1b[D");
+        assert_eq!(key_to_bytes(&Key::Home).unwrap(), b"\x1b[H");
+        assert_eq!(key_to_bytes(&Key::End).unwrap(), b"\x1b[F");
+        assert_eq!(key_to_bytes(&Key::PageUp).unwrap(), b"\x1b[5~");
+        assert_eq!(key_to_bytes(&Key::PageDown).unwrap(), b"\x1b[6~");
+        assert_eq!(key_to_bytes(&Key::Delete).unwrap(), b"\x1b[3~");
+    }
+
+    // §Mobile-input: Ctrl-letter mapping matches xterm's
+    // `keys.CTRL_*` set. Lower/upper case fold to the same byte
+    // (xterm convention). Pinned so a future
+    // `ctrl_byte` refactor can't silently flip a chord.
+    #[test]
+    fn key_to_bytes_ctrl_letters() {
+        assert_eq!(key_to_bytes(&Key::Ctrl { c: 'A' }).unwrap(), vec![0x01]);
+        assert_eq!(key_to_bytes(&Key::Ctrl { c: 'a' }).unwrap(), vec![0x01]);
+        assert_eq!(key_to_bytes(&Key::Ctrl { c: 'C' }).unwrap(), vec![0x03]); // common — sends SIGINT
+        assert_eq!(key_to_bytes(&Key::Ctrl { c: 'R' }).unwrap(), vec![0x12]); // readline reverse-i-search
+        assert_eq!(key_to_bytes(&Key::Ctrl { c: '[' }).unwrap(), vec![0x1b]); // ESC
+        assert_eq!(key_to_bytes(&Key::Ctrl { c: '_' }).unwrap(), vec![0x1f]);
+        assert_eq!(key_to_bytes(&Key::Ctrl { c: '0' }).unwrap(), vec![0x00]);
+        assert_eq!(key_to_bytes(&Key::Ctrl { c: '9' }).unwrap(), vec![0x09]);
+    }
+
+    // §Mobile-input: Alt-letter prepends ESC. The char must be a
+    // printable ASCII byte (not ESC itself) — reject non-ASCII so a
+    // hostile client can't smuggle multi-byte sequences into the PTY
+    // through this surface.
+    #[test]
+    fn key_to_bytes_alt_letter() {
+        assert_eq!(key_to_bytes(&Key::Alt { c: 'x' }).unwrap(), b"\x1bx");
+        // ESC itself is rejected (ambiguous with the prefix byte).
+        assert!(key_to_bytes(&Key::Alt { c: '\x1b' }).is_err());
+        // Non-ASCII char rejected.
+        assert!(key_to_bytes(&Key::Alt { c: 'ñ' }).is_err());
+    }
+
+    // §Mobile-input: the Ctrl allow-list gates non-ASCII and
+    // out-of-range punctuation. Pin the rejection so a future
+    // "accept all bytes for Ctrl" change can't silently widen the
+    // wire attack surface.
+    #[test]
+    fn key_to_bytes_ctrl_rejects_non_ascii() {
+        assert!(key_to_bytes(&Key::Ctrl { c: 'ñ' }).is_err());
+        assert!(key_to_bytes(&Key::Ctrl { c: '!' }).is_err()); // not in the @[]\^_ set
     }
 }

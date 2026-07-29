@@ -12,7 +12,7 @@
 use crate::server::registry::AgentRegistry;
 use crate::server::transport::TransportMsg;
 use crate::server::WsTransport;
-use crate::wire::{TermFrame, TermSize};
+use crate::wire::{Envelope, EnvelopeBody, TermFrame, TermSize};
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -162,7 +162,43 @@ pub async fn handle(
                             log::debug!("shell send_terminal_bytes failed: {e:?}");
                         }
                     }
-                    TransportMsg::Text(_) | TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
+                    TransportMsg::Text(text) => {
+                        // §Mobile-input: parse a typed `SendKey` envelope
+                        // and dispatch to the shell PTY. The shell WS
+                        // accepts only `SendKey` envelopes (not the full
+                        // meta-plane set — it's a byte-pump, not a
+                        // control surface). Unknown envelopes and parse
+                        // errors are logged at debug and dropped; we
+                        // never error-out the WS on a bad frame because
+                        // the mobile chip palette should never be the
+                        // cause of a disconnect.
+                        if viewer_mode {
+                            continue;
+                        }
+                        match serde_json::from_str::<Envelope>(&text) {
+                            Ok(env) => match env.body {
+                                EnvelopeBody::SendKey(sk) => {
+                                    let key_dbg = format!("{:?}", sk.key);
+                                    if let Err(e) = handle.send_shell_key(sk.key).await {
+                                        log::debug!(
+                                            "shell send_shell_key({key_dbg}) failed: {e:?}"
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    log::debug!(
+                                        "shell WS: ignoring non-SendKey text envelope"
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                log::debug!(
+                                    "shell WS: text frame failed to parse as envelope: {e:?}"
+                                );
+                            }
+                        }
+                    }
+                    TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
                     TransportMsg::Close(_) => break,
                 }
             }

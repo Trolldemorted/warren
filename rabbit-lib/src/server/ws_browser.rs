@@ -239,6 +239,7 @@ fn should_drop_for_viewer(body: &EnvelopeBody) -> bool {
             | EnvelopeBody::Resize { .. }
             | EnvelopeBody::Repaint
             | EnvelopeBody::Restart { .. }
+            | EnvelopeBody::SendKey(_)
     )
 }
 
@@ -282,6 +283,7 @@ async fn forward_browser_message(
             handle.prompt(&text, false).await?;
         }
         EnvelopeBody::Interrupt => handle.interrupt().await?,
+        EnvelopeBody::SendKey(sk) => handle.send_key(sk.key).await?,
         EnvelopeBody::Clear { hard } => handle.clear(hard).await?,
         EnvelopeBody::Resize { cols, rows } => {
             handle.resize(cols, rows).await?;
@@ -301,7 +303,7 @@ async fn forward_browser_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::Envelope;
+    use crate::wire::{Envelope, Key, SendKey};
 
     #[test]
     fn viewer_drops_prompt_frame() {
@@ -326,6 +328,10 @@ mod tests {
             EnvelopeBody::Resize { cols: 80, rows: 24 },
             EnvelopeBody::Repaint,
             EnvelopeBody::Restart { fresh: false },
+            EnvelopeBody::SendKey(SendKey {
+                key: Key::Tab,
+                modifiers: None,
+            }),
         ] {
             assert!(
                 should_drop_for_viewer(&body),

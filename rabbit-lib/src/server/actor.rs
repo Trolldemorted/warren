@@ -712,6 +712,7 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::Restart { .. } => "restart",
         EnvelopeBody::Resize { .. } => "resize",
         EnvelopeBody::Repaint => "repaint",
+        EnvelopeBody::SendKey(_) => "send_key",
         EnvelopeBody::ShellRepaint { .. } => "shell_repaint",
         EnvelopeBody::StopHook { .. } => "stop_hook",
         EnvelopeBody::NeedsInput { .. } => "needs_input",
