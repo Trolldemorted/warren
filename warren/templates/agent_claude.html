@@ -151,6 +151,23 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   border-color: #f59e0b;
   color: #1f2937;
 }
+
+/* §Mobile-input: on narrow viewports the keypad is fixed to the
+   bottom of the viewport so it's always reachable above the soft
+   keyboard, and the grid collapses to a single column so the aside
+   no longer steals 18rem of width. Desktop layout is unaffected
+   (the keypad stays hidden via d-md-none). */
+@media (max-width: 767.98px) {
+  .mobile-keypad {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
+    border-radius: 0;
+  }
+  .claude-grid { grid-template-columns: minmax(0, 1fr); }
+}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>

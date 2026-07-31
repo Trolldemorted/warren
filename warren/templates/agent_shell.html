@@ -124,6 +124,26 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   border-color: #f59e0b;
   color: #1f2937;
 }
+
+/* §Mobile-input: on narrow viewports the keypad is fixed to the
+   bottom of the viewport so it's always reachable above the soft
+   keyboard, the grid collapses to a single column, and the capped
+   viewport height (`calc(100vh - 4.5rem)`) is shrunk to leave room
+   for the fixed keypad. Desktop layout is unaffected. */
+@media (max-width: 767.98px) {
+  .mobile-keypad {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
+    border-radius: 0;
+  }
+  .shell-grid {
+    grid-template-columns: minmax(0, 1fr);
+    height: calc(100vh - 4.5rem - 9rem);
+  }
+}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">shell · {{ agent.name }}</h1>
