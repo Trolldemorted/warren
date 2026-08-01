@@ -47,6 +47,13 @@
   bottom: auto !important;
   width: 1px !important;
   height: 1px !important;
+  /* §A.6 / FF-mobile: prevent auto-zoom on focus. FF Mobile
+     auto-zooms the viewport when an input with font-size <16px
+     receives focus. xterm.js's helper textarea ships at the
+     default ~13px, which triggers the zoom and pushes the fixed
+     mobile keypad out of view. 16px is the threshold below which
+     FF Mobile zooms. */
+  font-size: 16px !important;
 }
 
 /* §A.6 / FF-mobile scroll containment. Mirror agent_claude.html: keep
@@ -250,17 +257,18 @@ term.onData(data => {
   if (viewerMode) return;
   // §Mobile-input: Ctrl-chord interception mirrors the claude page —
   // when the Ctrl pill is armed, the next letter typed on the soft
-  // keyboard is converted to Ctrl+letter (raw bytes 0x02 0x01 {letter})
-  // aimed at the shell PTY instead of the bare letter. Single-shot;
-  // the pill disarms after one translation.
+  // keyboard is converted to Ctrl+letter and sent as a single
+  // control-character byte (a→1, b→2, ..., o→15, z→26 via
+  // `ch & 0x1f`). The PTY line discipline interprets that byte as
+  // the actual Ctrl+letter. Single-shot; the pill disarms after one
+  // translation.
   if (mobileCtrlArmed && data.length === 1) {
     const ch = data.charCodeAt(0);
     if (ch >= 0x61 && ch <= 0x7a) {
-      const buf = new Uint8Array(3);
-      // TERM_CHAN_SHELL = 0x02; embedded Ctrl byte = 0x01.
+      const buf = new Uint8Array(2);
+      // TERM_CHAN_SHELL = 0x02; Ctrl+letter as a single control char.
       buf[0] = 0x02;
-      buf[1] = 0x01;
-      buf[2] = ch;
+      buf[1] = ch & 0x1f;
       ws.send(buf);
       mobileCtrlArmed = false;
       syncCtrlPill();
@@ -285,6 +293,10 @@ function syncCtrlPill() {
   ctrlPill.classList.toggle('active', mobileCtrlArmed);
 }
 if (ctrlPill) {
+  // §Mobile-input: preventDefault on mousedown keeps focus on the
+  // xterm helper textarea, so the soft keyboard stays open after the
+  // pill is toggled.
+  ctrlPill.addEventListener('mousedown', e => e.preventDefault());
   ctrlPill.addEventListener('click', () => {
     if (viewerMode) return;
     mobileCtrlArmed = !mobileCtrlArmed;
@@ -301,6 +313,10 @@ function sendTypedKey(key) {
   ws.send(JSON.stringify(env));
 }
 document.querySelectorAll('#mobile-keypad button.chip[data-key]').forEach(btn => {
+  // §Mobile-input: preventDefault on mousedown keeps focus on the
+  // xterm helper textarea, so the soft keyboard stays open after a
+  // chip tap.
+  btn.addEventListener('mousedown', e => e.preventDefault());
   btn.addEventListener('click', () => {
     sendTypedKey(btn.dataset.key);
   });

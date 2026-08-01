@@ -81,6 +81,18 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .claude-grid .term-wrap { overflow: auto; }
 .claude-grid #term { display: block; }
 
+/* §A.6 / FF-mobile: prevent auto-zoom on focus. FF Mobile (in any
+   mode) auto-zooms the viewport when an input with font-size <16px
+   receives focus. xterm.js's helper textarea ships with no font-size
+   declaration, so the browser computes the default (~13px) and
+   triggers the zoom — which then scrolls the page so the textarea is
+   centered, pushing the fixed mobile keypad out of view. Forcing
+   16px on the helper textarea disables the zoom so the keypad stays
+   reachable. Mirrored on agent_shell.html. */
+.claude-grid .xterm-helper-textarea {
+  font-size: 16px !important;
+}
+
 /* Action-button toast: bottom-right, fades in on `.visible`, auto-dismisses.
    See `showActionToast` for the JS that emits one on every action-button
    response (success or failure). Without this, a Restart click that kills
@@ -597,21 +609,18 @@ term.onData(data => {
   // means a misconfigured proxy can't log viewer keystrokes.
   if (viewerMode) return;
   // §Mobile-input: when the Ctrl chord pill is armed, the next letter
-  // typed on the soft keyboard is converted to Ctrl+letter (0x01+letter)
-  // instead of the bare letter. Single-shot — the pill disarms after
-  // one translation. Ctrl+non-letter is a no-op (we send the raw byte
-  // through); users who want Ctrl+C can just tap the Ctrl pill then the
-  // soft-keyboard `c`. The `data` arg from xterm is one codepoint for
-  // ASCII keys.
+  // typed on the soft keyboard is converted to Ctrl+letter and sent
+  // as a single control-character byte (a→1, b→2, ..., o→15, z→26
+  // via `ch & 0x1f`). The PTY line discipline interprets that byte
+  // as the actual Ctrl+letter (e.g. 0x0f = SI = Ctrl+O). Single-shot
+  // — the pill disarms after one translation. Ctrl+non-letter is a
+  // no-op (we send the raw byte through unchanged).
   if (mobileCtrlArmed && data.length === 1) {
     const ch = data.charCodeAt(0);
     if (ch >= 0x61 && ch <= 0x7a) {
-      // Send `\x01{letter}` as raw bytes — xterm's typed bytes path
-      // already carries them to the Claude PTY.
-      const buf = new Uint8Array(3);
-      buf[0] = 0x01;
-      buf[1] = 0x01;
-      buf[2] = ch;
+      const buf = new Uint8Array(2);
+      buf[0] = 0x01;        // Claude channel byte (server strips)
+      buf[1] = ch & 0x1f;   // Ctrl+letter as a single control char
       ws.send(buf);
       mobileCtrlArmed = false;
       syncCtrlPill();
@@ -636,6 +645,11 @@ function syncCtrlPill() {
   ctrlPill.classList.toggle('active', mobileCtrlArmed);
 }
 if (ctrlPill) {
+  // §Mobile-input: preventDefault on mousedown keeps focus on the
+  // xterm helper textarea, so the soft keyboard stays open after the
+  // pill is toggled. Without this, the button takes focus on tap and
+  // FF Mobile closes the keyboard.
+  ctrlPill.addEventListener('mousedown', e => e.preventDefault());
   ctrlPill.addEventListener('click', () => {
     if (viewerMode) return;
     mobileCtrlArmed = !mobileCtrlArmed;
@@ -652,9 +666,14 @@ function sendTypedKey(key) {
   ws.send(JSON.stringify(env));
 }
 document.querySelectorAll('#mobile-keypad button.chip[data-key]').forEach(btn => {
+  // §Mobile-input: preventDefault on mousedown keeps focus on the
+  // xterm helper textarea, so the soft keyboard stays open after a
+  // chip tap. Without this, the chip steals focus and FF Mobile
+  // closes the keyboard — the user has to retap the terminal to
+  // reopen it for every chip press.
+  btn.addEventListener('mousedown', e => e.preventDefault());
   btn.addEventListener('click', () => {
-    const key = btn.dataset.key;
-    sendTypedKey(key);
+    sendTypedKey(btn.dataset.key);
   });
 });
 
