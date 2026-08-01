@@ -126,20 +126,26 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   background: rgba(13, 110, 253, .95);
 }
 
-/* §Mobile-input: chip palette for terminal keys the soft keyboard
-   can't produce (Tab, Esc, arrows, navigation, etc.). Always pinned
-   to the bottom of the viewport (position: fixed) and hidden only on
-   desktop with a fine pointer (mouse) — `pointer: coarse` keeps the
-   keypad visible on FF Mobile in desktop mode, where the viewport is
+/* §Mobile-input: full custom mobile keyboard for terminal input.
+   Replaces the previous chip palette — covers all letters,
+   modifiers, and navigation in a single UI so the user never needs
+   the soft keyboard for terminal work. Always pinned to the bottom
+   of the viewport (position: fixed) and hidden only on desktop with
+   a fine pointer (mouse) — `pointer: coarse` keeps the keypad
+   visible on FF Mobile in desktop mode, where the viewport is
    spoofed to ~980px and `max-width: 767.98px` never matches.
-   Viewer-mode (above) hides it unconditionally as a defense in depth
-   — a viewer must not be able to type into a peer's terminal. */
+   Viewer-mode (above) hides it unconditionally as a defense in
+   depth — a viewer must not be able to type into a peer's
+   terminal. Layout is 4 rows × ~10 keys (40 total); Space spans
+   two cells in row 4 (3fr) and the rest are 1fr each. Key labels
+   are plain text — no Unicode arrow glyphs, because FF Mobile
+   renders U+2191 ↑ at a smaller size than ↓←→ and the previous
+   chip palette was unusable on touch. */
 .mobile-keypad {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  display: flex;
+  flex-direction: column;
   gap: 4px;
   padding: 4px;
-  margin-bottom: 4px;
   background: #161b22;
   border-radius: .375rem;
   position: fixed;
@@ -151,12 +157,22 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 @media (min-width: 768px) and (pointer: fine) {
   .mobile-keypad { display: none !important; }
 }
-.mobile-keypad button.chip {
+.keypad-row {
+  display: grid;
+  gap: 4px;
+}
+.keypad-row.row-1, .keypad-row.row-2, .keypad-row.row-3 {
+  grid-template-columns: repeat(10, 1fr);
+}
+.keypad-row.row-4 {
+  grid-template-columns: 1fr 1fr 3fr 1fr 1fr 1fr 1fr 1fr 1fr;
+}
+.mobile-keypad button.key {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 1.25rem;
+  font-size: 1rem;
   line-height: 1;
   padding: 0;
-  min-height: 2.75rem;
+  min-height: 2.5rem;
   background: #21262d;
   color: #c9d1d9;
   border: 1px solid #30363d;
@@ -165,24 +181,20 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   align-items: center;
   justify-content: center;
   text-align: center;
-  /* §Mobile-input: FF Mobile falls back to a different font for some
-     Unicode arrow glyphs (notably U+2191 ↑) than for the others,
-     rendering the up arrow at a smaller size than ↓←→. Forcing
-     `text` presentation avoids the emoji-font path; flex centering
-     + larger font-size keeps the glyph visually consistent across
-     rows that the Ctrl pill is stretching. */
-  font-variant-emoji: text;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
-.mobile-keypad button.chip:active { background: #30363d; }
-.mobile-keypad button.chip.ctrl-pill {
-  grid-row: span 3;
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
-  background: #4c1d95;
-  border-color: #6d28d9;
-  color: #ede9fe;
+.mobile-keypad button.key:active { background: #30363d; }
+.mobile-keypad button.key.key-mod {
+  background: #30363d;
+  font-size: .85rem;
 }
-.mobile-keypad button.chip.ctrl-pill.active {
+.mobile-keypad button.key.key-space {
+  font-size: .85rem;
+  color: #8b949e;
+}
+.mobile-keypad button.key.active {
   background: #fbbf24;
   border-color: #f59e0b;
   color: #1f2937;
@@ -234,28 +246,71 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     <div id="term"></div>
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its terminal</div>
   </div>
-  {# §Mobile-input: chip palette for keys the soft keyboard can't
-     produce. Hidden on desktop via the explicit `@media (min-width:
-     768px)` rule in the .mobile-keypad CSS (no `d-md-none` here —
-     it was winning over the position:fixed media query on FF Mobile).
-     Viewer-mode hidden by `body.viewer-mode .mobile-keypad` above.
-     The Ctrl pill is a one-shot chord modifier — toggle on, the next
-     letter typed on the soft keyboard is sent as Ctrl+letter via the
-     typed `SendKey` envelope (wire.rs::EnvelopeBody::SendKey). #}
+  {# §Mobile-input: full custom mobile keyboard for terminal input.
+     Replaces the previous 12-chip palette plus Ctrl pill — every
+     printable and control key the user needs is on this keyboard, so
+     the soft keyboard can stay closed. Hidden on desktop via the
+     `@media (min-width: 768px) and (pointer: fine)` rule in the
+     .mobile-keypad CSS; FF Mobile in desktop mode (touch + ~980px
+     spoofed viewport) still sees it because `pointer: coarse`
+     matches. Viewer-mode hidden by `body.viewer-mode .mobile-keypad`
+     above. Key labels are plain text — no Unicode arrows (FF Mobile
+     renders U+2191 at a smaller size than ↓←→ and the prior palette
+     was unusable on touch). Modifier state (Shift = sticky toggle,
+     Ctrl / Alt = one-shot chord for the next letter) lives in JS; the
+     active modifier key gets the `.active` class. Every key writes
+     raw bytes via the existing `<chan:1><data>` binary-frame path
+     that `term.onData` already uses (rabbit_lib::server::handle::
+     send_terminal_bytes → Command::SendKeys FIFO), so the server
+     side stays unchanged. #}
   <div class="mobile-keypad" id="mobile-keypad">
-    <button class="chip" type="button" data-key="tab">Tab</button>
-    <button class="chip" type="button" data-key="escape">Esc</button>
-    <button class="chip" type="button" data-key="enter">Enter</button>
-    <button class="chip" type="button" data-key="delete">Del</button>
-    <button class="chip" type="button" data-key="arrow_up">↑</button>
-    <button class="chip" type="button" data-key="arrow_down">↓</button>
-    <button class="chip" type="button" data-key="arrow_left">←</button>
-    <button class="chip" type="button" data-key="arrow_right">→</button>
-    <button class="chip" type="button" data-key="home">Home</button>
-    <button class="chip" type="button" data-key="end">End</button>
-    <button class="chip" type="button" data-key="page_up">PgUp</button>
-    <button class="chip" type="button" data-key="page_down">PgDn</button>
-    <button class="chip ctrl-pill" type="button" id="mobile-ctrl-pill">Ctrl</button>
+    <div class="keypad-row row-1">
+      <button class="key" type="button" data-action="q">q</button>
+      <button class="key" type="button" data-action="w">w</button>
+      <button class="key" type="button" data-action="e">e</button>
+      <button class="key" type="button" data-action="r">r</button>
+      <button class="key" type="button" data-action="t">t</button>
+      <button class="key" type="button" data-action="y">y</button>
+      <button class="key" type="button" data-action="u">u</button>
+      <button class="key" type="button" data-action="i">i</button>
+      <button class="key" type="button" data-action="o">o</button>
+      <button class="key" type="button" data-action="p">p</button>
+    </div>
+    <div class="keypad-row row-2">
+      <button class="key" type="button" data-action="a">a</button>
+      <button class="key" type="button" data-action="s">s</button>
+      <button class="key" type="button" data-action="d">d</button>
+      <button class="key" type="button" data-action="f">f</button>
+      <button class="key" type="button" data-action="g">g</button>
+      <button class="key" type="button" data-action="h">h</button>
+      <button class="key" type="button" data-action="j">j</button>
+      <button class="key" type="button" data-action="k">k</button>
+      <button class="key" type="button" data-action="l">l</button>
+      <button class="key" type="button" data-action="Bksp">Bksp</button>
+    </div>
+    <div class="keypad-row row-3">
+      <button class="key key-mod" type="button" data-action="Shift" id="mobile-shift">Shift</button>
+      <button class="key" type="button" data-action="z">z</button>
+      <button class="key" type="button" data-action="x">x</button>
+      <button class="key" type="button" data-action="c">c</button>
+      <button class="key" type="button" data-action="v">v</button>
+      <button class="key" type="button" data-action="b">b</button>
+      <button class="key" type="button" data-action="n">n</button>
+      <button class="key" type="button" data-action="m">m</button>
+      <button class="key" type="button" data-action=".">.</button>
+      <button class="key key-mod" type="button" data-action="Enter" id="mobile-enter">Enter</button>
+    </div>
+    <div class="keypad-row row-4">
+      <button class="key key-mod" type="button" data-action="Ctrl" id="mobile-ctrl">Ctrl</button>
+      <button class="key key-mod" type="button" data-action="Alt" id="mobile-alt">Alt</button>
+      <button class="key key-space" type="button" data-action=" ">Space</button>
+      <button class="key" type="button" data-action="Tab">Tab</button>
+      <button class="key" type="button" data-action="Esc">Esc</button>
+      <button class="key" type="button" data-action="Left" aria-label="arrow left">Lft</button>
+      <button class="key" type="button" data-action="Right" aria-label="arrow right">Rgt</button>
+      <button class="key" type="button" data-action="Up" aria-label="arrow up">Up</button>
+      <button class="key" type="button" data-action="Down" aria-label="arrow down">Dn</button>
+    </div>
   </div>
   <div id="prompt-rejected-banner" role="status" aria-live="polite"></div>
 <div id="viewer-mode-banner" role="status" aria-live="polite">
@@ -621,85 +676,143 @@ term.onData(data => {
   // The server drops them, but skipping the send saves a round trip and
   // means a misconfigured proxy can't log viewer keystrokes.
   if (viewerMode) return;
-  // §Mobile-input: when the Ctrl chord pill is armed, the next letter
-  // typed on the soft keyboard is converted to Ctrl+letter and sent
-  // as a single control-character byte (a→1, b→2, ..., o→15, z→26
-  // via `ch & 0x1f`). The PTY line discipline interprets that byte
-  // as the actual Ctrl+letter (e.g. 0x0f = SI = Ctrl+O). Single-shot
-  // — the pill disarms after one translation. Ctrl+non-letter is a
-  // no-op (we send the raw byte through unchanged).
-  if (mobileCtrlArmed && data.length === 1) {
-    const ch = data.charCodeAt(0);
-    if (ch >= 0x61 && ch <= 0x7a) {
-      const buf = new Uint8Array(2);
-      buf[0] = 0x01;        // Claude channel byte (server strips)
-      buf[1] = ch & 0x1f;   // Ctrl+letter as a single control char
-      ws.send(buf);
-      mobileCtrlArmed = false;
-      syncCtrlPill();
-      return;
-    }
-  }
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
   ws.send(buf);
 });
 
-// §Mobile-input: typed SendKey envelopes for chip presses. Wire shape
-// matches rabbit_lib::wire::EnvelopeBody::SendKey / Key. Server-side
-// handler (ws_browser.rs::forward_browser_message) translates the typed
-// Key into terminal bytes and ships them to the Claude PTY through the
-// same Command::SendKeys FIFO used by term.onData.
-let mobileCtrlArmed = false;
-const ctrlPill = document.getElementById('mobile-ctrl-pill');
-function syncCtrlPill() {
-  if (!ctrlPill) return;
-  ctrlPill.classList.toggle('active', mobileCtrlArmed);
+// §Mobile-input: custom mobile keyboard (replaces the previous 12-chip
+// palette plus Ctrl pill). Every key tap sends raw bytes through the
+// same `<chan:1><data>` binary-frame path that `term.onData` already
+// uses — the server-side `ws_browser` handler strips the channel byte
+// (TERM_CHAN_CLAUDE = 0x01) and feeds the rest to
+// `handle::send_terminal_bytes`, which pushes it onto the actor's
+// `Command::SendKeys` FIFO. So the server side is unchanged; only this
+// JS knows about modifier chords.
+//
+// Modifier state:
+//   shiftActive — sticky toggle (tap Shift → next-and-all-future
+//                 letters are uppercase; tap again to go back to
+//                 lowercase). Shift auto-disarms after a single
+//                 letter press too — toggles back to off, so most
+//                 typing flows naturally ("Shift + A" then "a"
+//                 reverts immediately).
+//   ctrlArmed   — one-shot chord modifier (tap Ctrl → next letter is
+//                 sent as a single control-character byte (a→0x01,
+//                 b→0x02, ..., z→0x1a), the same byte the soft
+//                 keyboard's Pill path used to send).
+//   altArmed    — same, but the next letter is sent as ESC + letter
+//                 (0x1b 0xNN), which is what readline/bash interpret
+//                 as Meta-letter (e.g. Alt+B = backward-word).
+//
+// mousedown.preventDefault on every key keeps focus on the xterm
+// helper textarea so the soft keyboard can be opened for ad-hoc
+// punctuation if a chord like Ctrl-/ isn't worth a custom button;
+// without it, tapping a button would steal focus and close the soft
+// keyboard on FF Mobile, which the prior palette also avoided.
+const MOBILE_CHAN = 0x01; // TERM_CHAN_CLAUDE — must match
+                          // rabbit_lib::wire::TERM_CHAN_CLAUDE.
+const KEY_BYTES = {
+  // Special keys (the rest fall through to a per-letter path).
+  'Bksp':  [0x7f],
+  'Enter': [0x0d],
+  'Tab':   [0x09],
+  'Esc':   [0x1b],
+  ' ':     [0x20],
+  '.':     [0x2e],
+  // Standard arrow escape sequences (CSI). The caret moves the
+  // cursor inside readline / less / vim; same as ^[[A..^[[D.
+  'Up':    [0x1b, 0x5b, 0x41],
+  'Down':  [0x1b, 0x5b, 0x42],
+  'Right': [0x1b, 0x5b, 0x43],
+  'Left':  [0x1b, 0x5b, 0x44],
+};
+const keypad = document.getElementById('mobile-keypad');
+let shiftActive = false;
+let ctrlArmed = false;
+let altArmed = false;
+function sendBytes(bytes) {
+  if (!connected || !ws || viewerMode || !bytes || !bytes.length) return;
+  const buf = new Uint8Array(1 + bytes.length);
+  buf[0] = MOBILE_CHAN;
+  for (let i = 0; i < bytes.length; i++) buf[i + 1] = bytes[i] & 0xff;
+  ws.send(buf);
 }
-if (ctrlPill) {
-  // §Mobile-input: preventDefault on mousedown keeps focus on the
-  // xterm helper textarea, so the soft keyboard stays open after the
-  // pill is toggled. Without this, the button takes focus on tap and
-  // FF Mobile closes the keyboard.
-  ctrlPill.addEventListener('mousedown', e => e.preventDefault());
-  ctrlPill.addEventListener('click', () => {
-    if (viewerMode) return;
-    mobileCtrlArmed = !mobileCtrlArmed;
-    syncCtrlPill();
+function syncModUi() {
+  // The active class gives the modifier a colored state so the user
+  // can see whether pressing the next letter will chord (Ctrl/Alt) or
+  // shift-case (Shift). When both modifiers could fit on a single
+  // letter, Ctrl wins (more common chord).
+  document.getElementById('mobile-shift')?.classList.toggle('active', shiftActive);
+  document.getElementById('mobile-ctrl') ?.classList.toggle('active', ctrlArmed);
+  document.getElementById('mobile-alt')  ?.classList.toggle('active', altArmed);
+}
+function handleKeyAction(action) {
+  if (!action) return;
+  // Modifier keys: toggle state, no byte sent.
+  if (action === 'Shift') {
+    shiftActive = !shiftActive;
+    syncModUi();
+    return;
+  }
+  if (action === 'Ctrl') {
+    ctrlArmed = !ctrlArmed;
+    if (ctrlArmed) altArmed = false;
+    syncModUi();
+    return;
+  }
+  if (action === 'Alt') {
+    altArmed = !altArmed;
+    if (altArmed) ctrlArmed = false;
+    syncModUi();
+    return;
+  }
+  // Letter / punctuation: apply modifier(s) then send raw bytes.
+  if (action.length === 1) {
+    let c = action;
+    if (shiftActive) {
+      // Capitalize only when the char is a letter; shift+., shift+' '
+      // are no-ops via the unchanged byte.
+      const up = c.toUpperCase();
+      if (up !== c.toLowerCase()) c = up;
+    }
+    const code = c.charCodeAt(0);
+    if (ctrlArmed && c.toLowerCase() >= 'a' && c.toLowerCase() <= 'z') {
+      // Ctrl+letter as a single control-character byte. PTY line
+      // discipline delivers SIGINT-on-Ctrl-C, EOF-on-Ctrl-D, etc.
+      sendBytes([code & 0x1f]);
+      ctrlArmed = false;
+    } else if (altArmed && /[\x20-\x7e]/.test(c)) {
+      // Alt+letter as ESC + letter (readline Meta chords; bash ESC-B
+      // = backward-word, ESC-F = forward-word).
+      sendBytes([0x1b, code & 0xff]);
+      altArmed = false;
+    } else {
+      sendBytes([code & 0xff]);
+    }
+    if (shiftActive) shiftActive = false;
+    syncModUi();
+    return;
+  }
+  // Special keys.
+  const bytes = KEY_BYTES[action];
+  if (bytes) sendBytes(bytes);
+}
+if (keypad) {
+  keypad.querySelectorAll('button.key[data-action]').forEach(btn => {
+    // preventDefault on mousedown keeps focus on the xterm helper
+    // textarea so the soft keyboard stays in whatever state the user
+    // left it (the previous chip palette needed this trick too —
+    // without it, tapping a button steals focus and FF Mobile closes
+    // the keyboard).
+    btn.addEventListener('mousedown', e => e.preventDefault());
+    btn.addEventListener('click', () => {
+      if (viewerMode) return;
+      handleKeyAction(btn.dataset.action);
+    });
   });
 }
-function sendTypedKey(key) {
-  if (!connected || !ws || viewerMode) return;
-  // Wire shape: matches the Rust deserializer for
-  // `Envelope { v, seq, body: EnvelopeBody }` where `body` carries
-  // `#[serde(flatten)]` — so all EnvelopeBody fields appear at the
-  // top level of the envelope, NOT nested under a `body` key. The
-  // `t: "send_key"` discriminator lands alongside `v` and `seq`, and
-  // the `SendKey { key, modifiers }` struct's fields are flattened
-  // alongside `t`. The inner `Key` enum uses `#[serde(tag = "k",
-  // rename_all = "snake_case")]` so the variant name `arrow_up`
-  // (snake_case) lands under `k`. Confirmed by
-  // `wire.rs::tests::send_key_envelope_round_trips_through_wire_shape`.
-  const env = {
-    v: 2,
-    seq: 0,
-    t: 'send_key',
-    key: { k: key, modifiers: null },
-  };
-  ws.send(JSON.stringify(env));
-}
-document.querySelectorAll('#mobile-keypad button.chip[data-key]').forEach(btn => {
-  // §Mobile-input: preventDefault on mousedown keeps focus on the
-  // xterm helper textarea, so the soft keyboard stays open after a
-  // chip tap. Without this, the chip steals focus and FF Mobile
-  // closes the keyboard — the user has to retap the terminal to
-  // reopen it for every chip press.
-  btn.addEventListener('mousedown', e => e.preventDefault());
-  btn.addEventListener('click', () => {
-    sendTypedKey(btn.dataset.key);
-  });
-});
 
 // Envelope body shapes per rabbit_lib::wire::EnvelopeBody.
 function applyMeta(env) {
