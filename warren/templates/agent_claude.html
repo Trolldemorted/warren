@@ -153,14 +153,25 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 }
 .mobile-keypad button.chip {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 1.05rem;
+  font-size: 1.25rem;
   line-height: 1;
-  padding: .55rem 0;
-  min-height: 2.5rem;
+  padding: 0;
+  min-height: 2.75rem;
   background: #21262d;
   color: #c9d1d9;
   border: 1px solid #30363d;
   border-radius: .25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  /* §Mobile-input: FF Mobile falls back to a different font for some
+     Unicode arrow glyphs (notably U+2191 ↑) than for the others,
+     rendering the up arrow at a smaller size than ↓←→. Forcing
+     `text` presentation avoids the emoji-font path; flex centering
+     + larger font-size keeps the glyph visually consistent across
+     rows that the Ctrl pill is stretching. */
+  font-variant-emoji: text;
 }
 .mobile-keypad button.chip:active { background: #30363d; }
 .mobile-keypad button.chip.ctrl-pill {
