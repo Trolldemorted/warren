@@ -120,8 +120,10 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 }
 .mobile-keypad button.chip {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: .95rem;
-  padding: .45rem 0;
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: .55rem 0;
+  min-height: 2.5rem;
   background: #21262d;
   color: #c9d1d9;
   border: 1px solid #30363d;
@@ -305,10 +307,16 @@ if (ctrlPill) {
 }
 function sendTypedKey(key) {
   if (!connected || !ws || viewerMode) return;
+  // Wire shape: matches the Rust serializer for
+  // `EnvelopeBody::SendKey(SendKey { key: Key, .. })`. The outer
+  // field is `key` (SendKey's field, flattened alongside `t`), the
+  // inner discriminator is `k` (Key enum's tag, snake_case
+  // variant names). Confirmed by
+  // `wire.rs::tests::send_key_envelope_round_trips_through_wire_shape`.
   const env = {
     v: 2,
     seq: 0,
-    body: { t: 'send_key', k: { key: key, modifiers: null } },
+    body: { t: 'send_key', key: { k: key, modifiers: null } },
   };
   ws.send(JSON.stringify(env));
 }
