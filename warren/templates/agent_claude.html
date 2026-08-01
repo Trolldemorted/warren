@@ -660,19 +660,21 @@ if (ctrlPill) {
 }
 function sendTypedKey(key) {
   if (!connected || !ws || viewerMode) return;
-  // Wire shape: matches the Rust serializer for
-  // `EnvelopeBody::SendKey(SendKey { key: Key, .. })`.
-  //   - The `SendKey` newtype variant flattens the inner struct's
-  //     fields alongside the `t: "send_key"` discriminator, so the
-  //     outer field is named `key` (not `k`).
-  //   - The inner `Key` enum has `#[serde(tag = "k", rename_all =
-  //     "snake_case")]` so the variant discriminator is `k`
-  //     (not `key`).
-  // Confirmed by `wire.rs::tests::send_key_envelope_round_trips_through_wire_shape`.
+  // Wire shape: matches the Rust deserializer for
+  // `Envelope { v, seq, body: EnvelopeBody }` where `body` carries
+  // `#[serde(flatten)]` — so all EnvelopeBody fields appear at the
+  // top level of the envelope, NOT nested under a `body` key. The
+  // `t: "send_key"` discriminator lands alongside `v` and `seq`, and
+  // the `SendKey { key, modifiers }` struct's fields are flattened
+  // alongside `t`. The inner `Key` enum uses `#[serde(tag = "k",
+  // rename_all = "snake_case")]` so the variant name `arrow_up`
+  // (snake_case) lands under `k`. Confirmed by
+  // `wire.rs::tests::send_key_envelope_round_trips_through_wire_shape`.
   const env = {
     v: 2,
     seq: 0,
-    body: { t: 'send_key', key: { k: key, modifiers: null } },
+    t: 'send_key',
+    key: { k: key, modifiers: null },
   };
   ws.send(JSON.stringify(env));
 }
