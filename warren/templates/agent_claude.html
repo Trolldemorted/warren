@@ -115,10 +115,13 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 }
 
 /* §Mobile-input: chip palette for terminal keys the soft keyboard
-   can't produce (Tab, Esc, arrows, navigation, etc.). Bootstrap's
-   `d-md-none` keeps the strip hidden ≥768px so desktop users never see
-   it; viewer-mode (above) hides it unconditionally as a defense in
-   depth — a viewer must not be able to type into a peer's terminal. */
+   can't produce (Tab, Esc, arrows, navigation, etc.). Always pinned
+   to the bottom of the viewport (position: fixed) and hidden only on
+   desktop with a fine pointer (mouse) — `pointer: coarse` keeps the
+   keypad visible on FF Mobile in desktop mode, where the viewport is
+   spoofed to ~980px and `max-width: 767.98px` never matches.
+   Viewer-mode (above) hides it unconditionally as a defense in depth
+   — a viewer must not be able to type into a peer's terminal. */
 .mobile-keypad {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
@@ -127,6 +130,14 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   margin-bottom: 4px;
   background: #161b22;
   border-radius: .375rem;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+}
+@media (min-width: 768px) and (pointer: fine) {
+  .mobile-keypad { display: none !important; }
 }
 .mobile-keypad button.chip {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -152,21 +163,13 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   color: #1f2937;
 }
 
-/* §Mobile-input: on narrow viewports the keypad is fixed to the
-   bottom of the viewport so it's always reachable above the soft
-   keyboard, and the grid collapses to a single column so the aside
-   no longer steals 18rem of width. Desktop layout is unaffected
-   (the keypad stays hidden via d-md-none). */
+/* §Mobile-input: collapse the claude-grid to a single column on
+   narrow viewports so the aside no longer steals 18rem of width.
+   The keypad's position:fixed is unconditional now (above), so this
+   rule only handles the grid layout. */
 @media (max-width: 767.98px) {
-  .mobile-keypad {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 50;
-    border-radius: 0;
-  }
   .claude-grid { grid-template-columns: minmax(0, 1fr); }
+  .mobile-keypad { border-radius: 0; }
 }
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -207,12 +210,14 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id to see its terminal</div>
   </div>
   {# §Mobile-input: chip palette for keys the soft keyboard can't
-     produce. Hidden on desktop (d-md-none) and in viewer-mode
-     (body.viewer-mode .mobile-keypad above). The Ctrl pill on the
-     right is a one-shot chord modifier — toggle on, the next letter
-     typed on the soft keyboard is sent as Ctrl+letter via the typed
-     `SendKey` envelope (wire.rs::EnvelopeBody::SendKey). #}
-  <div class="mobile-keypad d-md-none" id="mobile-keypad">
+     produce. Hidden on desktop via the explicit `@media (min-width:
+     768px)` rule in the .mobile-keypad CSS (no `d-md-none` here —
+     it was winning over the position:fixed media query on FF Mobile).
+     Viewer-mode hidden by `body.viewer-mode .mobile-keypad` above.
+     The Ctrl pill is a one-shot chord modifier — toggle on, the next
+     letter typed on the soft keyboard is sent as Ctrl+letter via the
+     typed `SendKey` envelope (wire.rs::EnvelopeBody::SendKey). #}
+  <div class="mobile-keypad" id="mobile-keypad">
     <button class="chip" type="button" data-key="tab">Tab</button>
     <button class="chip" type="button" data-key="escape">Esc</button>
     <button class="chip" type="button" data-key="enter">Enter</button>
