@@ -9,7 +9,15 @@ use uuid::Uuid;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 const USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-const OBSERVATION_HARD_DEADLINE: Duration = Duration::from_secs(300);
+/// §Observation-deadline: how long the per-run observer waits for a
+/// `StopHook`/`NeedsInput`/`Dead` envelope before finalizing the run
+/// as `observation_deadline` (line 727). Picked at 1 h so a long,
+/// legitimate Claude turn (multi-step agentic work, large-file
+/// reads, network-bound tool calls) doesn't get prematurely swept
+/// while the agent is still genuinely running. The observer only
+/// finalizes-with-no-status in the absence of any signal — a
+/// `StopHook` arriving 59 min in still closes the run cleanly.
+const OBSERVATION_HARD_DEADLINE: Duration = Duration::from_secs(3600);
 /// After this many seconds without a `StopHook`/`NeedsInput`, the periodic
 /// sweep presumes the run is lost and finalizes it as `'warren_restart'`.
 /// Picked to comfortably exceed the longest realistic Claude turn so
