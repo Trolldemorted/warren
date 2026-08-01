@@ -281,15 +281,39 @@ pub async fn fire_prompt(
         match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT).await {
             Some(t) => t,
             None => {
-                skip(
-                    &state,
-                    &prompt,
-                    "skipped_unsafe_scrape",
-                    (None, None, None),
-                    now,
-                )
-                .await?;
-                return Ok(());
+                // §No-threshold fast-path: if neither the weekly nor
+                // the session safety buffer is non-zero, the schedule
+                // has no real usage gate to enforce — a missing
+                // (timeout / failed / no-agent) scrape shouldn't block
+                // the fire. The downstream buffer checks are both
+                // `if let Some(_) = ...` so a None here can't trip
+                // them anyway; the optional `context_clear_threshold`
+                // is best-effort per its own comment and the `/clear`
+                // would just no-op without ctx_used_tokens. We log at
+                // debug (not info) so this expected path doesn't
+                // spam logs; an operator who wants visibility can run
+                // /context and /usage directly.
+                if !missing_scrape_blocks_prompt(
+                    prompt.weekly_safety_buffer_pct,
+                    prompt.session_safety_buffer_pct,
+                ) {
+                    log::debug!(
+                        "scheduler: usage scrape returned no data for prompt={} \
+                         (no weekly/session threshold set); firing anyway",
+                        prompt.id
+                    );
+                    (None, None, None, None)
+                } else {
+                    skip(
+                        &state,
+                        &prompt,
+                        "skipped_unsafe_scrape",
+                        (None, None, None),
+                        now,
+                    )
+                    .await?;
+                    return Ok(());
+                }
             }
         };
     let weekly_i = weekly_pct.map(|x| x.round() as i32);
@@ -725,6 +749,23 @@ async fn observe(
     }
 }
 
+/// Pure predicate: does a missing usage scrape (timeout, no envelope,
+/// disconnected rabbit) need to *block* a schedule's fire? True when
+/// at least one usage threshold is configured — because then the
+/// schedule depends on the scrape result to enforce a budget. False
+/// when no threshold is set — the schedule is allowed to fire
+/// regardless; the downstream buffer checks are both `if let Some(_)
+/// = pct`, so a None from a successful scrape wouldn't have tripped
+/// them anyway. The optional `context_clear_threshold_tokens` is
+/// best-effort per its own comment and would just no-op without
+/// `ctx_used_tokens`, so it's intentionally not considered here.
+fn missing_scrape_blocks_prompt(
+    weekly_safety_buffer_pct: i32,
+    session_safety_buffer_pct: i32,
+) -> bool {
+    weekly_safety_buffer_pct > 0 || session_safety_buffer_pct > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,6 +928,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn missing_scrape_blocks_prompt_no_threshold_does_not_block() {
+        // No thresholds set — defaults from `scheduled_prompt::Model`
+        // (`default_value = "0"` for both). A failed /usage scrape
+        // (rabbit disconnected, modal didn't paint, 5s timeout) must
+        // NOT prevent the schedule from firing.
+        assert!(!missing_scrape_blocks_prompt(0, 0));
+    }
+
+    #[test]
+    fn missing_scrape_blocks_prompt_weekly_only_blocks() {
+        // Operator configured only a weekly buffer — the schedule
+        // depends on the scrape to enforce the budget, so a missing
+        // scrape (which can't tell us whether we're under the
+        // threshold) must still block.
+        assert!(missing_scrape_blocks_prompt(10, 0));
+    }
+
+    #[test]
+    fn missing_scrape_blocks_prompt_session_only_blocks() {
+        assert!(missing_scrape_blocks_prompt(0, 5));
+    }
+
+    #[test]
+    fn missing_scrape_blocks_prompt_both_thresholds_block() {
+        assert!(missing_scrape_blocks_prompt(20, 10));
+    }
+
+    #[test]
+    fn missing_scrape_blocks_prompt_ignores_context_clear_threshold() {
+        // The context_clear_threshold is best-effort (auto-clear,
+        // not a gate). Missing scrape → ctx_used_tokens is None →
+        // auto-clear no-ops; the schedule should still fire. So the
+        // predicate intentionally ignores that field.
+        assert!(!missing_scrape_blocks_prompt(0, 0));
+    }
+
+    /// Spin up a minimal `AppState` against the test database.
     /// Spin up a minimal `AppState` against the test database.
     /// Returns `None` if `DATABASE_URL` isn't set or the DB is
     /// unreachable, so this test silently no-ops in environments
