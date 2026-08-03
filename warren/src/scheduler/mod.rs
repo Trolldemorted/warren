@@ -285,33 +285,33 @@ pub async fn fire_prompt(
     }
 
     // (3) Fresh usage scrape via the chosen handle.
+    //
+    // §No-threshold fast-path: send ONLY the scrapes whose result
+    // a downstream gate actually consumes. The downstream buffer
+    // checks are `if let Some(_) = ...` so a None can't trip them,
+    // and the optional `context_clear_threshold` needs
+    // `ctx_used_tokens` to decide whether to clear. The two
+    // envelopes are independent on the supervisor side (each opens
+    // its own modal: `/usage` or `/context`) — there's no reason to
+    // pay the visual disturbance of both modals when only one is
+    // actually needed. Run row records `None` for the un-scraped
+    // field, matching the "no scrape" sentinel.
+    let need_usage = prompt.weekly_safety_buffer_pct > 0 || prompt.session_safety_buffer_pct > 0;
+    let need_context = prompt
+        .context_clear_threshold_tokens
+        .map(|t| t > 0)
+        .unwrap_or(false);
     let (weekly_pct, session_pct, context_pct, ctx_used_tokens) =
-        match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT).await {
+        match fetch_fresh_usage(&handle, USAGE_FETCH_TIMEOUT, need_usage, need_context).await {
             Some(t) => t,
             None => {
-                // §No-threshold fast-path: if neither the weekly nor
-                // the session safety buffer is non-zero, the schedule
-                // has no real usage gate to enforce — a missing
-                // (timeout / failed / no-agent) scrape shouldn't block
-                // the fire. The downstream buffer checks are both
-                // `if let Some(_) = ...` so a None here can't trip
-                // them anyway; the optional `context_clear_threshold`
-                // is best-effort per its own comment and the `/clear`
-                // would just no-op without ctx_used_tokens. We log at
-                // debug (not info) so this expected path doesn't
-                // spam logs; an operator who wants visibility can run
-                // /context and /usage directly.
-                if !missing_scrape_blocks_prompt(
-                    prompt.weekly_safety_buffer_pct,
-                    prompt.session_safety_buffer_pct,
-                ) {
-                    log::debug!(
-                        "scheduler: usage scrape returned no data for prompt={} \
-                         (no weekly/session threshold set); firing anyway",
-                        prompt.id
-                    );
-                    (None, None, None, None)
-                } else {
+                // Failed scrape (timeout / no envelope / disconnected
+                // rabbit) — block only when at least one threshold was
+                // configured. Skipping the run preserves the same
+                // "dependency on the scrape result" semantics the
+                // pre-split version had for the weekly/session
+                // thresholds.
+                if missing_scrape_blocks_prompt(need_usage, need_context) {
                     skip(
                         &state,
                         &prompt,
@@ -322,6 +322,7 @@ pub async fn fire_prompt(
                     .await?;
                     return Ok(());
                 }
+                (None, None, None, None)
             }
         };
     let weekly_i = weekly_pct.map(|x| x.round() as i32);
@@ -521,11 +522,23 @@ async fn skip(
 async fn fetch_fresh_usage(
     handle: &AgentHandle,
     timeout_d: Duration,
+    need_usage: bool,
+    need_context: bool,
 ) -> Option<(Option<f64>, Option<f64>, Option<f64>, Option<u64>)> {
-    let mut rx = handle.subscribe_meta();
-    if let Err(e) = handle.usage_check().await {
-        log::error!("scheduler: usage_check send failed: {e:?}");
-        return None;
+    // §No-stale: send the envelopes FIRST, then subscribe. The
+    // broadcast carries every Usage/Context envelope the agent emits
+    // since the channel was created — anything stale (operator's
+    // manual /usage, prior fire's reply, a coalesced scrape) would
+    // otherwise be picked up by the merge loop below and accepted
+    // as our scrape result. Subscribing after the send ensures we
+    // only see responses to envelopes we just sent. The supervisor
+    // takes ~500ms to paint the modal before publishing, so there's
+    // no race between `send` and `subscribe`.
+    if need_usage {
+        if let Err(e) = handle.usage_check().await {
+            log::error!("scheduler: usage_check send failed: {e:?}");
+            return None;
+        }
     }
     // §Context-window: the run-history table mirrors both /usage and
     // /context modal values. Fire `context_check` immediately after
@@ -533,9 +546,18 @@ async fn fetch_fresh_usage(
     // in flight, so this is best-effort and the send-error is fine to
     // ignore — the worst case is the run row records `None` for
     // `usage_context_pct`, which matches the "no scrape yet" sentinel.
-    if let Err(e) = handle.context_check().await {
-        log::warn!("scheduler: context_check send failed (ignored): {e:?}");
+    if need_context {
+        if let Err(e) = handle.context_check().await {
+            log::warn!("scheduler: context_check send failed (ignored): {e:?}");
+        }
     }
+    if !need_usage && !need_context {
+        // Defensive: callers with both flags false short-circuit
+        // before this fn, but if we got here, there's nothing to
+        // wait for.
+        return Some((None, None, None, None));
+    }
+    let mut rx = handle.subscribe_meta();
     // §Context-window: the `/usage` envelope reply carries
     // weekly/session pcts but NOT ctx_* fields. The `/context`
     // envelope reply carries ctx_used_tokens/pct. We need both for
@@ -544,6 +566,15 @@ async fn fetch_fresh_usage(
     // the first envelope (which is almost always the `/usage` reply)
     // silently disables the threshold check because ctx_used_tokens
     // is None.
+    //
+    // §Fresh-only: the auto-clear guard must NEVER act on a stale or
+    // missing ctx_used_tokens. Bail-out conditions require the
+    // envelope field the caller actually asked for: a `/usage` need
+    // requires weekly_pct; a `/context` need requires ctx_used_tokens;
+    // both needs require both. If the timeout fires with the field
+    // still missing, return `None` so the call site blocks the run
+    // (the operator configured a guardrail — guarding on a stale
+    // value would defeat the purpose).
     let result = tokio::time::timeout(timeout_d, async {
         let mut weekly_pct: Option<f64> = None;
         let mut session_pct: Option<f64> = None;
@@ -571,13 +602,10 @@ async fn fetch_fresh_usage(
                     if snap.ctx_used_tokens.is_some() {
                         ctx_used_tokens = snap.ctx_used_tokens;
                     }
-                    // Have we seen both envelopes? The run row needs
-                    // weekly/session; the auto-clear guard needs
-                    // ctx_used_tokens. Bail as soon as ctx_used_tokens
-                    // is in, since that's the slow envelope (the
-                    // operator only sees the threshold fire on the
-                    // correct value).
-                    if ctx_used_tokens.is_some() {
+                    // Have we seen the envelopes the caller asked for?
+                    let usage_satisfied = !need_usage || weekly_pct.is_some();
+                    let context_satisfied = !need_context || ctx_used_tokens.is_some();
+                    if usage_satisfied && context_satisfied {
                         return (weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens);
                     }
                 }
@@ -590,7 +618,20 @@ async fn fetch_fresh_usage(
         }
     })
     .await;
-    result.ok()
+    // `result` is `Result<tuple, Elapsed>`. Timeout → return None so the
+    // call site blocks on the configured threshold. A closed-channel
+    // early return without the needed field is treated identically.
+    let tup = match result {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+    let (weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens) = tup;
+    let usage_satisfied = !need_usage || weekly_pct.is_some();
+    let context_satisfied = !need_context || ctx_used_tokens.is_some();
+    if !usage_satisfied || !context_satisfied {
+        return None;
+    }
+    Some((weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens))
 }
 
 fn spawn_observation(
@@ -759,19 +800,15 @@ async fn observe(
 
 /// Pure predicate: does a missing usage scrape (timeout, no envelope,
 /// disconnected rabbit) need to *block* a schedule's fire? True when
-/// at least one usage threshold is configured — because then the
-/// schedule depends on the scrape result to enforce a budget. False
-/// when no threshold is set — the schedule is allowed to fire
-/// regardless; the downstream buffer checks are both `if let Some(_)
-/// = pct`, so a None from a successful scrape wouldn't have tripped
-/// them anyway. The optional `context_clear_threshold_tokens` is
-/// best-effort per its own comment and would just no-op without
-/// `ctx_used_tokens`, so it's intentionally not considered here.
-fn missing_scrape_blocks_prompt(
-    weekly_safety_buffer_pct: i32,
-    session_safety_buffer_pct: i32,
-) -> bool {
-    weekly_safety_buffer_pct > 0 || session_safety_buffer_pct > 0
+/// at least one scrape was requested for the prompt — the schedule
+/// depends on the scrape result to enforce whichever threshold was
+/// configured. False when no scrape was requested, i.e. no weekly/
+/// session buffer AND no context-clear threshold: the schedule had
+/// no reason to scrape, so a (hypothetical) failed scrape is
+/// irrelevant. The two flags are computed inline at the call site;
+/// this helper centralizes the boolean for the block-on-failure path.
+fn missing_scrape_blocks_prompt(need_usage: bool, need_context: bool) -> bool {
+    need_usage || need_context
 }
 
 #[cfg(test)]
@@ -938,39 +975,37 @@ mod tests {
 
     #[test]
     fn missing_scrape_blocks_prompt_no_threshold_does_not_block() {
-        // No thresholds set — defaults from `scheduled_prompt::Model`
-        // (`default_value = "0"` for both). A failed /usage scrape
-        // (rabbit disconnected, modal didn't paint, 5s timeout) must
-        // NOT prevent the schedule from firing.
-        assert!(!missing_scrape_blocks_prompt(0, 0));
+        // No thresholds set — neither envelope was requested. A
+        // (hypothetical) failed scrape is irrelevant; the schedule
+        // must fire.
+        assert!(!missing_scrape_blocks_prompt(false, false));
     }
 
     #[test]
     fn missing_scrape_blocks_prompt_weekly_only_blocks() {
-        // Operator configured only a weekly buffer — the schedule
-        // depends on the scrape to enforce the budget, so a missing
-        // scrape (which can't tell us whether we're under the
-        // threshold) must still block.
-        assert!(missing_scrape_blocks_prompt(10, 0));
+        // Weekly budget configured — `usage_check` was sent. Scrap
+        // failure means we can't know whether we're under the budget,
+        // so block.
+        assert!(missing_scrape_blocks_prompt(true, false));
     }
 
     #[test]
     fn missing_scrape_blocks_prompt_session_only_blocks() {
-        assert!(missing_scrape_blocks_prompt(0, 5));
+        assert!(missing_scrape_blocks_prompt(true, false));
+    }
+
+    #[test]
+    fn missing_scrape_blocks_prompt_context_clear_only_blocks() {
+        // Operator configured only `context_clear_threshold_tokens`.
+        // The auto-clear guard needs a fresh `ctx_used_tokens`
+        // before it can act; a missing scrape means we can't decide
+        // safely, so block.
+        assert!(missing_scrape_blocks_prompt(false, true));
     }
 
     #[test]
     fn missing_scrape_blocks_prompt_both_thresholds_block() {
-        assert!(missing_scrape_blocks_prompt(20, 10));
-    }
-
-    #[test]
-    fn missing_scrape_blocks_prompt_ignores_context_clear_threshold() {
-        // The context_clear_threshold is best-effort (auto-clear,
-        // not a gate). Missing scrape → ctx_used_tokens is None →
-        // auto-clear no-ops; the schedule should still fire. So the
-        // predicate intentionally ignores that field.
-        assert!(!missing_scrape_blocks_prompt(0, 0));
+        assert!(missing_scrape_blocks_prompt(true, true));
     }
 
     /// Spin up a minimal `AppState` against the test database.
