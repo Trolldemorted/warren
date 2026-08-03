@@ -208,6 +208,30 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   .claude-grid { grid-template-columns: minmax(0, 1fr); }
   .mobile-keypad { border-radius: 0; }
 }
+
+/* §Mobile-input: layout calibration for the custom keyboard. The
+   keypad is `position: fixed; bottom: 0` and overlays the bottom of
+   the viewport. Without explicit height on .claude-grid, the xterm
+   area sizes to its content (40 × 13 px = ~520 px) and the body
+   scrolls — leaving the keyboard visually far below the input
+   cursor. Pin the body to viewport height (no scroll), and give
+   .claude-grid the exact remaining height so the input cursor
+   (wherever the xterm scrollback puts it) is the last visible row
+   before the keyboard. The `13.5rem` constant is the visible height
+   of our 4-row keypad (4 × 2.5rem min-height + 4px padding × 2 + a
+   little slack for tap-target rounding); tuned to match the shell
+   template's prior `9rem` + extra rows for the new layout. */
+@media (max-width: 767.98px), (pointer: coarse) {
+  html, body { height: 100%; overflow: hidden; }
+  body { padding-top: 4.5rem; }
+  /* The 4.5rem navbar lives at top of body; the keypad is fixed at
+     bottom. Remaining space = full viewport - both. */
+  .claude-grid {
+    grid-template-columns: minmax(0, 1fr);
+    height: calc(100vh - 4.5rem - 13.5rem);
+  }
+  .claude-grid .term-wrap { overflow: auto; }
+}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>
@@ -452,6 +476,39 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
 term.focus();
+
+// §Mobile-input: kill the soft keyboard. xterm.js focuses its helper
+// textarea on click — that focus is what summons the Android/iOS
+// soft keyboard, which then overlays the page, triggers FF Mobile's
+// viewport auto-zoom, and pushes the custom keyboard into the
+// middle of the visible area. On touch devices the custom keyboard
+// handles all input via the existing `<chan:1><data>` binary-frame
+// path, so we don't need the helper textarea to *hold* focus —
+// intercepting the focus event in capture phase and immediately
+// blurring keeps the OS keyboard closed while still letting xterm
+// process clicks for selection. Guarded on `pointer: coarse` so
+// desktop mouse-clicks retain the normal behavior.
+(function killSoftKb() {
+  const isTouch = window.matchMedia('(pointer: coarse)').matches;
+  if (!isTouch) return;
+  const ta = term.element && term.element.querySelector('.xterm-helper-textarea');
+  if (!ta) return;
+  // inputmode='none' tells the browser not to surface a keyboard
+  // even if focus lands. Belt-and-braces alongside the focus-blur
+  // listener below.
+  ta.setAttribute('inputmode', 'none');
+  ta.setAttribute('autocomplete', 'off');
+  ta.setAttribute('autocapitalize', 'off');
+  // Capture-phase so we run before any other listener (including
+  // xterm's own), and use a microtask blur so the focus has a
+  // chance to land before we clear it — some browsers suppress a
+  // synchronous blur() during a focus handler.
+  ta.addEventListener('focus', e => {
+    queueMicrotask(() => {
+      if (e.target === document.activeElement) e.target.blur();
+    });
+  }, true);
+})();
 
 // §A.7 / seq-numbered snapshot protocol — buffer that holds live binary
 // frames between WS open and the first `screen_snapshot` apply, so the

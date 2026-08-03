@@ -164,11 +164,20 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    for the fixed keypad. The keypad's position:fixed is unconditional
    now (above), so this rule only handles layout. Matches narrow
    viewports OR coarse pointer (touch) — the latter covers FF Mobile
-   in desktop mode where the viewport is spoofed to ~980px. */
+   in desktop mode where the viewport is spoofed to ~980px. The
+   `13.5rem` is the visible height of the 4-row keypad (4 × 2.5rem
+   min-height + 4px padding × 2) — bumped from the prior `9rem`
+   because the new full keyboard is taller than the old chip
+   palette. Also pins body to viewport height (no scrolling) so the
+   input cursor (wherever xterm scrollback puts it) is the last
+   visible row before the keyboard — without this, the body
+   extends past the viewport and the keyboard sits in the middle. */
 @media (max-width: 767.98px), (pointer: coarse) {
+  html, body { height: 100%; overflow: hidden; }
+  body { padding-top: 4.5rem; }
   .shell-grid {
     grid-template-columns: minmax(0, 1fr);
-    height: calc(100vh - 4.5rem - 9rem);
+    height: calc(100vh - 4.5rem - 13.5rem);
   }
   .mobile-keypad { border-radius: 0; }
 }
@@ -277,6 +286,33 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   scrollback: 5000,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
+
+// §Mobile-input: kill the soft keyboard on touch devices.
+// xterm.js focuses its helper textarea on click — that focus is what
+// summons the Android/iOS soft keyboard, which then overlays the
+// page, triggers FF Mobile's viewport auto-zoom, and pushes the
+// custom keyboard into the middle of the visible area. On touch
+// devices the custom keyboard handles all input via the existing
+// `<chan:1><data>` binary-frame path, so we don't need the helper
+// textarea to *hold* focus — intercepting the focus event in
+// capture phase and immediately blurring keeps the OS keyboard
+// closed while still letting xterm process clicks for selection.
+// Guarded on `pointer: coarse` so desktop mouse-clicks retain the
+// normal behavior. Mirrors the same hook on agent_claude.html.
+(function killSoftKb() {
+  const isTouch = window.matchMedia('(pointer: coarse)').matches;
+  if (!isTouch) return;
+  const ta = document.querySelector('.shell-grid .xterm-helper-textarea');
+  if (!ta) return;
+  ta.setAttribute('inputmode', 'none');
+  ta.setAttribute('autocomplete', 'off');
+  ta.setAttribute('autocapitalize', 'off');
+  ta.addEventListener('focus', e => {
+    queueMicrotask(() => {
+      if (e.target === document.activeElement) e.target.blur();
+    });
+  }, true);
+})();
 // §A.6 / FF-mobile scroll guard. Mirror the focus path on
 // agent_claude.html: focus the helper textarea directly with
 // `preventScroll: true` so the soft keyboard opening doesn't scroll
