@@ -171,17 +171,30 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    palette. Also pins body to viewport height (no scrolling) so the
    input cursor (wherever xterm scrollback puts it) is the last
    visible row before the keyboard — without this, the body
-   extends past the viewport and the keyboard sits in the middle. */
+   extends past the viewport and the keyboard sits in the middle.
+   The `.agent-chrome` hide drops the h1 + Copy/Select button row
+   on mobile (the operator knows which agent they're on from the
+   URL; it's the same vertical space the terminal needs). Pin the
+   term-wrap to fill the remaining grid height so the keyboard
+   sits directly under the input cursor. */
 @media (max-width: 767.98px), (pointer: coarse) {
   html, body { height: 100%; overflow: hidden; }
   body { padding-top: 4.5rem; }
+  .agent-chrome { display: none; }
   .shell-grid {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     height: calc(100vh - 4.5rem - 13.5rem);
+    margin-top: 0;
+  }
+  .shell-grid .term-wrap {
+    height: 100%;
+    min-height: 0;
   }
   .mobile-keypad { border-radius: 0; }
 }
 </style>
+<div class="agent-chrome">
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">shell · {{ agent.name }}</h1>
   <a class="btn btn-sm btn-outline-secondary" href="/agent/{{ agent.id }}/claude" target="_blank" rel="noopener">→ claude</a>
@@ -190,6 +203,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   <button class="btn btn-sm btn-outline-secondary" id="copy-btn" type="button">Copy</button>
   <button class="btn btn-sm btn-outline-secondary" id="copy-selection-btn" type="button" disabled title="Copy selected text — Shift+drag to select">Copy selection</button>
   <span class="text-muted small" id="copy-status" aria-live="polite"></span>
+</div>
 </div>
 <div id="no-shell-warning" class="alert alert-warning py-2 px-3 small d-none" role="alert">
   No shell output yet. If a rabbit is connected, make sure it was started with <code>RABBIT_ENABLE_SHELL=1</code>.

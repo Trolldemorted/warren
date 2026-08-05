@@ -220,19 +220,38 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    before the keyboard. The `13.5rem` constant is the visible height
    of our 4-row keypad (4 × 2.5rem min-height + 4px padding × 2 + a
    little slack for tap-target rounding); tuned to match the shell
-   template's prior `9rem` + extra rows for the new layout. */
+   template's prior `9rem` + extra rows for the new layout.
+   The `.agent-chrome` rule hides the agent-name h1 + Copy/Select
+   buttons on mobile (the operator knows which agent they're on
+   from the URL; the agent-name + button row was eating ~6rem of
+   vertical space that should belong to the terminal). The
+   `aside` (Status / Usage / Context / Actions) is hidden on mobile
+   for the same reason — the dashboard at `/admin/agents` is the
+   place to monitor state, the mobile page is just for driving the
+   terminal. Without these hides the height-calc'd grid still
+   allocates the full slot, but the term-wrap inside only gets the
+   leftover ~2rem after the aside's ~50rem of content. */
 @media (max-width: 767.98px), (pointer: coarse) {
   html, body { height: 100%; overflow: hidden; }
   body { padding-top: 4.5rem; }
+  .agent-chrome { display: none; }
+  .claude-grid > aside { display: none; }
   /* The 4.5rem navbar lives at top of body; the keypad is fixed at
      bottom. Remaining space = full viewport - both. */
   .claude-grid {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     height: calc(100vh - 4.5rem - 13.5rem);
+    margin-top: 0;
   }
-  .claude-grid .term-wrap { overflow: auto; }
+  .claude-grid .term-wrap {
+    overflow: auto;
+    min-height: 0;
+    height: 100%;
+  }
 }
 </style>
+<div class="agent-chrome">
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">claude · {{ agent.name }}</h1>
   <a class="btn btn-sm btn-outline-secondary" href="/agent/{{ agent.id }}/shell" target="_blank" rel="noopener">→ shell</a>
@@ -264,6 +283,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 <div class="mb-2">
   <button class="btn btn-sm btn-outline-secondary" id="copy-btn" type="button">Copy</button>
   <button class="btn btn-sm btn-outline-secondary" id="copy-selection-btn" type="button" disabled title="Copy selected text — Shift+drag to select">Copy selection</button>
+</div>
 </div>
 <div class="claude-grid {% if !connected %}disconnected{% endif %}" id="claude-grid">
   <div class="term-wrap">
