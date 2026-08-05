@@ -161,10 +161,13 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   display: grid;
   gap: 4px;
 }
-.keypad-row.row-1, .keypad-row.row-2, .keypad-row.row-3 {
+.keypad-row.row-1,
+.keypad-row.row-2,
+.keypad-row.row-3,
+.keypad-row.row-4 {
   grid-template-columns: repeat(10, 1fr);
 }
-.keypad-row.row-4 {
+.keypad-row.row-5 {
   grid-template-columns: 1fr 1fr 3fr 1fr 1fr 1fr 1fr 1fr 1fr;
 }
 .mobile-keypad button.key {
@@ -217,10 +220,10 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    cursor. Pin the body to viewport height (no scroll), and give
    .claude-grid the exact remaining height so the input cursor
    (wherever the xterm scrollback puts it) is the last visible row
-   before the keyboard. The `13.5rem` constant is the visible height
-   of our 4-row keypad (4 × 2.5rem min-height + 4px padding × 2 + a
-   little slack for tap-target rounding); tuned to match the shell
-   template's prior `9rem` + extra rows for the new layout.
+   before the keyboard. The `15rem` constant is the visible height
+   of our 5-row keypad (5 × 2.5rem min-height + 4px padding × 2 +
+   4px gap × 4 + ~0.5rem slack for tap-target rounding); bumped
+   from the prior `13.5rem` when the digits row was added.
    The `.agent-chrome` rule hides the agent-name h1 + Copy/Select
    buttons on mobile (the operator knows which agent they're on
    from the URL; the agent-name + button row was eating ~6rem of
@@ -241,7 +244,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   .claude-grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
-    height: calc(100vh - 4.5rem - 13.5rem);
+    height: calc(100vh - 4.5rem - 15rem);
     margin-top: 0;
   }
   .claude-grid .term-wrap {
@@ -309,6 +312,18 @@ body.viewer-mode #viewer-mode-banner { display: block; }
      side stays unchanged. #}
   <div class="mobile-keypad" id="mobile-keypad">
     <div class="keypad-row row-1">
+      <button class="key" type="button" data-action="1">1</button>
+      <button class="key" type="button" data-action="2">2</button>
+      <button class="key" type="button" data-action="3">3</button>
+      <button class="key" type="button" data-action="4">4</button>
+      <button class="key" type="button" data-action="5">5</button>
+      <button class="key" type="button" data-action="6">6</button>
+      <button class="key" type="button" data-action="7">7</button>
+      <button class="key" type="button" data-action="8">8</button>
+      <button class="key" type="button" data-action="9">9</button>
+      <button class="key" type="button" data-action="0">0</button>
+    </div>
+    <div class="keypad-row row-2">
       <button class="key" type="button" data-action="q">q</button>
       <button class="key" type="button" data-action="w">w</button>
       <button class="key" type="button" data-action="e">e</button>
@@ -320,7 +335,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
       <button class="key" type="button" data-action="o">o</button>
       <button class="key" type="button" data-action="p">p</button>
     </div>
-    <div class="keypad-row row-2">
+    <div class="keypad-row row-3">
       <button class="key" type="button" data-action="a">a</button>
       <button class="key" type="button" data-action="s">s</button>
       <button class="key" type="button" data-action="d">d</button>
@@ -332,7 +347,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
       <button class="key" type="button" data-action="l">l</button>
       <button class="key" type="button" data-action="Bksp">Bksp</button>
     </div>
-    <div class="keypad-row row-3">
+    <div class="keypad-row row-4">
       <button class="key key-mod" type="button" data-action="Shift" id="mobile-shift">Shift</button>
       <button class="key" type="button" data-action="z">z</button>
       <button class="key" type="button" data-action="x">x</button>
@@ -341,10 +356,10 @@ body.viewer-mode #viewer-mode-banner { display: block; }
       <button class="key" type="button" data-action="b">b</button>
       <button class="key" type="button" data-action="n">n</button>
       <button class="key" type="button" data-action="m">m</button>
-      <button class="key" type="button" data-action=".">.</button>
+      <button class="key" type="button" data-action="/">/</button>
       <button class="key key-mod" type="button" data-action="Enter" id="mobile-enter">Enter</button>
     </div>
-    <div class="keypad-row row-4">
+    <div class="keypad-row row-5">
       <button class="key key-mod" type="button" data-action="Ctrl" id="mobile-ctrl">Ctrl</button>
       <button class="key key-mod" type="button" data-action="Alt" id="mobile-alt">Alt</button>
       <button class="key key-space" type="button" data-action=" ">Space</button>
@@ -797,7 +812,6 @@ const KEY_BYTES = {
   'Tab':   [0x09],
   'Esc':   [0x1b],
   ' ':     [0x20],
-  '.':     [0x2e],
   // Standard arrow escape sequences (CSI). The caret moves the
   // cursor inside readline / less / vim; same as ^[[A..^[[D.
   'Up':    [0x1b, 0x5b, 0x41],
