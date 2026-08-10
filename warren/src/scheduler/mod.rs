@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 const USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-/// §Observation-deadline: how long the per-run observer waits for a
+/// how long the per-run observer waits for a
 /// `StopHook`/`NeedsInput`/`Dead` envelope before finalizing the run
 /// as `observation_deadline` (line 727). Picked at 1 h so a long,
 /// legitimate Claude turn (multi-step agentic work, large-file
@@ -286,7 +286,7 @@ pub async fn fire_prompt(
 
     // (3) Fresh usage scrape via the chosen handle.
     //
-    // §No-threshold fast-path: send ONLY the scrapes whose result
+    // send ONLY the scrapes whose result
     // a downstream gate actually consumes. The downstream buffer
     // checks are `if let Some(_) = ...` so a None can't trip them,
     // and the optional `context_clear_threshold` needs
@@ -327,7 +327,7 @@ pub async fn fire_prompt(
         };
     let weekly_i = weekly_pct.map(|x| x.round() as i32);
     let session_i = session_pct.map(|x| x.round() as i32);
-    // §Context-window: round to whole percent the same way weekly /
+    // round to whole percent the same way weekly /
     // session do. A None here means the /context scrape didn't return
     // a usable envelope within the timeout window — preserve that
     // signal in the run row rather than coercing to 0.
@@ -525,7 +525,7 @@ async fn fetch_fresh_usage(
     need_usage: bool,
     need_context: bool,
 ) -> Option<(Option<f64>, Option<f64>, Option<f64>, Option<u64>)> {
-    // §No-stale: send the envelopes FIRST, then subscribe. The
+    // send the envelopes FIRST, then subscribe. The
     // broadcast carries every Usage/Context envelope the agent emits
     // since the channel was created — anything stale (operator's
     // manual /usage, prior fire's reply, a coalesced scrape) would
@@ -540,7 +540,7 @@ async fn fetch_fresh_usage(
             return None;
         }
     }
-    // §Context-window: the run-history table mirrors both /usage and
+    // the run-history table mirrors both /usage and
     // /context modal values. Fire `context_check` immediately after
     // `usage_check`; the supervisor coalesces if a scrape is already
     // in flight, so this is best-effort and the send-error is fine to
@@ -558,7 +558,7 @@ async fn fetch_fresh_usage(
         return Some((None, None, None, None));
     }
     let mut rx = handle.subscribe_meta();
-    // §Context-window: the `/usage` envelope reply carries
+    // the `/usage` envelope reply carries
     // weekly/session pcts but NOT ctx_* fields. The `/context`
     // envelope reply carries ctx_used_tokens/pct. We need both for
     // the auto-clear threshold guard, so we keep reading envelopes
@@ -567,7 +567,7 @@ async fn fetch_fresh_usage(
     // silently disables the threshold check because ctx_used_tokens
     // is None.
     //
-    // §Fresh-only: the auto-clear guard must NEVER act on a stale or
+    // the auto-clear guard must NEVER act on a stale or
     // missing ctx_used_tokens. Bail-out conditions require the
     // envelope field the caller actually asked for: a `/usage` need
     // requires weekly_pct; a `/context` need requires ctx_used_tokens;

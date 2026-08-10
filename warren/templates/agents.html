@@ -32,7 +32,7 @@
       <td>
         {% match r.status %}
           {% when Some with (s) %}
-            {# §Status badge colors mirror `agent_claude.html::setBadge`
+            {# `agent_claude.html::setBadge`
                so the dashboard cell matches the per-agent page exactly.
                The five variants exhaust `AgentState`; a future enum
                addition will surface as a plain text label here, which
@@ -44,7 +44,7 @@
       </td>
       <td>
         {% if r.action_items > 0 %}
-          {# §Action items: a non-zero count links to the comms page
+          {# : a non-zero count links to the comms page
              where the operator can drill into the actionable requests.
              Zero renders as "—" (em-dash) to match the rest of the
              table's "nothing here" idiom. #}
@@ -54,7 +54,7 @@
         {% endif %}
       </td>
       <td>
-        {# §Forgejo issues/PRs: open items assigned to this agent
+        {# : open items assigned to this agent
            across all its forgejo configs that have no remaining open
            blocker (per `forgejo::fetch_unblocked_assigned`). A non-zero
            count links to the edit page where the per-config auth +
@@ -81,7 +81,7 @@
           <span class="text-muted">—</span>
         {% endif %}
       </td>
-      {# §D Claimable column: unassigned forgejo items whose labels
+      {# : unassigned forgejo items whose labels
          match the agent's `class` — the same pool the scheduler gate
          uses to decide whether to fire a `pending_forgejo_work`
          prompt, so the dashboard and the scheduler see the same

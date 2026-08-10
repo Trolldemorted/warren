@@ -1,4 +1,4 @@
-//! §Parse-layer-1 / ESC handling.
+//!
 //!
 //! `strip_ansi_bytes` is the byte-stream gate everything else in
 //! the `/context` modal parser reads from. It is intentionally a

@@ -1,4 +1,4 @@
-//! §Usage-limits: state-machine parser for Claude Code's `/usage` overlay.
+//! state-machine parser for Claude Code's `/usage` overlay.
 //!
 //! The overlay renders incrementally as the PTY reader feeds bytes
 //! back to the supervisor. The parser consumes those bytes and emits a
@@ -801,7 +801,7 @@ mod tests {
     /// plan (over-match from welcome banner after Esc) remains
     /// latent in the passive-parser code path; the test below
     /// pins the actual value so a fix can be caught — see plan
-    /// §"Active scraping supersedes passive observation" for the
+    /// "Active scraping supersedes passive observation" for the
     /// recommended scroll-boundary section reset that the active
     /// scraper will apply.
     #[test]
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(dt.format("%H:%M").to_string(), "05:00");
     }
 
-    /// §Active-scraping: `reset_section` clears the in-progress
+    // `reset_section` clears the in-progress
     /// section/pending/buffer state but preserves already-committed
     /// values. Called between scroll rounds so each round starts
     /// fresh and bytes from a previous round's overlay cannot leak
@@ -922,7 +922,7 @@ mod tests {
         assert!(limits.weekly_resets_at.is_some());
     }
 
-    /// §Active-scraping: a "Resets" line that arrives between
+    // a "Resets" line that arrives between
     /// scroll rounds (no header in between) must NOT be
     /// mis-attributed to the section that was active before the
     /// reset. After `reset_section()`, section=None and any
@@ -950,7 +950,7 @@ mod tests {
         );
     }
 
-    /// §Active-scraping: the overlay-dismissal ESC sequence
+    // the overlay-dismissal ESC sequence
     /// (`\x1b[?1049l`) is detected across chunk boundaries via
     /// the trail buffer. The bytes "Resets 50%" that arrive
     /// AFTER the dismissal must not pollute the parser state

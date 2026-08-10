@@ -22,7 +22,7 @@
 //! that they can merge into their own larger router (see
 //! `rabbit-lib/README.md` for the embedding recipe).
 //!
-//! See `rabbit-lib.md` §3 for the full design rationale.
+//! See `rabbit-lib.md`
 
 use std::sync::Arc;
 use uuid::Uuid;
@@ -506,7 +506,7 @@ pub struct ServerState {
     pub store: Arc<dyn SessionStore>,
     pub auth: Arc<dyn AuthBackend>,
     pub log_sink: Arc<dyn LogSink>,
-    /// §Simplify TUI sizing: the static grid size warren advertises to
+    // the static grid size warren advertises to
     /// each rabbit on connect. `None` falls back to (120, 40) at the
     /// actor. Embedders that want a different grid set this; most leave
     /// it `None`.

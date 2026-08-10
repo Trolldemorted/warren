@@ -99,7 +99,7 @@ pub fn router() -> Router<AppState> {
             post(scheduled_prompt_run_now),
         )
         .route("/agent/:id/claude", get(agent_claude_page))
-        // §D Milestone 5: secondary bash PTY page.
+        // secondary bash PTY page.
         .route("/agent/:id/shell", get(agent_shell_page))
 }
 
@@ -443,7 +443,7 @@ async fn agents_page(
                 } else {
                     Some(forgejo_errors.join(" | "))
                 };
-                // §D Claimable column: unassigned forgejo items whose
+                // unassigned forgejo items whose
                 // labels match the resolved team-label list. The
                 // dashboard has no per-schedule override, so the
                 // helper resolves: `agents.claimable_labels` if non-empty,

@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use rabbit_lib::wire::UsageSnapshot;
 use std::sync::OnceLock;
 
-/// §Context-window / §Cross-crate merge: cache of the most recent
+/// cache of the most recent
 /// transcript-derived `UsageSnapshot`. The supervisor's
 /// `ContextCheck` arm reads this when building the post-scrape
 /// `Usage` envelope so it can layer the modal-derived `ctx_*`

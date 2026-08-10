@@ -15,7 +15,7 @@ pub struct UsageUpdate {
 }
 
 /// Tail-follower for the on-disk transcript jsonl written by claude
-/// (§A.3). It does *not* own a fixed path: it consults a path-provider on
+/// (). It does *not* own a fixed path: it consults a path-provider on
 /// every scan, so the real path — reported by `SessionStart` as
 /// `transcript_path` in the hook payload — replaces the fallback once the
 /// hook fires. Before then, the fallback is used (which usually does not
@@ -164,7 +164,7 @@ impl TranscriptTail {
                 context_pct_est,
                 parse_errors: *parse_errors,
                 source: "transcript".to_string(),
-                // §Usage-limits: the transcript JSONL has no
+                // the transcript JSONL has no
                 // plan-level weekly / session data; the supervisor
                 // populates those fields on the next `Usage` envelope
                 // it ships after a successful `/usage` scrape. The
@@ -175,18 +175,18 @@ impl TranscriptTail {
                 weekly_resets_at: None,
                 session_pct: None,
                 session_resets_at: None,
-                // §Small-terminal mitigation C: transcript-side
+                // transcript-side
                 // envelopes don't carry scrape results, so the
                 // "scrape incomplete" hint never applies here. The
                 // flag is set by the supervisor when it ships the
                 // `Usage` envelope after a `/usage` scrape.
                 scrape_incomplete: false,
-                // §Writer-actor: transcript-side envelopes are
+                // transcript-side envelopes are
                 // never the product of a scrape, so the
                 // "scrape aborted" hint never applies here. Same
                 // convention as `scrape_incomplete`.
                 scrape_aborted: false,
-                // §Context-window: the transcript-side estimator
+                // the transcript-side estimator
                 // (`context_pct_est`) is heuristic; the authoritative
                 // `ctx_*` fields are populated only by the
                 // supervisor's `/context` scrape. The supervisor's
@@ -201,7 +201,7 @@ impl TranscriptTail {
                 ctx_scrape_incomplete: false,
             };
             let kind = msg.role.unwrap_or_else(|| "unknown".to_string());
-            // §Context-window: cache the latest transcript-derived
+            // cache the latest transcript-derived
             // snapshot so the supervisor's `/context` scrape arm
             // can layer the modal fields on top of fresh
             // input/output/cache counters. The record is
@@ -221,7 +221,7 @@ impl TranscriptTail {
 }
 
 /// Estimate how full the model's context window is, as a percentage in
-/// `[0.0, 100.0]`. §A.3 asks for "last turn's input tokens vs. the model's
+/// `[0.0, 100.0]`. "last turn's input tokens vs. the model's
 /// window size"; we include cache_read because the cached tokens are also
 /// occupying context, just cheaply. Unknown models default to 200k, which
 /// is the conservative baseline for the Claude 3/3.5 family.

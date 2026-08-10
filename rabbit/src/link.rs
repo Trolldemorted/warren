@@ -55,7 +55,7 @@ pub enum LinkEvent {
 
 #[derive(Debug)]
 pub enum LinkCmd {
-    /// §A.7 / seq-numbered snapshot protocol — raw PTY bytes from a
+    /// — raw PTY bytes from a
     /// terminal → warren → viewers, tagged with the channel byte and a
     /// per-channel monotonic `seq` (the same value the blocking PTY
     /// thread assigned when the bytes were read). The link prepends
@@ -81,7 +81,7 @@ pub struct Link {
     agent_id: uuid::Uuid,
     claude_version: String,
     seq: Arc<AtomicI64>,
-    /// §Simplify TUI sizing: warren advertises the grid once after the
+    // warren advertises the grid once after the
     /// rabbit hello via a `TuiConfig` envelope; the link stores it here
     /// so the supervisor can read it before spawning the PTY. `None`
     /// until the first `TuiConfig` arrives — `term_size()` blocks on
@@ -238,7 +238,7 @@ impl Link {
         log::info!("warren link up: {}", self.warren_url);
 
         let hello_seq = self.next_seq();
-        // §Simplify TUI sizing: the hello no longer carries a term_size
+        // the hello no longer carries a term_size
         // — warren is the source of truth and ships a `TuiConfig`
         // envelope back to us right after it accepts this hello.
         let hello = Envelope {
@@ -263,7 +263,7 @@ impl Link {
         // `state=Starting` until the next claude crash (see
         // `LinkEvent::Connected` docs).
         let _ = self.event_tx.send(LinkEvent::Connected).await;
-        // §A.7: each replay frame is its own `<chan:1> <seq:8 BE> <data>`
+        // each replay frame is its own `<chan:1> <seq:8 BE> <data>`
         // binary message, in the order the producer emitted them. warren
         // re-emits each frame verbatim to its browser subscribers so a
         // freshly-connected browser sees the exact same on-wire bytes
@@ -289,100 +289,100 @@ impl Link {
 
         loop {
             tokio::select! {
-                biased;
-                cmd = self.cmd_rx.recv() => {
-                    let Some(cmd) = cmd else { break; };
-                    match cmd {
-                        // §A.7: every server→browser terminal binary
-                        // frame is now `<chan:1> <seq:8 BE> <data>`.
-                        // warren parses the prelude off the frame,
-                        // forwards both `chan` and `seq` to its
-                        // subscribers verbatim, and rewrites the same
-                        // prelude when broadcasting to browser panes.
-                        LinkCmd::SendBinary {
-                            chan,
-                            seq,
-                            mut data,
-                        } => {
-                            if data.is_empty() { continue; }
-                            let mut frame = Vec::with_capacity(9 + data.len());
-                            frame.push(chan);
-                            frame.extend_from_slice(&seq.to_be_bytes());
-                            frame.append(&mut data);
-                            sink.send(Message::Binary(frame)).await?;
-                        }
-                        LinkCmd::SendMeta(body) => {
-                            let seq = self.next_seq();
-                            let env = Envelope {
-                                v: PROTOCOL_VERSION,
-                                seq,
-                                body: *body,
-                            };
-                            let frame = serde_json::to_string(&env)?;
-                            self.meta_ring.push(seq, frame.clone());
-                            sink.send(Message::Text(frame)).await?;
-                        }
-                        LinkCmd::Shutdown => {
-                            sink.send(Message::Close(None)).await.ok();
-                            return Ok(());
-                        }
-                    }
-                }
-                msg = stream.next() => {
-                    let Some(msg) = msg else { break; };
-                    match msg? {
-                        Message::Text(t) => {
-                            if let Ok(env) = serde_json::from_str::<Envelope>(&t) {
-                                // §Simplify TUI sizing: warren advertises
-                                // the grid right after the hello via this
-                                // envelope. We capture it into the slot
-                                // and forward everything else (Ack /
-                                // state / usage / etc.) through the
-                                // normal event channel. TuiConfig is a
-                                // server→rabbit frame, so we never send
-                                // it outbound — it's purely a sink.
-                                if let EnvelopeBody::TuiConfig { cols, rows } = env.body {
-                                    *self.term_size.lock().expect("term_size poisoned") =
-                                        Some(TermSize { cols, rows });
-                                    log::info!(
-                                        "warren advertised tui grid: {cols}×{rows}"
-                                    );
-                                    continue;
-                                }
-                                if let EnvelopeBody::Ack { ack_seq } = env.body {
-                                    let freed = self.meta_ring.trim_through(ack_seq);
-                                    if freed > 0 {
-                                        log::debug!(
-                                            "warren acked through seq={ack_seq} (freed {freed} bytes of buffered meta)"
-                                        );
+                            biased;
+                            cmd = self.cmd_rx.recv() => {
+                                let Some(cmd) = cmd else { break; };
+                                match cmd {
+            // every server→browser terminal binary
+                                    // frame is now `<chan:1> <seq:8 BE> <data>`.
+                                    // warren parses the prelude off the frame,
+                                    // forwards both `chan` and `seq` to its
+                                    // subscribers verbatim, and rewrites the same
+                                    // prelude when broadcasting to browser panes.
+                                    LinkCmd::SendBinary {
+                                        chan,
+                                        seq,
+                                        mut data,
+                                    } => {
+                                        if data.is_empty() { continue; }
+                                        let mut frame = Vec::with_capacity(9 + data.len());
+                                        frame.push(chan);
+                                        frame.extend_from_slice(&seq.to_be_bytes());
+                                        frame.append(&mut data);
+                                        sink.send(Message::Binary(frame)).await?;
                                     }
-                                    continue;
+                                    LinkCmd::SendMeta(body) => {
+                                        let seq = self.next_seq();
+                                        let env = Envelope {
+                                            v: PROTOCOL_VERSION,
+                                            seq,
+                                            body: *body,
+                                        };
+                                        let frame = serde_json::to_string(&env)?;
+                                        self.meta_ring.push(seq, frame.clone());
+                                        sink.send(Message::Text(frame)).await?;
+                                    }
+                                    LinkCmd::Shutdown => {
+                                        sink.send(Message::Close(None)).await.ok();
+                                        return Ok(());
+                                    }
                                 }
-                                let _ = self.event_tx.send(LinkEvent::Text(Box::new(env))).await;
+                            }
+                            msg = stream.next() => {
+                                let Some(msg) = msg else { break; };
+                                match msg? {
+                                    Message::Text(t) => {
+                                        if let Ok(env) = serde_json::from_str::<Envelope>(&t) {
+            // warren advertises
+                                            // the grid right after the hello via this
+                                            // envelope. We capture it into the slot
+                                            // and forward everything else (Ack /
+                                            // state / usage / etc.) through the
+                                            // normal event channel. TuiConfig is a
+                                            // server→rabbit frame, so we never send
+                                            // it outbound — it's purely a sink.
+                                            if let EnvelopeBody::TuiConfig { cols, rows } = env.body {
+                                                *self.term_size.lock().expect("term_size poisoned") =
+                                                    Some(TermSize { cols, rows });
+                                                log::info!(
+                                                    "warren advertised tui grid: {cols}×{rows}"
+                                                );
+                                                continue;
+                                            }
+                                            if let EnvelopeBody::Ack { ack_seq } = env.body {
+                                                let freed = self.meta_ring.trim_through(ack_seq);
+                                                if freed > 0 {
+                                                    log::debug!(
+                                                        "warren acked through seq={ack_seq} (freed {freed} bytes of buffered meta)"
+                                                    );
+                                                }
+                                                continue;
+                                            }
+                                            let _ = self.event_tx.send(LinkEvent::Text(Box::new(env))).await;
+                                        }
+                                    }
+                                    Message::Binary(mut b) => {
+                                        // warren frames every binary with a leading channel byte.
+                                        // Route the known terminal channels (claude + shell)
+                                        // through to the supervisor tagged with their channel;
+                                        // drop anything else rather than feeding it to a PTY.
+                                        if b.is_empty() {
+                                            continue;
+                                        }
+                                        let chan = b.remove(0);
+                                        if chan == TERM_CHAN_CLAUDE || chan == TERM_CHAN_SHELL {
+                                            let _ = self
+                                                .event_tx
+                                                .send(LinkEvent::Binary { chan, data: b })
+                                                .await;
+                                        }
+                                    }
+                                    Message::Close(_) => break,
+                                    Message::Ping(_) | Message::Pong(_) => {}
+                                    _ => {}
+                                }
                             }
                         }
-                        Message::Binary(mut b) => {
-                            // warren frames every binary with a leading channel byte.
-                            // Route the known terminal channels (claude + shell)
-                            // through to the supervisor tagged with their channel;
-                            // drop anything else rather than feeding it to a PTY.
-                            if b.is_empty() {
-                                continue;
-                            }
-                            let chan = b.remove(0);
-                            if chan == TERM_CHAN_CLAUDE || chan == TERM_CHAN_SHELL {
-                                let _ = self
-                                    .event_tx
-                                    .send(LinkEvent::Binary { chan, data: b })
-                                    .await;
-                            }
-                        }
-                        Message::Close(_) => break,
-                        Message::Ping(_) | Message::Pong(_) => {}
-                        _ => {}
-                    }
-                }
-            }
         }
         Ok(())
     }
@@ -532,7 +532,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
     }
 
-    /// §Simplify TUI sizing: with no `TuiConfig` ever shipped (e.g. a
+    // with no `TuiConfig` ever shipped (e.g. a
     /// server pre-dating the new envelope), `term_size()` returns the
     /// (160, 50) default — matches warren's own `TUI_WIDTH`/`TUI_HEIGHT`
     /// defaults so the PTY is born at the right size even if the WS

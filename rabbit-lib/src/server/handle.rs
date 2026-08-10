@@ -8,7 +8,7 @@ use anyhow::Result as AnyResult;
 use bytes::Bytes;
 use std::collections::VecDeque;
 
-// §D Re-export `Command` so integration tests in `tests/` can
+// `Command` so integration tests in `tests/` can
 // pattern-match on the variants `ws_shell::handle`'s repaint path
 // emits without having to peek at the `pub(crate) actor` module. The
 // full actor is an implementation detail; `Command` is the public
@@ -26,12 +26,12 @@ const TERM_RING_MAX_CHUNKS: usize = 128;
 pub struct AgentHandle {
     pub agent_id: Uuid,
     state: Arc<Mutex<AgentStateSnapshot>>,
-    // §A.7: the broadcast/ring carry full `TermFrame`s (chan, seq, data)
+    // the broadcast/ring carry full `TermFrame`s (chan, seq, data)
     // so a browser pane that joins late can replay the seq alongside the
     // bytes — when a late-arriving `ScreenSnapshot::after_seq` arrives,
     // the browser trims its buffered frames to `seq > after_seq` before
     // applying the snapshot, which kills the empty-snapshot flicker the
-    // old §A.6 SIGWINCH-jiggle heuristic patched around. Pre-v2 this was
+    // old
     // `Bytes`; the upgrade widens the type shape (rabbit's wire still
     // discards the seq for browser→warren traffic — that's a separate
     // channel with no seq).
@@ -61,7 +61,7 @@ pub struct AgentStateSnapshot {
     pub session_id: Option<String>,
     pub claude_version: Option<String>,
     pub last_usage: UsageSnapshot,
-    /// §Simplify TUI sizing: most recent PTY size, populated from the
+    // most recent PTY size, populated from the
     /// `TuiConfig` envelope warren sends after the rabbit hello, and
     /// refreshed on subsequent `Command::Resize` dispatches. None until
     /// the first `TuiConfig` arrives.
@@ -315,7 +315,7 @@ impl AgentHandle {
             .map_err(|_| anyhow::anyhow!("actor not running"))
     }
 
-    /// §Mobile-input: translate a typed `Key` to its terminal byte
+    // translate a typed `Key` to its terminal byte
     /// sequence and forward it to the claude PTY through the same
     /// `Command::SendKeys` FIFO that raw `term.onData` bytes use. The
     /// FIFO + writer-actor pipeline serialize concurrent typers, so
@@ -328,7 +328,7 @@ impl AgentHandle {
         self.send_keys(TERM_CHAN_CLAUDE, bytes.into()).await
     }
 
-    /// §Mobile-input shell-channel counterpart to `send_key`. Same
+    /// `send_key`. Same
     /// translation; routes to the shell PTY so the mobile chip
     /// palette works on `/agent/:id/shell` too (Tab completion,
     /// arrow-history, etc. — all the things bash relies on).
@@ -349,7 +349,7 @@ impl AgentHandle {
             .map_err(|_| anyhow::anyhow!("actor not running"))
     }
 
-    /// §Usage-limits: ask rabbit to drive the `/usage` overlay and
+    // ask rabbit to drive the `/usage` overlay and
     /// report back the plan-level weekly + 5-hour session limits.
     /// Fire-and-forget — the HTTP handler returns 202 Accepted
     /// immediately; the parsed data arrives on the SSE
@@ -362,7 +362,7 @@ impl AgentHandle {
             .map_err(|_| anyhow::anyhow!("actor not running"))
     }
 
-    /// §Context-window: ask rabbit to drive the `/context` overlay
+    // ask rabbit to drive the `/context` overlay
     /// and report back the context-window usage. Fire-and-forget —
     /// the HTTP handler returns 202 Accepted immediately; the parsed
     /// data arrives on the SSE `/events/stream` channel a moment
@@ -407,7 +407,7 @@ impl AgentHandle {
         Ok(())
     }
 
-    /// §D shell WS late-join repaint: ask rabbit to SIGWINCH-jiggle the
+    // ask rabbit to SIGWINCH-jiggle the
     /// shell PTY so bash repaints its prompt for a fresh browser pane.
     /// Called by `ws_shell::handle` once the bounded replay buffer has
     /// been flushed into xterm. `cols, rows` are the bash PTY's current
@@ -422,7 +422,7 @@ impl AgentHandle {
         Ok(())
     }
 
-    /// §D Milestone 5 (Phase B): ask rabbit to emit a `ScreenSnapshot`
+    /// (Phase B): ask rabbit to emit a `ScreenSnapshot`
     /// envelope for the given channel. Called by the browser WS right after
     /// flushing the bounded replay buffer; the resulting snapshot lets the
     /// browser paint an authoritative terminal state, replacing the v1
@@ -585,7 +585,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // §A.7 / seq-numbered snapshot protocol — `publish_term` /
+    // — `publish_term` /
     // `subscribe_term` / `replay_term` operate on `TermFrame` (chan,
     // seq, data), not bare bytes. warren must NEVER invent or rewrite a
     // seq on the broadcast path — the same `seq` the rabbit blocking
@@ -658,12 +658,12 @@ mod tests {
         assert_eq!(got.data, b"hello");
     }
 
-    /// §A.7 wire-tag lock — the v2 protocol requires the `ScreenSnapshot`
+    /// — the v2 protocol requires the `ScreenSnapshot`
     /// envelope's JSON to carry `"after_seq": <u64>` as a top-level
     /// field so the browser can read the watermark off the envelope and
     /// trim buffered frames whose seq ≤ after_seq before the apply. A
     /// future rename (e.g. `seq_after`, `seq_watermark`) would silently
-    /// break the browser-side §4.3 two-step apply with no compile-time
+    /// break the browser-side
     /// error. Pin the wire shape here so a wire-tag change has to be
     /// intentional.
     #[tokio::test]

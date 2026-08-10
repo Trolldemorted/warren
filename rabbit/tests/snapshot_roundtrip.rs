@@ -1,4 +1,4 @@
-//! §D Milestone 5 — Phase B wire round-trip for `ScreenSnapshot` /
+//! — Phase B wire round-trip for `ScreenSnapshot` /
 //! `SnapshotRequest`.
 //!
 //! These two envelopes travel across the rabbit↔warren link: warren sends
@@ -176,7 +176,7 @@ async fn screen_snapshot_serializes_with_all_fields_and_correct_tag() {
         cursor_row: 1,
         cursor_visible: true,
         text: vec!["hi  ".into(), "yo  ".into(), "    ".into()],
-        // §A.7: pre-seq test value. Pin to 0 here so the test doesn't
+        // pre-seq test value. Pin to 0 here so the test doesn't
         // accidentally imply a future seq-counter wiring that hasn't
         // been added yet.
         after_seq: 0,
@@ -256,7 +256,7 @@ async fn envelope_tags_are_snake_case_to_match_warren_derive() {
     assert_eq!(snap_json["text"][0], "ok");
 }
 
-// §A.7 — `after_seq` field round-trip. The body shape now carries a
+// — `after_seq` field round-trip. The body shape now carries a
 // per-channel seq watermark; the JSON must include it (when set) and the
 // browser-side deserializer (covered by `rabbit::wire`
 // tests + `rabbit/src/wire.rs::tests`) must read it back exactly.
@@ -299,7 +299,7 @@ async fn screen_snapshot_body_after_seq_field_roundtrips_through_wire() {
     assert_eq!(body.text[0], "abcd    ");
 }
 
-// §A.7 — the wire emission rule for terminal binary frames: every
+// — the wire emission rule for terminal binary frames: every
 // `LinkCmd::SendBinary { chan, seq, data }` produces a single binary
 // WS message whose first 9 bytes are `<chan:1> <seq:8 BE>` and whose
 // remaining bytes are the `data` payload, byte-for-byte.

@@ -1,4 +1,4 @@
-//! §Context-window: state-machine parser for Claude Code's `/context`
+//! state-machine parser for Claude Code's `/context`
 //! overlay.
 //!
 //! Mirrors [`crate::observer::limits::LimitsParser`] — feed bytes
@@ -72,7 +72,7 @@ pub struct ContextSnapshot {
     pub free_pct: Option<f64>,
     pub window_tokens: Option<u64>,
     pub categories: Option<Value>,
-    /// §Small-terminal mitigation C analogue: when `true`, the most
+    // when `true`, the most
     /// recent `/context` scrape did not surface all primary fields
     /// (`used_tokens`, `total_tokens`, `used_pct`). The supervisor
     /// sets this when a non-empty snapshot is missing any of those
@@ -382,7 +382,7 @@ impl ContextParser {
 
 // ----- Layer 2 / Layer 3: classification + reducer -----
 
-/// §Parse-layer-2 / a single cleaned modal line's semantic
+/// 's semantic
 /// shape. Output of [`classify_line`], input to
 /// [`apply_to_snapshot`]. Keeping the seven arms explicit (vs.
 /// stuffing the data into a six-tuple or a struct with optional
@@ -436,7 +436,7 @@ pub(crate) enum LineKind {
     SectionHeader,
 }
 
-/// §Parse-layer-2 / dispatch a single cleaned modal line to a
+///
 /// (possibly empty) list of [`LineKind`]s. Pure: depends only
 /// on the input text.
 ///
@@ -752,7 +752,7 @@ fn matches_section_header(line: &str) -> bool {
     trimmed.starts_with("Context") || trimmed.starts_with("/context")
 }
 
-/// §Parse-layer-3 / fold a single classified line onto a
+///
 /// snapshot. First-wins semantics: any `Some` field already
 /// populated is preserved; new values populate empty slots.
 /// Mutates `snap` in place. Pure apart from the mutation — no
@@ -834,7 +834,7 @@ pub(crate) fn apply_to_snapshot(snap: &mut ContextSnapshot, kind: LineKind) {
     }
 }
 
-/// §Parse-layer-2 helper / extract the trailing `(P%)` from
+/// `(P%)` from
 /// a compact-headline line if present. Used by
 /// [`match_headline_compact`] to populate the `pct` field on
 /// the [`LineKind::HeadlineCompact`] arm.
@@ -940,7 +940,7 @@ fn parse_pct(s: &str) -> Option<f64> {
     s.trim_end_matches('%').trim().parse().ok()
 }
 
-/// §Context-window: detect the optional `Nk` / `Nm` window-label
+/// detect the optional `Nk` / `Nm` window-label
 /// suffix on a total like `200K` or `1M`. Returns the expanded
 /// integer (`k` → ×1_000, `m` → ×1_000_000). Returns `None` when
 /// the total is plain digits (no suffix) — in that case the
@@ -966,7 +966,7 @@ fn parse_window_label(s: &str) -> Option<u64> {
     Some((num * multiplier).round() as u64)
 }
 
-/// §Context-window: parse a compact token-count form like
+/// parse a compact token-count form like
 /// `24.2k`, `200k`, `1.5m`, `164`, `33k`, `~360`. Returns the
 /// expanded integer (k → ×1_000, m → ×1_000_000, fractional
 /// component is rounded to the nearest unit so `24.2k` →
@@ -997,7 +997,7 @@ fn parse_compact_number(s: &str) -> Option<u64> {
     Some((num * multiplier).round() as u64)
 }
 
-/// §Context-window: pull a `Nk tokens (P%)` or `Nk` count from
+/// pull a `Nk tokens (P%)` or `Nk` count from
 /// the right side of a category line. Returns the integer
 /// token count, ignoring any trailing `(P%)` and any leading
 /// `~` (approximate-count prefix used for per-file rows).
@@ -1032,7 +1032,7 @@ fn parse_compact_token_count(s: &str) -> Option<u64> {
     Some((num * multiplier).round() as u64)
 }
 
-/// §Context-window: detect the canonical Claude TUI `/context`
+/// detect the canonical Claude TUI `/context`
 /// headline line — `USED/TOTAL tokens (P%)` in compact k/m
 /// notation. Returns `(used_pct, used_str, total_str)` so the
 /// caller can apply `parse_compact_number` to the two halves.
@@ -1397,7 +1397,7 @@ mod tests {
         assert_eq!(snap.total_tokens, Some(200_000));
     }
 
-    // §Context-window Claude Code 2.1+ regression: the canonical
+    // + regression: the canonical
     // `/context` headline is `24.2k/200k tokens (12%)` — no
     // `Used:` label, compact k/m notation, no thousands separator.
     // The fixture captured from a real claude process lives in

@@ -1,5 +1,5 @@
 //! Smoke test: spawn the actual `claude` binary in a PTY, strip the
-//! nested-Code env markers, and push a small prompt via the §A.2
+//! nested-Code env markers, and push a small prompt via the
 //! `input::paste` byte sequence.
 //!
 //! Marked `#[ignore]` so `cargo test -p rabbit` doesn't run it (it hits the
@@ -167,7 +167,7 @@ fn claude_pt_roundtrip() {
         std::thread::sleep(Duration::from_millis(800));
     }
 
-    // Push the prompt through §A.2's bracketed-paste sequence.
+    // Push the prompt through 's bracketed-paste sequence.
     eprintln!("[smoke] sending prompt via input::paste: {PROMPT:?}");
     paste(&mut w, PROMPT).expect("paste");
 
@@ -313,7 +313,7 @@ fn strip_ansi(bytes: &[u8]) -> String {
     out
 }
 
-// ─── §A.10 milestone-1 checklist ──────────────────────────────────────────────
+// ─── ──────────────────────────────────────────────
 //
 // The `claude_pt_roundtrip` test above exercises the bracketed-paste path
 // against the trust dialog. The three tests below cover the rest of the

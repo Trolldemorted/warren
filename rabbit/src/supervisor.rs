@@ -65,7 +65,7 @@ pub async fn run(config: Config) -> Result<()> {
     let agent_id = Uuid::new_v4();
     let claude_version = detect_claude_version(&config).await;
 
-    // §A.7: the replay buffer holds per-frame triples (chan, seq, data)
+    // the replay buffer holds per-frame triples (chan, seq, data)
     // so each binary message sent on warren_link reconnect preserves the seq the
     // blocking PTY thread assigned at read time. The browser pins its
     // high-water-mark against `seq` (a late-arriving
@@ -96,7 +96,7 @@ pub async fn run(config: Config) -> Result<()> {
         meta_ring,
         shutdown.clone(),
     );
-    // §Simplify TUI sizing: capture the initial grid once *before* the
+    // capture the initial grid once *before* the
     // link task is spawned so the shell PTY can size itself without
     // fighting for `&warren_link`. The link's `term_size` slot gets
     // refreshed once warren ships the `TuiConfig` envelope, but the
@@ -116,7 +116,7 @@ pub async fn run(config: Config) -> Result<()> {
         cmd_tx.clone(),
     );
 
-    // §D Milestone 5: optional debug shell PTY (`/agent/:id/shell`). Off by
+    // optional debug shell PTY (`/agent/:id/shell`). Off by
     // default; when enabled it runs alongside claude on its own channel.
     let shell: Option<ShellHandle> = if config.enable_shell {
         log::info!(
@@ -154,7 +154,7 @@ pub async fn run(config: Config) -> Result<()> {
 
     // Fold `MODEL` env into the base claude args once, at startup, so it's
     // stable across the spawn loop and doesn't depend on the operator also
-    // setting CLAUDE_ARGS (the §1 stable CLI flag, separate from §1.1's flags).
+    // setting CLAUDE_ARGS (the , separate from 's flags).
     let base_args: Vec<String> = match &config.model {
         Some(m) => {
             let mut v = config.claude_args.clone();
@@ -165,7 +165,7 @@ pub async fn run(config: Config) -> Result<()> {
         None => config.claude_args.clone(),
     };
 
-    // §Writer actor — coalesce concurrent `UsageCheck` envelopes
+    // — coalesce concurrent `UsageCheck` envelopes
     // so two clicks within a single scrape window share ONE scrape
     // instead of starting two parallel scrapers competing for the
     // broadcast receiver and the writer actor's FIFO.
@@ -195,14 +195,14 @@ pub async fn run(config: Config) -> Result<()> {
     type UsageScrapeSlot = Arc<tokio::sync::Mutex<Option<ScrapeWaiter<(UsageLimits, bool)>>>>;
     let current_scrape: UsageScrapeSlot = Arc::new(tokio::sync::Mutex::new(None));
 
-    // §Context-window: parallel coalescing slot for `/context`
+    // parallel coalescing slot for `/context`
     // scrapes. Two clicks within a single scrape window share ONE
     // scrape instead of starting two parallel scrapers competing
     // for the broadcast receiver and the writer actor's FIFO.
     // Mirrors the `current_scrape` slot above.
     type ContextScrapeSlot = Arc<tokio::sync::Mutex<Option<ScrapeWaiter<(ContextSnapshot, bool)>>>>;
     let current_context_scrape: ContextScrapeSlot = Arc::new(tokio::sync::Mutex::new(None));
-    // §Context-window / §A.7: handle to the live PTY reader's seq
+    // handle to the live PTY reader's seq
     // watermark. Updated by each `spawn_run_one` so the outer loop's
     // `/context` arm can pass it to `run_context_scrape` for the
     // restore snapshot's `after_seq`. None between generations.
@@ -288,513 +288,513 @@ pub async fn run(config: Config) -> Result<()> {
         let active_link_tx = active.as_ref().map(|s| s.pty_link_tx.clone());
         let active_writer = active.as_ref().map(|s| s.writer.clone());
         tokio::select! {
-            biased;
-            _ = tokio::time::sleep(Duration::from_millis(50)), if active.is_some() => {
-                // tick: nothing; just keeps select responsive while children run.
-            }
-            ev = event_rx.recv() => {
-                match ev {
-                    Some(LinkEvent::Text(env)) => {
-                        if let EnvelopeBody::Restart { fresh } = env.body {
-                            restart_pending = Some(fresh);
-                            log::info!("restart requested via WS, fresh={fresh}");
-                            dead = false;
-                            // Signal the child via the SHARED killer, not
-                            // through `pty_link_tx` / `PtyCmd::Terminate`.
-                            // The latter lands in a channel that the
-                            // blocking PTY reader only drains between
-                            // `read()` calls — and when claude is stuck
-                            // at a TUI prompt emitting no further output,
-                            // `read()` blocks indefinitely and the queued
-                            // Terminate is never seen. The `ChildKiller`
-                            // is portable-pty's documented mechanism for
-                            // sending a signal from a thread other than
-                            // the one blocked in `.wait()`; it reaches the
-                            // child immediately, EOF arrives on the master,
-                            // and the blocking thread's restructured `Ok(0)`
-                            // arm (see below) sends `PtyEvt::Exited` so the
-                            // driver reports the outcome.
-                            if let Some(active) = &active {
-                                if let Err(e) = active.killer.lock().kill() {
-                                    // ESRCH ("no such process") means the
-                                    // child already exited on its own —
-                                    // the kill call was redundant but the
-                                    // outcome (child gone) is what we
-                                    // wanted. Logged at debug, not warn.
+                    biased;
+                    _ = tokio::time::sleep(Duration::from_millis(50)), if active.is_some() => {
+                        // tick: nothing; just keeps select responsive while children run.
+                    }
+                    ev = event_rx.recv() => {
+                        match ev {
+                            Some(LinkEvent::Text(env)) => {
+                                if let EnvelopeBody::Restart { fresh } = env.body {
+                                    restart_pending = Some(fresh);
+                                    log::info!("restart requested via WS, fresh={fresh}");
+                                    dead = false;
+                                    // Signal the child via the SHARED killer, not
+                                    // through `pty_link_tx` / `PtyCmd::Terminate`.
+                                    // The latter lands in a channel that the
+                                    // blocking PTY reader only drains between
+                                    // `read()` calls — and when claude is stuck
+                                    // at a TUI prompt emitting no further output,
+                                    // `read()` blocks indefinitely and the queued
+                                    // Terminate is never seen. The `ChildKiller`
+                                    // is portable-pty's documented mechanism for
+                                    // sending a signal from a thread other than
+                                    // the one blocked in `.wait()`; it reaches the
+                                    // child immediately, EOF arrives on the master,
+                                    // and the blocking thread's restructured `Ok(0)`
+                                    // arm (see below) sends `PtyEvt::Exited` so the
+                                    // driver reports the outcome.
+                                    if let Some(active) = &active {
+                                        if let Err(e) = active.killer.lock().kill() {
+                                            // ESRCH ("no such process") means the
+                                            // child already exited on its own —
+                                            // the kill call was redundant but the
+                                            // outcome (child gone) is what we
+                                            // wanted. Logged at debug, not warn.
+                                            log::debug!(
+                                                "Restart: shared killer.kill returned {e:?} (child likely already gone)"
+                                            );
+                                        }
+                                    }
+                                } else if let EnvelopeBody::UsageCheck = &env.body {
+                                    // + : drive the
+                                    // synchronous `/usage` scrape. Two clicks
+                                    // within the scrape window coalesce — the
+                                    // second UsageCheck awaits the same
+                                    // oneshot receiver the first one
+                                    // registered, instead of starting a
+                                    // parallel scraper competing for the
+                                    // broadcast receiver and the writer
+                                    // actor's FIFO.
+                                    //
+                                    //
+                                    // applied AFTER coalescing so both
+                                    // duplicates see the same
+                                    // partial-vs-complete classification.
+                                    if let Some(active) = &active {
+                                        let waiter = {
+                                            let mut g = current_scrape.lock().await;
+                                            if let Some(w) = g.as_ref() {
+                                                w.clone()
+                                            } else {
+                                                // First UsageCheck in the
+                                                // window: build a coalescing
+                                                // waiter, stash it in the
+                                                // slot, spawn the scrape
+                                                // task. Extract just the
+                                                // writer + broadcast (the
+                                                // only things the scrape
+                                                // task needs) — avoids
+                                                // cloning the whole
+                                                // `ActiveSession`.
+                                                let w = ScrapeWaiter {
+                                                    notify: Arc::new(
+                                                        tokio::sync::Notify::new(),
+                                                    ),
+                                                    result: Arc::new(
+                                                        tokio::sync::Mutex::new(None),
+                                                    ),
+                                                };
+                                                *g = Some(w.clone());
+                                                let writer_for_scrape = active.writer.clone();
+                                                let bcast_for_scrape = active.term_bcast_tx.clone();
+                                                let current_scrape_for_task = current_scrape.clone();
+                                                let w_for_task = w.clone();
+                                                tokio::spawn(async move {
+                                                    let (limits, aborted) =
+                                                        run_usage_scrape(writer_for_scrape, bcast_for_scrape)
+                                                            .await;
+                                                    // Publish the result
+                                                    // BEFORE clearing the
+                                                    // slot so a third
+                                                    // UsageCheck arriving
+                                                    // during this brief gap
+                                                    // sees `Some` and joins
+                                                    // the just-finished
+                                                    // scrape (gets the same
+                                                    // result envelope)
+                                                    // rather than starting
+                                                    // a wasted fresh
+                                                    // scrape. The early-
+                                                    // return check in
+                                                    // `await_scrape` covers
+                                                    // the gap where a
+                                                    // late-arriving waiter
+                                                    // already missed the
+                                                    // notify.
+                                                    *w_for_task.result.lock().await = Some((limits, aborted));
+                                                    w_for_task.notify.notify_waiters();
+                                                    *current_scrape_for_task.lock().await = None;
+                                                });
+                                                w
+                                            }
+                                        };
+                                        let (limits, aborted) = await_scrape(&waiter).await;
+                                        let scrape_incomplete =
+                                            !limits.is_empty() && !limits.all_populated();
+                                        let snap = UsageSnapshot {
+                                            source: "usage_check".to_string(),
+                                            weekly_pct: limits.weekly_pct,
+                                            weekly_resets_at: limits.weekly_resets_at,
+                                            session_pct: limits.session_pct,
+                                            session_resets_at: limits.session_resets_at,
+                                            scrape_incomplete,
+                                            scrape_aborted: aborted,
+                                            ..Default::default()
+                                        };
+                                        crate::dispatch::send_or_warn(
+                                            "LinkCmd::SendMeta(Usage)",
+                                            &cmd_tx,
+                                            LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(snap))),
+                                        )
+                                        .await;
+                                    }
+                                } else if let EnvelopeBody::ContextCheck = &env.body {
+        // drive the synchronous
+                                    // `/context` overlay scrape. Two clicks
+                                    // within the scrape window coalesce — the
+                                    // second ContextCheck awaits the same
+                                    // watch receiver the first one registered
+                                    // instead of starting a parallel scraper
+                                    // competing for the broadcast receiver
+                                    // and the writer actor's FIFO.
+                                    //
+                                    // Result envelope: a fresh `Usage`
+                                    // carrying the new `ctx_*` fields
+                                    // layered on top of the most-recent
+                                    // transcript-derived snapshot (read via
+                                    // `observer::latest_usage()`) so the
+                                    // dashboard's input/output/cache
+                                    // counters keep updating independently
+                                    // of the modal scrape.
+                                    if let Some(active) = &active {
+                                        let waiter = {
+                                            let mut g = current_context_scrape.lock().await;
+                                            if let Some(w) = g.as_ref() {
+                                                w.clone()
+                                            } else {
+                                                // First ContextCheck in the
+                                                // window: build a coalescing
+                                                // waiter, stash it in the
+                                                // slot, spawn the scrape
+                                                // task.
+                                                let w = ScrapeWaiter {
+                                                    notify: Arc::new(
+                                                        tokio::sync::Notify::new(),
+                                                    ),
+                                                    result: Arc::new(
+                                                        tokio::sync::Mutex::new(None),
+                                                    ),
+                                                };
+                                                *g = Some(w.clone());
+                                                let writer_for_scrape =
+                                                    active.writer.clone();
+                                                let bcast_for_scrape =
+                                                    active.term_bcast_tx.clone();
+                                                let vt_for_scrape =
+                                                    active.vt.clone();
+                                                let next_seq_for_scrape = next_seq_slot
+                                                    .lock()
+                                                    .await
+                                                    .clone()
+                                                    .unwrap_or_else(|| {
+                                                        Arc::new(std::sync::atomic::AtomicU64::new(1))
+                                                    });
+                                                let cmd_tx_for_scrape =
+                                                    cmd_tx.clone();
+                                                let current_for_task =
+                                                    current_context_scrape.clone();
+                                                let w_for_task = w.clone();
+                                                tokio::spawn(async move {
+                                                    let (snap, aborted) = run_context_scrape(
+                                                        writer_for_scrape,
+                                                        bcast_for_scrape,
+                                                        vt_for_scrape,
+                                                        next_seq_for_scrape,
+                                                        cmd_tx_for_scrape,
+                                                    )
+                                                    .await;
+                                                    // Publish the result
+                                                    // BEFORE clearing the
+                                                    // slot so a third
+                                                    // ContextCheck arriving
+                                                    // during this brief gap
+                                                    // sees `Some` and joins
+                                                    // the just-finished
+                                                    // scrape. The
+                                                    // early-return check in
+                                                    // `await_scrape` covers
+                                                    // the gap where a
+                                                    // late-arriving waiter
+                                                    // already missed the
+                                                    // notify.
+                                                    *w_for_task.result.lock().await = Some((snap, aborted));
+                                                    w_for_task.notify.notify_waiters();
+                                                    *current_for_task.lock().await = None;
+                                                });
+                                                w
+                                            }
+                                        };
+                                        let (snap, aborted) = await_scrape(&waiter).await;
+                                        let scrape_incomplete =
+                                            !snap.is_empty() && !snap.all_populated();
+                                        let scrape_empty = snap.is_empty();
+        // surface the scrape
+                                        // outcome to operator logs so the
+                                        // next time the UI shows the
+                                        // "returned no data" hint we have
+                                        // a concrete signal of which stage
+                                        // failed (slash never landed,
+                                        // modal didn't paint inside the
+                                        // budget, parser saw bytes but no
+                                        // shape matched, or operator
+                                        // interrupted). Logged once per
+                                        // scrape, regardless of outcome —
+                                        // successful scrapes confirm the
+                                        // budget is sufficient and
+                                        // timestamp the regression frontier.
+                                        log::info!(
+                                            "context_check: empty={scrape_empty} \
+                                             incomplete={scrape_incomplete} aborted={aborted} \
+                                             used={:?} total={:?} pct={:?} free={:?} window={:?}",
+                                            snap.used_tokens,
+                                            snap.total_tokens,
+                                            snap.used_pct,
+                                            snap.free_pct,
+                                            snap.window_tokens,
+                                        );
+                                        // Merge the modal fields on top of
+                                        // the most-recent transcript
+                                        // snapshot. The supervisor doesn't
+                                        // parse the transcript — it reads
+                                        // the cached snapshot that
+                                        // `record_usage()` keeps fresh.
+                                        let mut combined = crate::observer::latest_usage();
+                                        combined.source = "context_check".to_string();
+                                        combined.ctx_used_tokens = snap.used_tokens;
+                                        combined.ctx_total_tokens = snap.total_tokens;
+                                        combined.ctx_used_pct = snap.used_pct;
+                                        combined.ctx_free_pct = snap.free_pct;
+                                        combined.ctx_window_tokens = snap.window_tokens;
+                                        combined.ctx_categories = snap.categories;
+        // an empty parse is
+                                        // also "incomplete" — the operator
+                                        // pressed the button, the modal
+                                        // didn't surface data inside the
+                                        // 700ms scrape window, and the
+                                        // panel otherwise looks identical
+                                        // to a button-press that never
+                                        // happened. Fold both into the
+                                        // same flag so the UI surfaces a
+                                        // hint either way. `scrape_aborted`
+                                        // stays reserved for actual
+                                        // operator-interrupt preemption
+                                        // (writer's
+                                        // `SequenceOutcome::AbortedBeforeStep`);
+                                        // conflating it with empty-parse
+                                        // would make every slow-scrape look
+                                        // like the operator hit Ctrl-C.
+                                        combined.ctx_scrape_incomplete =
+                                            scrape_incomplete || scrape_empty;
+                                        combined.scrape_aborted = aborted;
+                                        // Cache the modal-enriched snapshot
+                                        // so subsequent transcript ticks
+                                        // (which carry `ctx_* = None`) don't
+                                        // clobber these values when
+                                        // `record_usage` merges on top.
+                                        crate::observer::record_usage(combined.clone());
+                                        crate::dispatch::send_or_warn(
+                                            "LinkCmd::SendMeta(Usage+context)",
+                                            &cmd_tx,
+                                            LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(combined))),
+                                        )
+                                        .await;
+                                    } else {
+        // no active claude
+                                        // session — can't write `/context` to
+                                        // a PTY. Publish an envelope anyway
+                                        // so the JS panel doesn't sit at
+                                        // "—" forever after the operator
+                                        // pressed the button; the hint path
+                                        // surfaces "no active session".
+                                        let mut combined = crate::observer::latest_usage();
+                                        combined.source = "context_check".to_string();
+                                        combined.ctx_scrape_incomplete = true;
+                                        combined.scrape_aborted = true;
+                                        crate::dispatch::send_or_warn(
+                                            "LinkCmd::SendMeta(Usage+context:no-session)",
+                                            &cmd_tx,
+                                            LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(combined))),
+                                        )
+                                        .await;
+                                    }
+                                } else if let EnvelopeBody::SnapshotRequest { chan } = &env.body {
+                                    // (Phase B): late-join screen dump.
+                                    // Currently only the claude channel has a
+                                    // `TermTracker`. A shell-channel request is a
+                                    // future-work item (would need to mirror the VT
+                                    // for the optional `bash` PTY).
+                                    if chan == &TERM_CHAN_CLAUDE {
+                                        if let Some(tx) = &active_link_tx {
+                                            let _ = tx
+                                                .send(PtyCmd::Snapshot {
+                                                    chan: TERM_CHAN_CLAUDE,
+                                                })
+                                                .await;
+                                        }
+                                    } else {
+                                        log::debug!(
+                                            "snapshot request for chan {chan} not yet wired (only claude has a VT)"
+                                        );
+                                    }
+                                } else if let EnvelopeBody::ShellRepaint { cols, rows } = &env.body {
+        // warren
+                                    // asked us to SIGWINCH-jiggle the shell
+                                    // PTY so bash repaints its prompt for a
+                                    // fresh browser pane. Routed here (not
+                                    // through `dispatch_to_pty`) because the
+                                    // shell has a separate command channel
+                                    // (`ShellHandle.tx`) — `dispatch_to_pty`
+                                    // only knows about the claude PTY's
+                                    // `pty_tx`. The handler is a no-op when
+                                    // `RABBIT_ENABLE_SHELL=1` was not set
+                                    // (no shell PTY to jiggle).
+                                    if let Some(sh) = &shell {
+                                        crate::dispatch::send_or_warn(
+                                            "ShellCmd::Repaint",
+                                            &sh.tx,
+                                            ShellCmd::Repaint {
+                                                cols: *cols,
+                                                rows: *rows,
+                                            },
+                                        )
+                                        .await;
+                                    } else {
+                                        log::debug!(
+                                            "shell repaint for agent {agent_id} ignored: shell PTY not enabled"
+                                        );
+                                    }
+                                } else if let Some(tx) = &active_link_tx {
+                                    // The actor already decided the prompt's
+                                    // fate (`PromptEcho` accepts, `PromptRejected`
+                                    // already reached warren, `StopHook` is a
+                                    // no-op). Dispatch what survived.
+                                    dispatch_to_pty(
+                                        &env,
+                                        active_writer.as_ref(),
+                                        tx,
+                                        initial_tui.cols,
+                                        initial_tui.rows,
+                                    )
+                                    .await;
+                                }
+                            }
+                            Some(LinkEvent::Binary { chan, data }) => {
+                                if chan == TERM_CHAN_SHELL {
+                                    if let Some(sh) = &shell {
+                                        crate::dispatch::send_or_warn(
+                                            "ShellCmd::Write",
+                                            &sh.tx,
+                                            ShellCmd::Write(data),
+                                        )
+                                        .await;
+                                    }
+                                } else if chan == TERM_CHAN_CLAUDE {
+        // opt-in via RUST_LOG=debug.
+                                    // Logs every binary frame arriving on the
+                                    // Claude channel so we can confirm the byte
+                                    // (e.g. 0x7f for Backspace) reaches this
+                                    // layer from the warren_link. Compare with the
+                                    // browser-side `?debug_typing=1` console log
+                                    // to pinpoint any byte mutation.
                                     log::debug!(
-                                        "Restart: shared killer.kill returned {e:?} (child likely already gone)"
+                                        "claude binary: {} bytes [{}]",
+                                        data.len(),
+                                        {
+                                            let head: Vec<String> = data.iter().take(8)
+                                                .map(|b| format!("{b:02x}"))
+                                                .collect();
+                                            let shown = head.join(" ");
+                                            if data.len() > 8 {
+                                                format!("{shown} …")
+                                            } else {
+                                                shown
+                                            }
+                                        }
+                                    );
+                                    // Direct write through the shared writer —
+                                    // bypasses the blocking reader's `pty_rx`
+                                    // queue, which only drains between
+                                    // `read()` calls. When claude is mid-turn
+                                    // or sitting at a prompt with no further
+                                    // output, that queue is starved; the user
+                                    // sees multi-second delays or dropped
+                                    // keystrokes. The War UI's typing path
+                                    // (one binary frame per keystroke) is the
+                                    // hardest-hit victim.
+                                    write_claude_terminal_bytes(&data, active.as_ref()).await;
+                                } else {
+                                    // Unknown channel — be lenient and drop
+                                    // (matches `warren_link.rs`'s filter against the
+                                    // known terminal channels).
+                                    log::debug!(
+                                        "ignoring binary frame on unknown chan {chan} ({} bytes)",
+                                        data.len()
                                     );
                                 }
                             }
-                        } else if let EnvelopeBody::UsageCheck = &env.body {
-                            // §Usage-limits + §Writer actor: drive the
-                            // synchronous `/usage` scrape. Two clicks
-                            // within the scrape window coalesce — the
-                            // second UsageCheck awaits the same
-                            // oneshot receiver the first one
-                            // registered, instead of starting a
-                            // parallel scraper competing for the
-                            // broadcast receiver and the writer
-                            // actor's FIFO.
-                            //
-                            // §Small-terminal mitigation C is
-                            // applied AFTER coalescing so both
-                            // duplicates see the same
-                            // partial-vs-complete classification.
-                            if let Some(active) = &active {
-                                let waiter = {
-                                    let mut g = current_scrape.lock().await;
-                                    if let Some(w) = g.as_ref() {
-                                        w.clone()
-                                    } else {
-                                        // First UsageCheck in the
-                                        // window: build a coalescing
-                                        // waiter, stash it in the
-                                        // slot, spawn the scrape
-                                        // task. Extract just the
-                                        // writer + broadcast (the
-                                        // only things the scrape
-                                        // task needs) — avoids
-                                        // cloning the whole
-                                        // `ActiveSession`.
-                                        let w = ScrapeWaiter {
-                                            notify: Arc::new(
-                                                tokio::sync::Notify::new(),
-                                            ),
-                                            result: Arc::new(
-                                                tokio::sync::Mutex::new(None),
-                                            ),
-                                        };
-                                        *g = Some(w.clone());
-                                        let writer_for_scrape = active.writer.clone();
-                                        let bcast_for_scrape = active.term_bcast_tx.clone();
-                                        let current_scrape_for_task = current_scrape.clone();
-                                        let w_for_task = w.clone();
-                                        tokio::spawn(async move {
-                                            let (limits, aborted) =
-                                                run_usage_scrape(writer_for_scrape, bcast_for_scrape)
-                                                    .await;
-                                            // Publish the result
-                                            // BEFORE clearing the
-                                            // slot so a third
-                                            // UsageCheck arriving
-                                            // during this brief gap
-                                            // sees `Some` and joins
-                                            // the just-finished
-                                            // scrape (gets the same
-                                            // result envelope)
-                                            // rather than starting
-                                            // a wasted fresh
-                                            // scrape. The early-
-                                            // return check in
-                                            // `await_scrape` covers
-                                            // the gap where a
-                                            // late-arriving waiter
-                                            // already missed the
-                                            // notify.
-                                            *w_for_task.result.lock().await = Some((limits, aborted));
-                                            w_for_task.notify.notify_waiters();
-                                            *current_scrape_for_task.lock().await = None;
-                                        });
-                                        w
-                                    }
-                                };
-                                let (limits, aborted) = await_scrape(&waiter).await;
-                                let scrape_incomplete =
-                                    !limits.is_empty() && !limits.all_populated();
-                                let snap = UsageSnapshot {
-                                    source: "usage_check".to_string(),
-                                    weekly_pct: limits.weekly_pct,
-                                    weekly_resets_at: limits.weekly_resets_at,
-                                    session_pct: limits.session_pct,
-                                    session_resets_at: limits.session_resets_at,
-                                    scrape_incomplete,
-                                    scrape_aborted: aborted,
-                                    ..Default::default()
-                                };
-                                crate::dispatch::send_or_warn(
-                                    "LinkCmd::SendMeta(Usage)",
+                            Some(LinkEvent::Connected) => {
+        // the link just
+                                // (re)established the WS and delivered a
+                                // Hello with `state=Starting`. Warren has no
+                                // memory of the previous connection's state
+                                // and will see us as Starting until we push
+                                // a real State envelope. The supervisor's
+                                // own State(Idle) publish (inside
+                                // `spawn_run_one`) only fires when claude is
+                                // being spawned fresh — on a warren-side
+                                // restart with claude still running, that
+                                // path never runs and the scheduler sees
+                                // the agent as Starting forever, refusing to
+                                // dispatch. Push the current observer state
+                                // (Idle/Running/...) + session_id so the
+                                // scheduler and any browser pane see us in
+                                // the right shape immediately. On the very
+                                // first connect this is also fine:
+                                // `observer.latest_state()` is `Starting`
+                                // until `spawn_run_one` overrides it, so we
+                                // publish Starting here and Idle a few
+                                // hundred ms later when claude is up. A
+                                // duplicate State(Idle) arriving on the
+                                // first-connect path is harmless (idempotent
+                                // in `update_state`).
+                                let st = observer.latest_state();
+                                let _ = send_state(
+                                    &observer,
                                     &cmd_tx,
-                                    LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(snap))),
-                                )
-                                .await;
-                            }
-                        } else if let EnvelopeBody::ContextCheck = &env.body {
-                            // §Context-window: drive the synchronous
-                            // `/context` overlay scrape. Two clicks
-                            // within the scrape window coalesce — the
-                            // second ContextCheck awaits the same
-                            // watch receiver the first one registered
-                            // instead of starting a parallel scraper
-                            // competing for the broadcast receiver
-                            // and the writer actor's FIFO.
-                            //
-                            // Result envelope: a fresh `Usage`
-                            // carrying the new `ctx_*` fields
-                            // layered on top of the most-recent
-                            // transcript-derived snapshot (read via
-                            // `observer::latest_usage()`) so the
-                            // dashboard's input/output/cache
-                            // counters keep updating independently
-                            // of the modal scrape.
-                            if let Some(active) = &active {
-                                let waiter = {
-                                    let mut g = current_context_scrape.lock().await;
-                                    if let Some(w) = g.as_ref() {
-                                        w.clone()
-                                    } else {
-                                        // First ContextCheck in the
-                                        // window: build a coalescing
-                                        // waiter, stash it in the
-                                        // slot, spawn the scrape
-                                        // task.
-                                        let w = ScrapeWaiter {
-                                            notify: Arc::new(
-                                                tokio::sync::Notify::new(),
-                                            ),
-                                            result: Arc::new(
-                                                tokio::sync::Mutex::new(None),
-                                            ),
-                                        };
-                                        *g = Some(w.clone());
-                                        let writer_for_scrape =
-                                            active.writer.clone();
-                                        let bcast_for_scrape =
-                                            active.term_bcast_tx.clone();
-                                        let vt_for_scrape =
-                                            active.vt.clone();
-                                        let next_seq_for_scrape = next_seq_slot
-                                            .lock()
-                                            .await
-                                            .clone()
-                                            .unwrap_or_else(|| {
-                                                Arc::new(std::sync::atomic::AtomicU64::new(1))
-                                            });
-                                        let cmd_tx_for_scrape =
-                                            cmd_tx.clone();
-                                        let current_for_task =
-                                            current_context_scrape.clone();
-                                        let w_for_task = w.clone();
-                                        tokio::spawn(async move {
-                                            let (snap, aborted) = run_context_scrape(
-                                                writer_for_scrape,
-                                                bcast_for_scrape,
-                                                vt_for_scrape,
-                                                next_seq_for_scrape,
-                                                cmd_tx_for_scrape,
-                                            )
-                                            .await;
-                                            // Publish the result
-                                            // BEFORE clearing the
-                                            // slot so a third
-                                            // ContextCheck arriving
-                                            // during this brief gap
-                                            // sees `Some` and joins
-                                            // the just-finished
-                                            // scrape. The
-                                            // early-return check in
-                                            // `await_scrape` covers
-                                            // the gap where a
-                                            // late-arriving waiter
-                                            // already missed the
-                                            // notify.
-                                            *w_for_task.result.lock().await = Some((snap, aborted));
-                                            w_for_task.notify.notify_waiters();
-                                            *current_for_task.lock().await = None;
-                                        });
-                                        w
-                                    }
-                                };
-                                let (snap, aborted) = await_scrape(&waiter).await;
-                                let scrape_incomplete =
-                                    !snap.is_empty() && !snap.all_populated();
-                                let scrape_empty = snap.is_empty();
-                                // §Context-window: surface the scrape
-                                // outcome to operator logs so the
-                                // next time the UI shows the
-                                // "returned no data" hint we have
-                                // a concrete signal of which stage
-                                // failed (slash never landed,
-                                // modal didn't paint inside the
-                                // budget, parser saw bytes but no
-                                // shape matched, or operator
-                                // interrupted). Logged once per
-                                // scrape, regardless of outcome —
-                                // successful scrapes confirm the
-                                // budget is sufficient and
-                                // timestamp the regression frontier.
-                                log::info!(
-                                    "context_check: empty={scrape_empty} \
-                                     incomplete={scrape_incomplete} aborted={aborted} \
-                                     used={:?} total={:?} pct={:?} free={:?} window={:?}",
-                                    snap.used_tokens,
-                                    snap.total_tokens,
-                                    snap.used_pct,
-                                    snap.free_pct,
-                                    snap.window_tokens,
-                                );
-                                // Merge the modal fields on top of
-                                // the most-recent transcript
-                                // snapshot. The supervisor doesn't
-                                // parse the transcript — it reads
-                                // the cached snapshot that
-                                // `record_usage()` keeps fresh.
-                                let mut combined = crate::observer::latest_usage();
-                                combined.source = "context_check".to_string();
-                                combined.ctx_used_tokens = snap.used_tokens;
-                                combined.ctx_total_tokens = snap.total_tokens;
-                                combined.ctx_used_pct = snap.used_pct;
-                                combined.ctx_free_pct = snap.free_pct;
-                                combined.ctx_window_tokens = snap.window_tokens;
-                                combined.ctx_categories = snap.categories;
-                                // §Context-window: an empty parse is
-                                // also "incomplete" — the operator
-                                // pressed the button, the modal
-                                // didn't surface data inside the
-                                // 700ms scrape window, and the
-                                // panel otherwise looks identical
-                                // to a button-press that never
-                                // happened. Fold both into the
-                                // same flag so the UI surfaces a
-                                // hint either way. `scrape_aborted`
-                                // stays reserved for actual
-                                // operator-interrupt preemption
-                                // (writer's
-                                // `SequenceOutcome::AbortedBeforeStep`);
-                                // conflating it with empty-parse
-                                // would make every slow-scrape look
-                                // like the operator hit Ctrl-C.
-                                combined.ctx_scrape_incomplete =
-                                    scrape_incomplete || scrape_empty;
-                                combined.scrape_aborted = aborted;
-                                // Cache the modal-enriched snapshot
-                                // so subsequent transcript ticks
-                                // (which carry `ctx_* = None`) don't
-                                // clobber these values when
-                                // `record_usage` merges on top.
-                                crate::observer::record_usage(combined.clone());
-                                crate::dispatch::send_or_warn(
-                                    "LinkCmd::SendMeta(Usage+context)",
-                                    &cmd_tx,
-                                    LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(combined))),
-                                )
-                                .await;
-                            } else {
-                                // §Context-window: no active claude
-                                // session — can't write `/context` to
-                                // a PTY. Publish an envelope anyway
-                                // so the JS panel doesn't sit at
-                                // "—" forever after the operator
-                                // pressed the button; the hint path
-                                // surfaces "no active session".
-                                let mut combined = crate::observer::latest_usage();
-                                combined.source = "context_check".to_string();
-                                combined.ctx_scrape_incomplete = true;
-                                combined.scrape_aborted = true;
-                                crate::dispatch::send_or_warn(
-                                    "LinkCmd::SendMeta(Usage+context:no-session)",
-                                    &cmd_tx,
-                                    LinkCmd::SendMeta(Box::new(EnvelopeBody::Usage(combined))),
-                                )
-                                .await;
-                            }
-                        } else if let EnvelopeBody::SnapshotRequest { chan } = &env.body {
-                            // §D Milestone 5 (Phase B): late-join screen dump.
-                            // Currently only the claude channel has a
-                            // `TermTracker`. A shell-channel request is a
-                            // future-work item (would need to mirror the VT
-                            // for the optional `bash` PTY).
-                            if chan == &TERM_CHAN_CLAUDE {
-                                if let Some(tx) = &active_link_tx {
-                                    let _ = tx
-                                        .send(PtyCmd::Snapshot {
-                                            chan: TERM_CHAN_CLAUDE,
-                                        })
-                                        .await;
-                                }
-                            } else {
-                                log::debug!(
-                                    "snapshot request for chan {chan} not yet wired (only claude has a VT)"
-                                );
-                            }
-                        } else if let EnvelopeBody::ShellRepaint { cols, rows } = &env.body {
-                            // §D shell WS late-join repaint: warren
-                            // asked us to SIGWINCH-jiggle the shell
-                            // PTY so bash repaints its prompt for a
-                            // fresh browser pane. Routed here (not
-                            // through `dispatch_to_pty`) because the
-                            // shell has a separate command channel
-                            // (`ShellHandle.tx`) — `dispatch_to_pty`
-                            // only knows about the claude PTY's
-                            // `pty_tx`. The handler is a no-op when
-                            // `RABBIT_ENABLE_SHELL=1` was not set
-                            // (no shell PTY to jiggle).
-                            if let Some(sh) = &shell {
-                                crate::dispatch::send_or_warn(
-                                    "ShellCmd::Repaint",
-                                    &sh.tx,
-                                    ShellCmd::Repaint {
-                                        cols: *cols,
-                                        rows: *rows,
+                                    StateFrame {
+                                        state: agent_state_from_observer(st),
+                                        session_id: observer.latest_session(),
+                                        reason: None,
                                     },
                                 )
                                 .await;
-                            } else {
-                                log::debug!(
-                                    "shell repaint for agent {agent_id} ignored: shell PTY not enabled"
-                                );
                             }
-                        } else if let Some(tx) = &active_link_tx {
-                            // The actor already decided the prompt's
-                            // fate (`PromptEcho` accepts, `PromptRejected`
-                            // already reached warren, `StopHook` is a
-                            // no-op). Dispatch what survived.
-                            dispatch_to_pty(
-                                &env,
-                                active_writer.as_ref(),
+                            None => {
+                                log::warn!("warren_link event channel closed");
+                            }
+                        }
+                    }
+                    outcome = outcome_rx.recv() => {
+                        if let Some(outcome) = outcome {
+                            handle_outcome(
+                                outcome,
+                                &mut crash_window,
+                                &mut dead,
+                                &mut active,
+                                &cmd_tx,
+                                &observer,
+                            )
+                            .await;
+                            health.set_alive(active.is_some());
+                            if shutdown.load(Ordering::SeqCst) && active.is_none() {
+                                health.set_shutting_down(true);
+                                break;
+                            }
+                        } else {
+                            log::warn!("outcome channel closed");
+                            break;
+                        }
+                    }
+                    _ = wait_for_shutdown(shutdown.clone()), if active.is_some() && !shutdown_acked => {
+                        shutdown_acked = true;
+                        log::info!("shutdown signal received; signaling graceful exit");
+                        health.set_shutting_down(true);
+                        if let Some(tx) = &active_link_tx {
+                            crate::dispatch::send_or_warn(
+                                "PtyCmd::GracefulShutdown",
                                 tx,
-                                initial_tui.cols,
-                                initial_tui.rows,
+                                PtyCmd::GracefulShutdown,
                             )
                             .await;
                         }
                     }
-                    Some(LinkEvent::Binary { chan, data }) => {
-                        if chan == TERM_CHAN_SHELL {
-                            if let Some(sh) = &shell {
-                                crate::dispatch::send_or_warn(
-                                    "ShellCmd::Write",
-                                    &sh.tx,
-                                    ShellCmd::Write(data),
-                                )
-                                .await;
-                            }
-                        } else if chan == TERM_CHAN_CLAUDE {
-                            // §diagnose backspace: opt-in via RUST_LOG=debug.
-                            // Logs every binary frame arriving on the
-                            // Claude channel so we can confirm the byte
-                            // (e.g. 0x7f for Backspace) reaches this
-                            // layer from the warren_link. Compare with the
-                            // browser-side `?debug_typing=1` console log
-                            // to pinpoint any byte mutation.
-                            log::debug!(
-                                "claude binary: {} bytes [{}]",
-                                data.len(),
-                                {
-                                    let head: Vec<String> = data.iter().take(8)
-                                        .map(|b| format!("{b:02x}"))
-                                        .collect();
-                                    let shown = head.join(" ");
-                                    if data.len() > 8 {
-                                        format!("{shown} …")
-                                    } else {
-                                        shown
-                                    }
-                                }
-                            );
-                            // Direct write through the shared writer —
-                            // bypasses the blocking reader's `pty_rx`
-                            // queue, which only drains between
-                            // `read()` calls. When claude is mid-turn
-                            // or sitting at a prompt with no further
-                            // output, that queue is starved; the user
-                            // sees multi-second delays or dropped
-                            // keystrokes. The War UI's typing path
-                            // (one binary frame per keystroke) is the
-                            // hardest-hit victim.
-                            write_claude_terminal_bytes(&data, active.as_ref()).await;
-                        } else {
-                            // Unknown channel — be lenient and drop
-                            // (matches `warren_link.rs`'s filter against the
-                            // known terminal channels).
-                            log::debug!(
-                                "ignoring binary frame on unknown chan {chan} ({} bytes)",
-                                data.len()
-                            );
-                        }
-                    }
-                    Some(LinkEvent::Connected) => {
-                        // §Reconnect state resync: the link just
-                        // (re)established the WS and delivered a
-                        // Hello with `state=Starting`. Warren has no
-                        // memory of the previous connection's state
-                        // and will see us as Starting until we push
-                        // a real State envelope. The supervisor's
-                        // own State(Idle) publish (inside
-                        // `spawn_run_one`) only fires when claude is
-                        // being spawned fresh — on a warren-side
-                        // restart with claude still running, that
-                        // path never runs and the scheduler sees
-                        // the agent as Starting forever, refusing to
-                        // dispatch. Push the current observer state
-                        // (Idle/Running/...) + session_id so the
-                        // scheduler and any browser pane see us in
-                        // the right shape immediately. On the very
-                        // first connect this is also fine:
-                        // `observer.latest_state()` is `Starting`
-                        // until `spawn_run_one` overrides it, so we
-                        // publish Starting here and Idle a few
-                        // hundred ms later when claude is up. A
-                        // duplicate State(Idle) arriving on the
-                        // first-connect path is harmless (idempotent
-                        // in `update_state`).
-                        let st = observer.latest_state();
-                        let _ = send_state(
-                            &observer,
-                            &cmd_tx,
-                            StateFrame {
-                                state: agent_state_from_observer(st),
-                                session_id: observer.latest_session(),
-                                reason: None,
-                            },
-                        )
-                        .await;
-                    }
-                    None => {
-                        log::warn!("warren_link event channel closed");
-                    }
-                }
-            }
-            outcome = outcome_rx.recv() => {
-                if let Some(outcome) = outcome {
-                    handle_outcome(
-                        outcome,
-                        &mut crash_window,
-                        &mut dead,
-                        &mut active,
-                        &cmd_tx,
-                        &observer,
-                    )
-                    .await;
-                    health.set_alive(active.is_some());
-                    if shutdown.load(Ordering::SeqCst) && active.is_none() {
+                    _ = wait_for_shutdown(shutdown.clone()), if active.is_none() && !shutdown_acked => {
+                        log::info!("shutdown signal received; exiting");
                         health.set_shutting_down(true);
                         break;
                     }
-                } else {
-                    log::warn!("outcome channel closed");
-                    break;
                 }
-            }
-            _ = wait_for_shutdown(shutdown.clone()), if active.is_some() && !shutdown_acked => {
-                shutdown_acked = true;
-                log::info!("shutdown signal received; signaling graceful exit");
-                health.set_shutting_down(true);
-                if let Some(tx) = &active_link_tx {
-                    crate::dispatch::send_or_warn(
-                        "PtyCmd::GracefulShutdown",
-                        tx,
-                        PtyCmd::GracefulShutdown,
-                    )
-                    .await;
-                }
-            }
-            _ = wait_for_shutdown(shutdown.clone()), if active.is_none() && !shutdown_acked => {
-                log::info!("shutdown signal received; exiting");
-                health.set_shutting_down(true);
-                break;
-            }
-        }
     }
 
     log::info!("rabbit supervisor exiting");
@@ -873,7 +873,7 @@ fn spawn_transcript_relay(
     });
     tokio::spawn(async move {
         while let Some(update) = urx.recv().await {
-            // §Cross-crate merge: a transcript tick fires on every
+            // a transcript tick fires on every
             // successful JSONL parse, which can race against a
             // freshly-published `ContextCheck` response. The
             // transcript-derived snapshot has `ctx_* = None` and
@@ -926,7 +926,7 @@ pub enum PtyCmd {
         cols: u16,
         rows: u16,
     },
-    /// §D Milestone 5 (Phase B): late-join screen dump. The blocking PTY
+    /// (Phase B): late-join screen dump. The blocking PTY
     /// thread owns the [`TermTracker`], so the snapshot has to be computed
     /// here (single-threaded access to `vt`) and shipped back to warren
     /// through the meta channel via `LinkCmd::SendMeta`.
@@ -939,7 +939,7 @@ pub enum PtyCmd {
 
 #[derive(Debug)]
 pub enum PtyEvt {
-    /// §A.7 / seq-numbered snapshot protocol — `chan`/`seq`/`data` so
+    /// — `chan`/`seq`/`data` so
     /// the wire can carry a per-channel monotonic counter the browser
     /// uses to know exactly which frames a late-arriving
     /// `ScreenSnapshot` already accounts for. `seq=0` is reserved for
@@ -951,7 +951,7 @@ pub enum PtyEvt {
         seq: u64,
         data: Vec<u8>,
     },
-    /// §Once-and-for-all writer actor: the blocking PTY thread no
+    // the blocking PTY thread no
     /// longer holds the PTY master writer. When it needs to write
     /// bytes (trust-dialog auto-accept, shutdown ESC, legacy
     /// `PtyCmd::Write` fallbacks in tests) it sends `WriteBack`
@@ -960,7 +960,7 @@ pub enum PtyEvt {
     /// inside the FIFO actor.
     WriteBack(Vec<u8>),
     Exited(PtyExitStatus),
-    /// §D Milestone 5 (Phase B): a structured meta envelope generated inside
+    /// (Phase B): a structured meta envelope generated inside
     /// the blocking PTY thread (currently only `ScreenSnapshot`). The driver
     /// loop forwards these to warren via `LinkCmd::SendMeta` so they ride
     /// the same seq/ack channel as everything else.
@@ -983,7 +983,7 @@ struct ActiveSession {
     /// (e.g. on a wire-level `Restart` envelope) even when the blocking
     /// PTY reader thread is wedged in `read()`.
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
-    /// §Once-and-for-all PTY writer: a [`WriterHandle`] backed by a
+    // a [`WriterHandle`] backed by a
     /// dedicated tokio task that owns the kernel-side writer end of
     /// the claude PTY master. The outer loop and the blocking PTY
     /// thread both submit `WriteCmd`s (binary keystrokes, slash
@@ -991,7 +991,7 @@ struct ActiveSession {
     /// handle. FIFO ordering and Sequence atomicity are enforced
     /// inside the actor — see `rabbit/src/pty_writer.rs`.
     writer: crate::pty_writer::WriterHandle,
-    /// §Usage-limits: every byte the blocking PTY reader pulls off
+    // every byte the blocking PTY reader pulls off
     /// the master is also published here, so the synchronous
     /// `/usage` scrape routine in the outer loop can subscribe a
     /// short-lived `Receiver` and drain the overlay for ~2s without
@@ -1001,7 +1001,7 @@ struct ActiveSession {
     /// somehow falls behind, the `Lagged` variant of `RecvError`
     /// signals the parser to keep draining.
     term_bcast_tx: broadcast::Sender<TermFrame>,
-    /// §Context-window: shared handle to the `TermTracker` so the
+    // shared handle to the `TermTracker` so the
     /// `/context` scrape routine can snapshot the screen state
     /// before writing the modal and again after dismiss, then
     /// publish the post-dismiss snapshot to restore the operator's
@@ -1039,7 +1039,7 @@ fn spawn_run_one(
     let (pty_tx, mut pty_rx) = mpsc::channel::<PtyCmd>(128);
     let (pty_evt_tx, pty_evt_rx) = mpsc::channel::<PtyEvt>(128);
     let (outcome_tx, outcome_rx_in) = mpsc::channel::<RunOutcome>(8);
-    // §Usage-limits: a broadcast channel lets the synchronous
+    // a broadcast channel lets the synchronous
     // `/usage` scrape (driven by `EnvelopeBody::UsageCheck` from the
     // outer loop) observe PTY bytes without contending with the
     // existing `pty_evt_tx` mpsc — the mpsc is owned by the driver
@@ -1076,7 +1076,7 @@ fn spawn_run_one(
     let vt_arc: Arc<parking_lot::Mutex<crate::vt::TermTracker>> = Arc::new(
         parking_lot::Mutex::new(crate::vt::TermTracker::new(cols, rows, 5_000)),
     );
-    // §Context-window / §A.7: shared "next seq to assign" counter,
+    // shared "next seq to assign" counter,
     // updated by the blocking PTY reader thread under its own mutex
     // and read by other tasks (PtyCmd::Snapshot, run_context_scrape)
     // to set `after_seq` on `ScreenSnapshot` envelopes. Starts at 1
@@ -1084,7 +1084,7 @@ fn spawn_run_one(
     // ordering is fine; we only need a consistent read-after-write.
     let next_seq: Arc<std::sync::atomic::AtomicU64> =
         Arc::new(std::sync::atomic::AtomicU64::new(1));
-    // §Once-and-for-all writer actor: take the writer ONCE here,
+    // take the writer ONCE here,
     // hand it to the dedicated tokio actor task, and let every
     // other site (outer loop, blocking thread via WriteBack
     // events, scraper) submit through the `WriterHandle`'s
@@ -1128,14 +1128,14 @@ fn spawn_run_one(
         let mut io_buf = [0u8; 4096];
         let mut graceful_pending = false;
         let mut graceful_since: Option<Instant> = None;
-        // §D Milestone 5 (Phase A): mirror the PTY byte stream into a
+        // (Phase A): mirror the PTY byte stream into a
         // server-side virtual terminal. Passive today — a later phase
         // serializes `vt.snapshot()` for late browser joiners in place of the
         // SIGWINCH jiggle. 5k-line scrollback matches the design budget.
         // `vt` is shared with the writer actor's resize callback via the
         // `Arc<Mutex<TermTracker>>` taken in the outer scope.
         let mut trust_watcher = auto_trust.then(|| crate::trust::TrustWatcher::new(3));
-        // §A.7 / seq-numbered snapshot protocol — single-producer seq
+        // — single-producer seq
         // counter for the bytes this blocking thread feeds out of
         // claude's PTY. Stored in the shared `next_seq` atomic so
         // sibling tasks (PtyCmd::Snapshot, run_context_scrape) can
@@ -1153,7 +1153,7 @@ fn spawn_run_one(
                 if graceful_since.is_none() {
                     graceful_since = Some(Instant::now());
                     log::info!("shutdown: sending ESC + waiting up to {grace_period:?}");
-                    // §Once-and-for-all writer actor: the blocking
+                    // the blocking
                     // thread no longer holds the master writer.
                     // Hand the shutdown ESC off via `PtyEvt::WriteBack`
                     // so the driver task submits it through the
@@ -1166,11 +1166,11 @@ fn spawn_run_one(
                     {
                         break;
                     }
-                    // §A.7: synthetic shutdown placeholder — `seq=0`
+                    // synthetic shutdown placeholder — `seq=0`
                     // intentionally marks it as "not a live byte",
                     // and `chan=TERM_CHAN_CLAUDE` is a no-op for the
                     // browser (it's not a wire event; it's only
-                    // emitted through the meta plane after the §D
+                    // emitted through the meta plane after the
                     // refactor and the browser never sees it). The
                     // string itself is preserved so the pre-existing
                     // debug surfaces stay identical.
@@ -1191,7 +1191,7 @@ fn spawn_run_one(
             if let Ok(cmd) = pty_rx.try_recv() {
                 match cmd {
                     PtyCmd::Write(b) => {
-                        // §Once-and-for-all writer actor: bytes
+                        // bytes
                         // coming in via `PtyCmd::Write` (legacy
                         // fallback path; tests; pre-`WriterHandle`
                         // callers) are forwarded to the driver
@@ -1216,7 +1216,7 @@ fn spawn_run_one(
                     }
                     PtyCmd::Snapshot { chan } => {
                         let snap = vt_arc.lock().snapshot();
-                        // §A.7: populate `after_seq` from the running
+                        // populate `after_seq` from the running
                         // counter. `0` means "we have never fed a byte on
                         // this channel — don't discard anything." Otherwise
                         // the snapshot reports the most-recently-assigned
@@ -1254,7 +1254,7 @@ fn spawn_run_one(
                         if graceful_since.is_none() {
                             graceful_since = Some(Instant::now());
                             log::info!("graceful shutdown: sending ESC");
-                            // §Writer actor: same WriteBack path as
+                            // same WriteBack path as
                             // the shutdown branch above.
                             if pty_evt_tx
                                 .blocking_send(PtyEvt::WriteBack(b"\x1b".to_vec()))
@@ -1306,7 +1306,7 @@ fn spawn_run_one(
                     if let Some(tw) = trust_watcher.as_mut() {
                         if let Some(resp) = tw.observe(&io_buf[..n]) {
                             log::info!("trust dialog detected; auto-accepting with Enter");
-                            // §Writer actor: trust-dialog bytes
+                            // trust-dialog bytes
                             // forward via WriteBack. One-shot,
                             // bounded (TrustWatcher::new(3) caps
                             // the number of acceptances), so
@@ -1320,7 +1320,7 @@ fn spawn_run_one(
                             }
                         }
                     }
-                    // §A.7: assign the next seq to this read, then bump.
+                    // assign the next seq to this read, then bump.
                     // The blocking thread is the single producer, so no
                     // CAS / Ordering is required for correctness. Stored
                     // in the shared atomic so PtyCmd::Snapshot and
@@ -1332,7 +1332,7 @@ fn spawn_run_one(
                         seq,
                         data: io_buf[..n].to_vec(),
                     };
-                    // §Usage-limits: also publish a copy to the
+                    // also publish a copy to the
                     // broadcast so the synchronous `/usage` scrape
                     // (driven by `EnvelopeBody::UsageCheck`) can
                     // observe overlay bytes without contending with
@@ -1391,7 +1391,7 @@ fn spawn_run_one(
     let replay_cap_inner = replay_cap;
     let shutdown_for_driver = shutdown.clone();
     let pty_tx_for_cleanup = pty_tx.clone();
-    // §Writer actor: the driver task consumes `WriteBack` events
+    // the driver task consumes `WriteBack` events
     // from the blocking thread and submits them through the actor
     // via this cloned handle. The blocking thread doesn't have
     // direct access to the writer anymore.
@@ -1420,77 +1420,77 @@ fn spawn_run_one(
         let writer_handle = writer_handle_for_driver_task;
         loop {
             tokio::select! {
-                biased;
-                chunk = pty_evt_rx_inner.recv() => {
-                    match chunk {
-                        // §A.7: per-channel seq rides through verbatim —
-                        // warren is a dumb pipe and never invents or
-                        // rewrites a seq. (The §3 invariant: warren's
-                        // outgoing seq on chan X equals rabbit's emitted
-                        // seq on chan X.)
-                        Some(PtyEvt::Read { chan, seq, data }) => {
-                            {
-                                let mut buf = replay_buf_inner.lock();
-                                buf.push_back(TermFrame {
-                                    chan,
-                                    seq,
-                                    data: data.clone(),
-                                });
-                                trim_replay(&mut buf, replay_cap_inner);
+                            biased;
+                            chunk = pty_evt_rx_inner.recv() => {
+                                match chunk {
+            // per-channel seq rides through verbatim —
+                                    // warren is a dumb pipe and never invents or
+                                    // rewrites a seq. (The : warren's
+                                    // outgoing seq on chan X equals rabbit's emitted
+                                    // seq on chan X.)
+                                    Some(PtyEvt::Read { chan, seq, data }) => {
+                                        {
+                                            let mut buf = replay_buf_inner.lock();
+                                            buf.push_back(TermFrame {
+                                                chan,
+                                                seq,
+                                                data: data.clone(),
+                                            });
+                                            trim_replay(&mut buf, replay_cap_inner);
+                                        }
+                                        let _ = cmd_tx_driver
+                                            .send(LinkCmd::SendBinary {
+                                                chan,
+                                                seq,
+                                                data,
+                                            })
+                                            .await;
+                                    }
+                                    Some(PtyEvt::Meta(body)) => {
+                                        crate::dispatch::send_or_warn(
+                                            "LinkCmd::SendMeta(PtyEvt::Meta)",
+                                            &cmd_tx_driver,
+                                            LinkCmd::SendMeta(body),
+                                        )
+                                        .await;
+                                    }
+                                    Some(PtyEvt::WriteBack(data)) => {
+            // bytes
+                                        // raised by the blocking PTY thread
+                                        // (trust-dialog auto-accept, shutdown
+                                        // ESC, legacy `PtyCmd::Write`
+                                        // fallbacks) flow through the FIFO here
+                                        // so they observe the same ordering /
+                                        // cancellation properties as the
+                                        // outer-loop's other submissions.
+                                        writer_handle.bytes(data).await;
+                                    }
+                                    Some(PtyEvt::Exited(status)) => {
+                                        log::info!("claude exited: kind={:?}", ExitKind::from(&status));
+                                        let outcome = if shutdown_for_driver.load(Ordering::SeqCst) {
+                                            RunOutcome::Shutdown
+                                        } else if matches!(ExitKind::from(&status), ExitKind::Clean) {
+                                            RunOutcome::CleanExit(status)
+                                        } else {
+                                            RunOutcome::Crashed(status)
+                                        };
+                                        crate::dispatch::send_or_warn(
+                                            "RunOutcome",
+                                            &outcome_tx_driver,
+                                            outcome,
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                    None => break,
+                                }
                             }
-                            let _ = cmd_tx_driver
-                                .send(LinkCmd::SendBinary {
-                                    chan,
-                                    seq,
-                                    data,
-                                })
-                                .await;
+                            evt = obs_rx.recv() => {
+                                if let Ok(ev) = evt {
+                                    forward_observer_event(&cmd_tx_driver, &ev).await;
+                                }
+                            }
                         }
-                        Some(PtyEvt::Meta(body)) => {
-                            crate::dispatch::send_or_warn(
-                                "LinkCmd::SendMeta(PtyEvt::Meta)",
-                                &cmd_tx_driver,
-                                LinkCmd::SendMeta(body),
-                            )
-                            .await;
-                        }
-                        Some(PtyEvt::WriteBack(data)) => {
-                            // §Once-and-for-all writer actor: bytes
-                            // raised by the blocking PTY thread
-                            // (trust-dialog auto-accept, shutdown
-                            // ESC, legacy `PtyCmd::Write`
-                            // fallbacks) flow through the FIFO here
-                            // so they observe the same ordering /
-                            // cancellation properties as the
-                            // outer-loop's other submissions.
-                            writer_handle.bytes(data).await;
-                        }
-                        Some(PtyEvt::Exited(status)) => {
-                            log::info!("claude exited: kind={:?}", ExitKind::from(&status));
-                            let outcome = if shutdown_for_driver.load(Ordering::SeqCst) {
-                                RunOutcome::Shutdown
-                            } else if matches!(ExitKind::from(&status), ExitKind::Clean) {
-                                RunOutcome::CleanExit(status)
-                            } else {
-                                RunOutcome::Crashed(status)
-                            };
-                            crate::dispatch::send_or_warn(
-                                "RunOutcome",
-                                &outcome_tx_driver,
-                                outcome,
-                            )
-                            .await;
-                            break;
-                        }
-                        None => break,
-                    }
-                }
-                evt = obs_rx.recv() => {
-                    if let Ok(ev) = evt {
-                        forward_observer_event(&cmd_tx_driver, &ev).await;
-                    }
-                }
-            }
         }
         health.set_alive(false);
         crate::dispatch::send_or_warn("PtyCmd::Terminate", &pty_tx_for_cleanup, PtyCmd::Terminate)
@@ -1638,7 +1638,7 @@ fn build_envelopes(ev: &ObserverEvent) -> Vec<EnvelopeBody> {
             usage: ev.usage.clone(),
             error: None,
         }),
-        // §Scheduled-prompts: a `PermissionRequest` hook fired while
+        // a `PermissionRequest` hook fired while
         // an in-flight scheduled run is waiting for operator approval.
         // The scheduler's observation task subscribes to `meta_tx` and
         // uses this to interrupt the prompt. `by_connection_id: None`
@@ -1735,7 +1735,7 @@ pub(crate) fn terminate_and_report_exited(pty: &mut Pty, evt_tx: &mpsc::Sender<P
 /// sat in the queue until the next time data flowed. The operator saw
 /// multi-second input lag and dropped characters.
 ///
-/// §Once-and-for-all writer actor: this helper now submits bytes
+/// this helper now submits bytes
 /// through the [`crate::pty_writer::WriterHandle`] instead of
 /// locking a `Mutex<Writer>`. FIFO ordering vs. other writes
 /// (slash commands, scraper sequences) is enforced inside the
@@ -1757,7 +1757,7 @@ async fn write_claude_terminal_bytes(data: &[u8], active: Option<&ActiveSession>
     active.writer.bytes(data.to_vec()).await;
 }
 
-/// §Usage-limits: drive the synchronous `/usage` overlay scrape.
+/// drive the synchronous `/usage` overlay scrape.
 ///
 /// # Active scraping
 ///
@@ -1785,7 +1785,7 @@ async fn write_claude_terminal_bytes(data: &[u8], active: Option<&ActiveSession>
 ///    Esc closes a dialog, double-Esc would rewind the
 ///    conversation and steal input focus).
 ///
-/// §Once-and-for-all writer actor: all bytes the scraper emits
+/// all bytes the scraper emits
 /// (`/usage`, the Down-arrows, the dismissing Esc) are packed
 /// into ONE [`crate::pty_writer::WriteCmd::Sequence`] and
 /// submitted as a single FIFO unit. Nothing else can interleave
@@ -1813,7 +1813,7 @@ async fn run_usage_scrape(
     /// would burn latency without surfacing new plan-level data.
     const MAX_SCROLL_ROUNDS: usize = 5;
 
-    // §Writer actor: split the scrape into two phases so the
+    // split the scrape into two phases so the
     // first phase carries the higher initial-paint delay and
     // the second phase carries the smaller per-scroll delay.
     // The actor's `inter_item_delay` is uniform per Sequence,
@@ -1927,7 +1927,7 @@ async fn run_usage_scrape(
     (limits, aborted)
 }
 
-/// §Context-window: drive the synchronous `/context` overlay scrape.
+/// drive the synchronous `/context` overlay scrape.
 ///
 /// Mirrors `run_usage_scrape` but is simpler — `/context` is a
 /// single-page modal with no scroll rounds, so we only wait for the
@@ -1948,7 +1948,7 @@ async fn run_context_scrape(
     use crate::pty_writer::SequenceOutcome;
     use tokio::time::Duration;
 
-    // §Context-window: `/context` paints faster than `/usage` —
+    // `/context` paints faster than `/usage` —
     // the modal is single-page and has no scroll rounds. We
     // budget 2500ms (matching the button-disabled window the UI
     // sets) so a slow host OR a `claude` mid-tool-call has time
@@ -1964,9 +1964,9 @@ async fn run_context_scrape(
     // bug; see the subscribe-then-write note below.
     const INITIAL_BUDGET: Duration = Duration::from_millis(2500);
     const TICK: Duration = Duration::from_millis(100);
-    // §Context-window: settle window between dismiss and the
+    // settle window between dismiss and the
     // restore-snapshot. Lets the modal fully unrender before we
-    // capture the restored screen — the §A.7 snapshot protocol's
+    // capture the restored screen — the 's
     // `after_seq` watermark already handles ordering at the
     // consumer, but capturing the screen mid-unrender would still
     // bleed modal residue into the restore grid.
@@ -1974,7 +1974,7 @@ async fn run_context_scrape(
 
     let pre_modal = vt.lock().snapshot();
 
-    // §Context-window: subscribe to the PTY broadcast **before**
+    // subscribe to the PTY broadcast **before**
     // sending the slash. A fresh `broadcast::Receiver` only sees
     // frames produced after `subscribe()` returns — anything
     // already in the ring buffer is not replayed. If we wrote
@@ -2020,7 +2020,7 @@ async fn run_context_scrape(
 
     snap.scrape_incomplete = !snap.is_empty() && !snap.all_populated();
 
-    // §Context-window / §A.7: capture the now-restored screen and
+    // capture the now-restored screen and
     // publish it as a `ScreenSnapshot` envelope. The browser's
     // two-step apply (a) drops buffered live frames whose `seq ≤
     // snapshot.after_seq` (already baked into the snapshot grid),
@@ -2031,7 +2031,7 @@ async fn run_context_scrape(
     // this restore the operator's xterm would be left showing the
     // leftover modal text after dismiss.
     tokio::time::sleep(RESTORE_SETTLE).await;
-    // §Context-window / §A.7: publish a `ScreenSnapshot` that
+    // publish a `ScreenSnapshot` that
     // wipes the modal off the operator's xterm and lays the
     // restored pre-modal grid back down. `after_seq` MUST
     // reflect the live reader's seq watermark AT THE MOMENT OF
@@ -2160,7 +2160,7 @@ async fn dispatch_to_pty(
     cols: u16,
     rows: u16,
 ) {
-    // §Once-and-for-all writer actor: byte-producing commands
+    // byte-producing commands
     // (Prompt / Slash / Interrupt / Clear) compose their bytes
     // into a `Vec<u8>` and submit the whole thing as a single
     // `WriteCmd::Bytes` through the writer actor's FIFO. Each
@@ -2181,7 +2181,7 @@ async fn dispatch_to_pty(
             std::mem::take(&mut out)
         }
         EnvelopeBody::Interrupt => {
-            // §Writer actor — preempt an in-flight scrape before
+            // — preempt an in-flight scrape before
             // the Ctrl-C byte goes out. Order matters:
             //
             // 1. `cancel()` flips the cancellation flag
@@ -2448,7 +2448,7 @@ mod tests {
         ));
     }
 
-    // §Status-badge regression: every observer event whose `state` field is
+    // every observer event whose `state` field is
     // `Some(_)` MUST produce a `State` envelope in addition to the side-
     // effect envelope (`PromptEcho` / `StopHook`). Without this, the
     // browser's status badge is stuck on whatever the supervisor emitted
@@ -3134,7 +3134,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // §A.7 / seq-numbered snapshot protocol — tests for the per-channel
+    // — tests for the per-channel
     // seq counter, the `bytes_read_since_spawn` watermark used to
     // compute `ScreenSnapshotBody::after_seq`, and the wire-shape rule
     // the driver task maintains when it forwards `PtyEvt::Read →
@@ -3403,7 +3403,7 @@ mod tests {
         );
     }
 
-    // §Context-window abort-flag regression: the operator sees "scrape
+    // the operator sees "scrape
     // aborted by interrupt — partial result" / "context scrape aborted —
     // claude is not running a turn" only when the writer's
     // `SequenceOutcome::AbortedBeforeStep` actually fired. An empty
@@ -3484,7 +3484,7 @@ mod tests {
         );
     }
 
-    // §Context-window abort-flag regression: when the writer's
+    // when the writer's
     // cancel flag is flipped mid-sequence, the in-flight `Sequence`
     // should be preempted and `run_context_scrape` must surface
     // `aborted = true`. This is the path the JS relies on for
@@ -3554,7 +3554,7 @@ mod tests {
         );
     }
 
-    // §Context-window abort-flag caller-side regression: the
+    // the
     // ContextCheck arm MUST set `combined.scrape_aborted = aborted`
     // (the writer's preemption signal), not `combined.scrape_aborted
     // = scrape_empty`. The earlier two tests pin `run_context_scrape`
@@ -3591,7 +3591,7 @@ mod tests {
         assert!(abort, "writer preemption flips scrape_aborted");
     }
 
-    // §Context-window end-to-end: drives `run_context_scrape`
+    // drives `run_context_scrape`
     // against a fake TUI that emits a synthetic `/context` modal
     // payload. This is the contract the live UI button relies on
     // — if the parser regresses OR if the supervisor's
@@ -3710,7 +3710,7 @@ Context\n\
         );
     }
 
-    // §Context-window real-bytes reproducer: drives
+    // drives
     // `run_context_scrape` end-to-end against a shell child
     // that pipes the freshly-captured `/tmp/context5.bin`
     // bytes (live PTY capture from the current Claude session).
@@ -3846,7 +3846,7 @@ Context\n\
         assert!(snap.categories.is_some(), "categories must populate");
     }
 
-    // §Context-window coalescing regression: when two `ContextCheck`
+    // when two `ContextCheck`
     // envelopes arrive within a single scrape window, both must
     // observe the same scrape result. The original implementation
     // wrapped a `tokio::sync::watch::Receiver` in `Arc<Mutex<>>` and
@@ -3923,7 +3923,7 @@ Context\n\
         assert!(!r2.1, "waiter 2 must see aborted=false");
     }
 
-    // §Context-window coalescing race regression: the scrape may
+    // the scrape may
     // complete BEFORE the second waiter calls `notified()`. Watch
     // channels drop notifications for receivers that subscribe after
     // the send; `Notify` does too unless the waiter checks the

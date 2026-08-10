@@ -280,7 +280,7 @@ async fn claude_context_check(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AxumServerError> {
     state.http_context_check(&headers, id).await?;
-    // §Context-window: 202 Accepted mirrors `claude_usage_check`.
+    // 202 Accepted mirrors `claude_usage_check`.
     // The request triggered an async scrape on the rabbit side; the
     // parsed context-window usage arrives on the SSE stream a moment
     // later. The browser already has the open SSE connection and

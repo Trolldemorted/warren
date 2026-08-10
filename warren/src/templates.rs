@@ -167,7 +167,7 @@ pub struct AgentClaudeTemplate {
 
 #[derive(Template)]
 #[template(path = "agent_shell.html")]
-/// §D Milestone 5: secondary bash PTY page. Same shape as
+/// secondary bash PTY page. Same shape as
 /// `AgentClaudeTemplate` — same xterm.js pane, different WS endpoint
 /// and a smaller UI (no action buttons, just the live terminal).
 pub struct AgentShellTemplate {

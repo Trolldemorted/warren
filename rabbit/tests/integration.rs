@@ -1,4 +1,4 @@
-//! §A.10 `integration` — milestone-1 dispatch discipline.
+//! `integration` — milestone-1 dispatch discipline.
 //!
 //! Milestone-1's acceptance checklist (prompt/Stop roundtrip, `/clear`, ESC
 //! interrupt, slash) has two layers:
@@ -109,7 +109,7 @@ fn prompt_rejected_envelope_is_not_a_log() {
 
 #[test]
 fn prompt_with_connection_id_round_trips() {
-    // §Cross-tab prompt rejection visibility: a browser stamped
+    // a browser stamped
     // `by_connection_id` MUST round-trip through serde so warren
     // can filter on the rejection banner. v1 envelopes (no field)
     // must still deserialize cleanly under v2.

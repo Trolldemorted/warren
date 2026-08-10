@@ -1,4 +1,4 @@
-//! §D Milestone 4 — seq/ack meta replay across a WS reconnect.
+//! — seq/ack meta replay across a WS reconnect.
 //!
 //! `MetaRing` (`meta_ring.rs`) buffers every structured meta event the link
 //! sends, keyed by the seq stamped into its envelope. On each WS attempt the

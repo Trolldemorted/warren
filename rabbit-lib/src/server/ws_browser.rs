@@ -69,7 +69,7 @@ pub async fn handle(
     let mut meta_rx = handle.subscribe_meta();
 
     for TermFrame { chan, seq, data } in handle.replay_term() {
-        // §A.7: replay re-emits each frame verbatim with the seq that
+        // replay re-emits each frame verbatim with the seq that
         // rabbit assigned it. The browser uses that seq to trim buffered
         // live frames on a late-arriving `ScreenSnapshot::after_seq`. The
         // /shell endpoint shares the same broadcast channel — its own
@@ -88,7 +88,7 @@ pub async fn handle(
             break;
         }
     }
-    // §D Milestone 5 (Phase C): ask rabbit for an authoritative `ScreenSnapshot`
+    // (Phase C): ask rabbit for an authoritative `ScreenSnapshot`
     // after flushing the bounded replay buffer. The browser's `applyMeta`
     // resets xterm.js and paints the snapshot precisely — replacing the v1
     // 250 ms sleep + SIGWINCH jiggle that used to live here. That jiggle
@@ -113,115 +113,115 @@ pub async fn handle(
 
     loop {
         tokio::select! {
-            biased;
-            chunk = term_rx.recv() => {
-                let frame = match chunk {
-                    Ok(f) => f,
-                    Err(_) => break,
-                };
-                // §A.7: warren is a dumb pipe for the term stream — the
-                // actor hands us a `TermFrame { chan, seq, data }`, we
-                // re-emit the same shape on the browser socket so the
-                // browser can match live frames against the snapshot's
-                // `after_seq` and drop the ones already covered by the
-                // snapshot grid.
-                let TermFrame { chan, seq, data } = frame;
-                if chan != TERM_CHAN_CLAUDE {
-                    // Shell frames have their own WS endpoint.
-                    continue;
-                }
-                if data.is_empty() {
-                    continue;
-                }
-                let mut out = Vec::with_capacity(9 + data.len());
-                out.push(chan);
-                out.extend_from_slice(&seq.to_be_bytes());
-                out.extend_from_slice(&data);
-                if sink.send(TransportMsg::Binary(out)).await.is_err() {
-                    break;
-                }
-            }
-            ev = meta_rx.recv() => {
-                match ev {
-                    Ok(body) => {
-                        let env = Envelope {
-                            v: PROTOCOL_VERSION,
-                            seq: 0,
-                            body,
+                    biased;
+                    chunk = term_rx.recv() => {
+                        let frame = match chunk {
+                            Ok(f) => f,
+                            Err(_) => break,
                         };
-                        if let Ok(s) = serde_json::to_string(&env) {
-                            if sink.send(TransportMsg::Text(s)).await.is_err() {
-                                break;
-                            }
+        // warren is a dumb pipe for the term stream — the
+                        // actor hands us a `TermFrame { chan, seq, data }`, we
+                        // re-emit the same shape on the browser socket so the
+                        // browser can match live frames against the snapshot's
+                        // `after_seq` and drop the ones already covered by the
+                        // snapshot grid.
+                        let TermFrame { chan, seq, data } = frame;
+                        if chan != TERM_CHAN_CLAUDE {
+                            // Shell frames have their own WS endpoint.
+                            continue;
+                        }
+                        if data.is_empty() {
+                            continue;
+                        }
+                        let mut out = Vec::with_capacity(9 + data.len());
+                        out.push(chan);
+                        out.extend_from_slice(&seq.to_be_bytes());
+                        out.extend_from_slice(&data);
+                        if sink.send(TransportMsg::Binary(out)).await.is_err() {
+                            break;
                         }
                     }
-                    Err(_) => break,
-                }
-            }
-            msg = stream.next() => {
-                let Some(msg) = msg else { break; };
-                let msg = match msg {
-                    Ok(m) => m,
-                    Err(_) => break,
-                };
-                match msg {
-                    TransportMsg::Text(t) => {
-                        if let Ok(env) = serde_json::from_str::<Envelope>(&t) {
-                            if let Err(e) = forward_browser_message(
-                                &handle,
-                                env,
-                                viewer_mode,
-                            ).await {
-                                log::debug!("forward failed: {e:?}");
+                    ev = meta_rx.recv() => {
+                        match ev {
+                            Ok(body) => {
+                                let env = Envelope {
+                                    v: PROTOCOL_VERSION,
+                                    seq: 0,
+                                    body,
+                                };
+                                if let Ok(s) = serde_json::to_string(&env) {
+                                    if sink.send(TransportMsg::Text(s)).await.is_err() {
+                                        break;
+                                    }
+                                }
                             }
+                            Err(_) => break,
                         }
                     }
-                    TransportMsg::Binary(mut b) => {
-                        if b.is_empty() { continue; }
-                        let chan = b.remove(0);
-                        // The Claude channel carries raw bytes typed into the
-                        // xterm.js pane. They must reach claude's PTY, not be
-                        // re-broadcast to other viewers. The actor re-prepends
-                        // the channel byte on the way to rabbit.
-                        //
-                        // §D read-only viewer mode: drop typed bytes for viewer
-                        // connections. The JS already gates `term.onData` on
-                        // `viewerMode`, but a hostile client could still send
-                        // binary frames — server-side enforcement is the actual
-                        // contract.
-                        if chan == 0x01 && !viewer_mode {
-                            if let Err(e) =
-                                handle.send_terminal_bytes(
-                                    TERM_CHAN_CLAUDE,
-                                    Bytes::from(b),
-                                ).await
-                            {
-                                log::debug!("send_terminal_bytes failed: {e:?}");
+                    msg = stream.next() => {
+                        let Some(msg) = msg else { break; };
+                        let msg = match msg {
+                            Ok(m) => m,
+                            Err(_) => break,
+                        };
+                        match msg {
+                            TransportMsg::Text(t) => {
+                                if let Ok(env) = serde_json::from_str::<Envelope>(&t) {
+                                    if let Err(e) = forward_browser_message(
+                                        &handle,
+                                        env,
+                                        viewer_mode,
+                                    ).await {
+                                        log::debug!("forward failed: {e:?}");
+                                    }
+                                }
                             }
+                            TransportMsg::Binary(mut b) => {
+                                if b.is_empty() { continue; }
+                                let chan = b.remove(0);
+                                // The Claude channel carries raw bytes typed into the
+                                // xterm.js pane. They must reach claude's PTY, not be
+                                // re-broadcast to other viewers. The actor re-prepends
+                                // the channel byte on the way to rabbit.
+                                //
+        // drop typed bytes for viewer
+                                // connections. The JS already gates `term.onData` on
+                                // `viewerMode`, but a hostile client could still send
+                                // binary frames — server-side enforcement is the actual
+                                // contract.
+                                if chan == 0x01 && !viewer_mode {
+                                    if let Err(e) =
+                                        handle.send_terminal_bytes(
+                                            TERM_CHAN_CLAUDE,
+                                            Bytes::from(b),
+                                        ).await
+                                    {
+                                        log::debug!("send_terminal_bytes failed: {e:?}");
+                                    }
+                                }
+                            }
+                            TransportMsg::Close(_) => break,
+                            // Incoming Pings get a Pong reply automatically at the
+                            // tungstenite protocol layer; we drop both Ping and
+                            // Pong from the application loop (their only purpose
+                            // here is keepalive, which we drive ourselves in the
+                            // 4th select arm below).
+                            TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
                         }
                     }
-                    TransportMsg::Close(_) => break,
-                    // Incoming Pings get a Pong reply automatically at the
-                    // tungstenite protocol layer; we drop both Ping and
-                    // Pong from the application loop (their only purpose
-                    // here is keepalive, which we drive ourselves in the
-                    // 4th select arm below).
-                    TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
+                    _ = ping_interval.tick() => {
+                        // Server-initiated heartbeat. axum/tungstenite does NOT
+                        // ship a default keepalive, so without this arm the
+                        // connection dies at the first intermediary idle
+                        // timeout. An empty payload is fine — the protocol
+                        // allows arbitrary application data, and the peer only
+                        // needs the frame header to refresh the proxy's
+                        // activity timer.
+                        if sink.send(TransportMsg::Ping(Vec::new())).await.is_err() {
+                            break;
+                        }
+                    }
                 }
-            }
-            _ = ping_interval.tick() => {
-                // Server-initiated heartbeat. axum/tungstenite does NOT
-                // ship a default keepalive, so without this arm the
-                // connection dies at the first intermediary idle
-                // timeout. An empty payload is fine — the protocol
-                // allows arbitrary application data, and the peer only
-                // needs the frame header to refresh the proxy's
-                // activity timer.
-                if sink.send(TransportMsg::Ping(Vec::new())).await.is_err() {
-                    break;
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -248,7 +248,7 @@ async fn forward_browser_message(
     env: Envelope,
     viewer_mode: bool,
 ) -> anyhow::Result<()> {
-    // §D read-only viewer mode: drop input frames unconditionally when
+    // drop input frames unconditionally when
     // viewer_mode is on. Even though the JS template hides the input
     // affordances, the WS itself can still receive any envelope, so the
     // server is the last line of defense.
@@ -367,7 +367,7 @@ mod tests {
         }
     }
 
-    /// §Reject empty payloads: the browser inbound boundary drops
+    // the browser inbound boundary drops
     /// empty / whitespace-only `Prompt.text` envelopes before they reach
     /// the actor. Without this guard, a stray Enter keystroke (or a
     /// buggy client) would push an empty prompt into the busy-gate,

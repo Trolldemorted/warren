@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const TERM_CHAN_CLAUDE: u8 = 0x01;
-/// §D Milestone 5: secondary terminal channel for `/agent/:id/shell`.
+/// secondary terminal channel for `/agent/:id/shell`.
 /// A `bash` PTY on the same rabbit, distinct from the main Claude
 /// channel so it can be subscribed to (and written to) independently.
 pub const TERM_CHAN_SHELL: u8 = 0x02;
 
-/// §A.7 / seq-numbered snapshot protocol — one server→browser binary
+/// — one server→browser binary
 /// term-stream chunk, carrying the channel byte, the per-channel seq
 /// that the producer (the blocking PTY reader thread or shell reader)
 /// assigned it, and the raw PTY bytes for that chunk. The replay
@@ -53,7 +53,7 @@ pub enum EnvelopeBody {
         id: uuid::Uuid,
         text: String,
         by: String,
-        /// §Cross-tab prompt rejection visibility: the originating
+        // the originating
         /// browser's `connection_id` so subscribers can filter
         /// `PromptEcho` / `PromptRejected` to their own prompts.
         /// `None` when the producer is the HTTP path (no browser tab
@@ -61,7 +61,7 @@ pub enum EnvelopeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by_connection_id: Option<uuid::Uuid>,
     },
-    /// §D reject-when-Running outcome: a `Prompt` arrived while the agent
+    // a `Prompt` arrived while the agent
     /// was already `Running`, so the supervisor bounced it instead of
     /// injecting keystrokes into a live turn. Distinct from a generic
     /// `Log { level: "warn" }` so warren can surface a dedicated UI
@@ -76,7 +76,7 @@ pub enum EnvelopeBody {
     PromptRejected {
         id: uuid::Uuid,
         reason: String,
-        /// §Cross-tab prompt rejection visibility: the originating
+        // the originating
         /// connection id so the rejection banner only shows on the
         /// tab that submitted the prompt. `None` for HTTP / bg-task
         /// rejections (browsers treat it as "show to everyone").
@@ -90,7 +90,7 @@ pub enum EnvelopeBody {
     Clear {
         hard: bool,
     },
-    /// §Usage-limits: server-initiated request for rabbit to scrape
+    // server-initiated request for rabbit to scrape
     /// Claude's `/usage` overlay and return a fresh `Usage` envelope
     /// carrying the new `weekly_pct` / `session_pct` fields. Currently
     /// triggered by the "Usage" button in the warren UI; the same
@@ -103,7 +103,7 @@ pub enum EnvelopeBody {
     /// the overlay, and publishes the parsed limits back as
     /// `EnvelopeBody::Usage(snap)` with the four new fields set.
     UsageCheck,
-    /// §Context-window: server-initiated request for rabbit to scrape
+    // server-initiated request for rabbit to scrape
     /// Claude's `/context` overlay and return a fresh `Usage` envelope
     /// with the `ctx_*` fields populated. Same fire-and-forget shape as
     /// `UsageCheck`: HTTP returns 202 immediately; the parsed fields
@@ -122,7 +122,7 @@ pub enum EnvelopeBody {
         rows: u16,
     },
     Repaint,
-    /// §Mobile-input: typed key press for mobile clients that can't
+    // typed key press for mobile clients that can't
     /// send the bytes through their soft keyboard (Tab, Escape, arrow
     /// keys, etc.). The server translates the named `Key` to a byte
     /// sequence (see `key_to_bytes`) and feeds it through the same
@@ -132,7 +132,7 @@ pub enum EnvelopeBody {
     /// `Interrupt` / `Slash` so viewer-mode drop logic + FIFO
     /// ordering apply unchanged.
     SendKey(SendKey),
-    /// §D shell WS late-join repaint: ask rabbit to SIGWINCH-jiggle the
+    // ask rabbit to SIGWINCH-jiggle the
     /// shell PTY so bash repaints its prompt. Shell has no VT snapshot
     /// (no `TermTracker` — see supervisor.rs:602-606), so the v1
     /// SIGWINCH-jiggle heuristic is still the right tool here, unlike
@@ -151,7 +151,7 @@ pub enum EnvelopeBody {
         usage: Option<UsageSnapshot>,
         error: Option<String>,
     },
-    /// §Scheduled-prompts: Claude fired a `permission_request` hook
+    // Claude fired a `permission_request` hook
     /// (the operator needs to approve a tool call before the turn can
     /// continue). The scheduler's observation task subscribes to
     /// `meta_tx` and, on receiving a `NeedsInput` matching its
@@ -167,19 +167,19 @@ pub enum EnvelopeBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by_connection_id: Option<uuid::Uuid>,
     },
-    /// §D Milestone 5 (Phase B): late-join screen dump. Sent by rabbit in
+    /// (Phase B): late-join screen dump. Sent by rabbit in
     /// response to a [`SnapshotRequest`] from warren so a fresh browser pane
     /// can paint an authoritative terminal state instead of relying on the
     /// SIGWINCH jiggle. `text.len() == rows`; each string is the VT's own
     /// space-padded grid row.
     ScreenSnapshot(ScreenSnapshotBody),
-    /// §D Milestone 5 (Phase B): warren asks rabbit for a snapshot of the
+    /// (Phase B): warren asks rabbit for a snapshot of the
     /// given channel's VT. Used by `ws_browser` after the replay buffer
     /// has been pushed into xterm.js.
     SnapshotRequest {
         chan: u8,
     },
-    /// §Simplify TUI sizing: warren is the source of truth for the
+    // warren is the source of truth for the
     /// terminal grid. After the rabbit's hello, warren sends this once
     /// with the cols/rows it wants the rabbit's PTY to use. The same
     /// value is what the xterm.js template renders, so the kernel
@@ -200,7 +200,7 @@ pub struct ScreenSnapshotBody {
     pub cursor_row: u16,
     pub cursor_visible: bool,
     pub text: Vec<String>,
-    /// §A.7 / seq-numbered snapshot protocol — per-`chan` counter of the
+    /// — per-`chan` counter of the
     /// last byte whose cells are *fully represented* in `text`. `0` means
     /// "no bytes fed yet on this channel"; a positive value tells the
     /// browser which buffered live frames are already covered by the
@@ -216,7 +216,7 @@ pub struct HelloUp {
     pub protocol_v: u32,
     pub claude_version: String,
     pub session_id: Option<String>,
-    /// Typed state per §6 of the migration plan — supervisor emits
+    /// Typed state per — supervisor emits
     /// `AgentState` (snake_case on the wire: `starting`, `idle`,
     /// `running`, `ended`, `dead`) directly rather than free-form
     /// strings.
@@ -231,7 +231,7 @@ pub struct StateFrame {
     pub reason: Option<String>,
 }
 
-/// §6 of the migration plan — the canonical typed state enum.
+/// — the canonical typed state enum.
 /// Serializes as snake_case strings (`starting` / `idle` / `running`
 /// / `ended` / `dead`); the JSON wire shape is identical to the old
 /// free-form `String` field.
@@ -289,7 +289,7 @@ impl From<&str> for AgentState {
     }
 }
 
-/// §6 — the supervisor's hello is the same shape as the broker's
+/// — the supervisor's hello is the same shape as the broker's
 /// hello. They used to live in two crates as `HelloUp` and
 /// `HelloDown`; unifying the state field lets us collapse them into
 /// one type. The legacy alias is preserved so existing call sites
@@ -302,7 +302,7 @@ pub struct TermSize {
     pub rows: u16,
 }
 
-/// §Mobile-input: closed enum of named keys the mobile UI can send.
+/// closed enum of named keys the mobile UI can send.
 /// `Ctrl { c }` and `Alt { c }` are the only variants that carry a
 /// payload — `c` is validated server-side against an allow-list of
 /// single-byte ASCII chars (see `key_to_bytes`). Mobile clients
@@ -338,7 +338,7 @@ pub enum Key {
     },
 }
 
-/// §Mobile-input: typed key-press envelope. `modifiers` is reserved
+/// typed key-press envelope. `modifiers` is reserved
 /// for v2 (e.g. Shift+Tab → `\x1b[Z`); v1 clients omit it and v1
 /// server ignores it because the chord information rides in-band on
 /// `Key::Ctrl` / `Key::Alt`.
@@ -349,7 +349,7 @@ pub struct SendKey {
     pub modifiers: Option<Modifiers>,
 }
 
-/// §Mobile-input: modifier overlay reserved for v2 — `Ctrl+letter`
+/// modifier overlay reserved for v2 — `Ctrl+letter`
 /// rides `Key::Ctrl { c }` directly today, so this struct is a no-op
 /// at the moment. Kept in the wire shape so adding
 /// `Shift+arrow = "\x1b[1;2A"` later doesn't need a v3 envelope.
@@ -440,7 +440,7 @@ pub struct PromptEcho {
     pub prompt_id: uuid::Uuid,
     pub text: String,
     pub by: String,
-    /// §Cross-tab prompt rejection visibility: the originating
+    // the originating
     /// connection id. Browsers without this set treat the echo as
     /// "not mine"; browsers with it treat the echo as their own.
     /// `None` when the producer is HTTP / bg-task. The actor
@@ -466,33 +466,33 @@ pub struct UsageSnapshot {
     pub cache_write: u64,
     pub context_pct_est: Option<f64>,
     /// Cumulative count of transcript JSONL lines that failed to parse since
-    /// rabbit started. §A.3 requires this counter so warren can alert on
+    /// rabbit started.
     /// drift in the on-disk format; it is *not* fatal and never blocks the
     /// terminal plane. Surfaced via the next `Usage` envelope after each
     /// increment.
     #[serde(default)]
     pub parse_errors: u64,
     pub source: String,
-    /// §Usage-limits: plan-level weekly usage as a percentage in [0, 100].
+    // plan-level weekly usage as a percentage in [0, 100].
     /// None when the user is not on a plan with weekly limits (API key,
     /// free tier) or no scrape has happened yet. Populated by the
     /// explicit `/usage` scrape (see `EnvelopeBody::UsageCheck`); not
     /// present on every envelope.
     #[serde(default)]
     pub weekly_pct: Option<f64>,
-    /// §Usage-limits: ISO-8601 timestamp for the next weekly reset.
+    // ISO-8601 timestamp for the next weekly reset.
     /// Paired with `weekly_pct` — both `Some` or both `None`.
     #[serde(default)]
     pub weekly_resets_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// §Usage-limits: plan-level 5-hour session usage as a percentage in
+    // plan-level 5-hour session usage as a percentage in
     /// [0, 100]. Paired with `session_resets_at`.
     #[serde(default)]
     pub session_pct: Option<f64>,
-    /// §Usage-limits: ISO-8601 timestamp for the next 5-hour session
+    // ISO-8601 timestamp for the next 5-hour session
     /// reset. Paired with `session_pct`.
     #[serde(default)]
     pub session_resets_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// §Usage-limits / §Small-terminal: when `true`, the most
+    // when `true`, the most
     /// recent `/usage` scrape did not surface all four plan-level
     /// fields — either the PTY was too small for Claude to render
     /// the modal overlay (so the parser saw nothing), or the
@@ -505,7 +505,7 @@ pub struct UsageSnapshot {
     /// can distinguish "no data yet" from "PTY too small".
     #[serde(default)]
     pub scrape_incomplete: bool,
-    /// §Writer-actor / §Usage-limits: when `true`, the most
+    // when `true`, the most
     /// recent `/usage` scrape was preempted by an operator
     /// `Interrupt` mid-sequence — the writer actor's
     /// `SequenceOutcome::AbortedBeforeStep` fired before all
@@ -520,7 +520,7 @@ pub struct UsageSnapshot {
     /// is the more informative signal and should win in the UI.
     #[serde(default)]
     pub scrape_aborted: bool,
-    /// §Context-window: tokens consumed in the current context
+    // tokens consumed in the current context
     /// window, scraped from Claude's `/context` modal. None until
     /// an explicit `ContextCheck` runs. Paired with
     /// `ctx_total_tokens` (both Some or both None). Distinct from
@@ -528,35 +528,35 @@ pub struct UsageSnapshot {
     /// modal value is authoritative.
     #[serde(default)]
     pub ctx_used_tokens: Option<u64>,
-    /// §Context-window: the size of the context window Claude is
+    // the size of the context window Claude is
     /// using (typically 200_000 for Sonnet/Opus, smaller for
     /// Haiku-class). Paired with `ctx_used_tokens`.
     #[serde(default)]
     pub ctx_total_tokens: Option<u64>,
-    /// §Context-window: percentage of the window consumed,
+    // percentage of the window consumed,
     /// `[0, 100]`, derived from the modal's bar or trailing
     /// `(P%)` label. Distinct from `context_pct_est`, which is the
     /// transcript-side heuristic estimator.
     #[serde(default)]
     pub ctx_used_pct: Option<f64>,
-    /// §Context-window: percentage free, mirror of `ctx_used_pct`.
+    // percentage free, mirror of `ctx_used_pct`.
     /// Convenience for the UI; either alone is enough to render.
     #[serde(default)]
     pub ctx_free_pct: Option<f64>,
-    /// §Context-window: Claude's labeled window size (e.g. `200K`
+    // Claude's labeled window size (e.g. `200K`
     /// → 200_000). Set when the modal labels the bar; independent
     /// of `ctx_total_tokens` so either can populate without the
     /// other.
     #[serde(default)]
     pub ctx_window_tokens: Option<u64>,
-    /// §Context-window: optional per-category breakdown as a JSON
+    // optional per-category breakdown as a JSON
     /// object (e.g. `{"system": 1234, "tools": 5678, "conversation":
     /// 9012}`). We do NOT lock the shape — Claude's TUI may evolve.
     /// Pass through whatever the modal emits; the UI surfaces it as
     /// a small key/value table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_categories: Option<serde_json::Value>,
-    /// §Context-window / §Small-terminal: when `true`, the most
+    // when `true`, the most
     /// recent `/context` scrape did not surface all primary fields
     /// (`ctx_used_tokens`, `ctx_total_tokens`, `ctx_used_pct`).
     /// Mirrors `scrape_incomplete` on the `/usage` side so the UI
@@ -580,7 +580,7 @@ pub struct LogLine {
 
 #[cfg(test)]
 mod tests {
-    //! §A.7 — serde roundtrip for `ScreenSnapshotBody::after_seq`. The
+    //! — serde roundtrip for `ScreenSnapshotBody::after_seq`. The
     //! field is added with `#[serde(default)]` so v1 envelopes (which
     //! had no `after_seq` key) still deserialize cleanly under a v2
     //! struct during the rollout window. These tests pin that property
@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(body.after_seq, 0);
     }
 
-    /// §Simplify TUI sizing: the `TuiConfig` envelope carries the warren-
+    // the `TuiConfig` envelope carries the warren-
     /// supplied grid size. The wire shape is `{"t":"tui_config","cols":
     /// <u16>,"rows":<u16>}` — flat keys, snake_case `t` discriminator,
     /// matching the rest of the protocol. Pin the round-trip so a future
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn usage_snapshot_round_trips_with_limit_fields() {
-        // §Usage-limits: a v2 rabbit that has scraped a plan with
+        // a v2 rabbit that has scraped a plan with
         // weekly + session caps emits all four new fields as
         // `Some(...)`. The shape must round-trip through serde so
         // warren's HTTP handler can deserialize the envelope it
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn usage_snapshot_scrape_incomplete_round_trips_and_v1_defaults_to_false() {
-        // §Small-terminal mitigation C: a partial scrape (1–3
+        // a partial scrape (1–3
         // fields populated) sets `scrape_incomplete = true` so the
         // UI can surface the hint. v1 envelopes (no flag) default
         // to `false` so a mixed-version rollout stays safe.
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn usage_snapshot_round_trips_with_context_fields() {
-        // §Context-window: a v2 rabbit that has scraped the `/context`
+        // a v2 rabbit that has scraped the `/context`
         // overlay emits all seven new fields. The shape must
         // round-trip through serde so warren's HTTP handler can
         // deserialize the envelope it receives on the SSE stream.
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn usage_snapshot_v1_json_without_context_fields_deserializes_to_none() {
-        // §Context-window: a v1 producer (pre-/context rabbit) never
+        // a v1 producer (pre-/context rabbit) never
         // emitted the seven `ctx_*` fields; the v2 struct must
         // tolerate their absence and default them to None. This
         // keeps the rollout window safe: a v1 rabbit talking to a
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn usage_snapshot_ctx_categories_skipped_when_none() {
-        // §Context-window: the `ctx_categories` field has
+        // the `ctx_categories` field has
         // `skip_serializing_if = "Option::is_none"` so envelopes
         // without a per-category breakdown don't carry an empty
         // `"ctx_categories": null` over the wire. Pin the behavior
@@ -882,7 +882,7 @@ mod tests {
 
     #[test]
     fn envelope_body_context_check_serializes_with_correct_tag() {
-        // §Context-window: pin the wire tag `"context_check"` so a
+        // pin the wire tag `"context_check"` so a
         // future rename (e.g. nested `{"t":"context_check", ...}`)
         // has to be intentional. Mirrors the v1
         // `usage_check` envelope shape.
@@ -897,7 +897,7 @@ mod tests {
         assert!(matches!(back.body, EnvelopeBody::ContextCheck));
     }
 
-    // §Mobile-input: serde roundtrip for the SendKey envelope. The
+    // serde roundtrip for the SendKey envelope. The
     // nested `Key` enum uses an inline `tag = "k"` so a SendKey body
     // serializes as `{"t":"send_key","key":{"k":"arrow_up"}}`. Pin
     // the exact shape so a future `rename_all` tweak on Key doesn't
@@ -924,7 +924,7 @@ mod tests {
         }
     }
 
-    // §Mobile-input: chord payloads (`Ctrl { c }`, `Alt { c }`)
+    // chord payloads (`Ctrl { c }`, `Alt { c }`)
     // serialize their payload as `c` at the same nesting level as
     // `k`. Pin the shape so a future flatten/representation refactor
     // doesn't break the mobile JS, which reads `envelope.body.key.c`.
@@ -943,7 +943,7 @@ mod tests {
         assert_eq!(json["key"]["c"], "a");
     }
 
-    // §Mobile-input: key_to_bytes — one assertion per unit variant
+    // key_to_bytes — one assertion per unit variant
     // pinned to the byte sequence xterm.js emits for the same key.
     // Drift here means the mobile UI and the desktop `term.onData`
     // path would disagree on what "press Tab" means, which would
@@ -965,7 +965,7 @@ mod tests {
         assert_eq!(key_to_bytes(&Key::Delete).unwrap(), b"\x1b[3~");
     }
 
-    // §Mobile-input: Ctrl-letter mapping matches xterm's
+    // Ctrl-letter mapping matches xterm's
     // `keys.CTRL_*` set. Lower/upper case fold to the same byte
     // (xterm convention). Pinned so a future
     // `ctrl_byte` refactor can't silently flip a chord.
@@ -981,7 +981,7 @@ mod tests {
         assert_eq!(key_to_bytes(&Key::Ctrl { c: '9' }).unwrap(), vec![0x09]);
     }
 
-    // §Mobile-input: Alt-letter prepends ESC. The char must be a
+    // Alt-letter prepends ESC. The char must be a
     // printable ASCII byte (not ESC itself) — reject non-ASCII so a
     // hostile client can't smuggle multi-byte sequences into the PTY
     // through this surface.
@@ -994,7 +994,7 @@ mod tests {
         assert!(key_to_bytes(&Key::Alt { c: 'ñ' }).is_err());
     }
 
-    // §Mobile-input: the Ctrl allow-list gates non-ASCII and
+    // the Ctrl allow-list gates non-ASCII and
     // out-of-range punctuation. Pin the rejection so a future
     // "accept all bytes for Ctrl" change can't silently widen the
     // wire attack surface.

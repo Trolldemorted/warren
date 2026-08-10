@@ -1,4 +1,4 @@
-//! §Once-and-for-all PTY writer actor.
+//!
 //!
 //! Replaces the multi-site `Arc<Mutex<Box<dyn Write + Send>>>`
 //! pattern with a single dedicated tokio task that owns the
@@ -521,7 +521,7 @@ mod tests {
         assert!(!h.cancel_flag.load(Ordering::SeqCst));
     }
 
-    /// §Writer-actor regression #1: heterogeneous submissions
+    /// #1: heterogeneous submissions
     /// (Bytes / Sequence / Bytes) land in submission order on the
     /// kernel side. Pre-fix `Arc<Mutex<Writer>>` did NOT
     /// guarantee this — interleaving was possible when two sites
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(*sink.lock().unwrap(), b"abcd".to_vec());
     }
 
-    /// §Writer-actor regression #2: the slash-command race during
+    /// #2: the slash-command race during
     /// scrape. Submit the `/usage\r` Sequence as ONE FIFO unit and
     /// simultaneously submit `Bytes(b"hello")` from another task.
     /// Pre-fix, the bytes could interleave and claude would see
@@ -593,7 +593,7 @@ mod tests {
         );
     }
 
-    /// §Writer-actor regression #3: an operator `Interrupt` arriving
+    /// #3: an operator `Interrupt` arriving
     /// mid-scrape preempts the in-flight Sequence within a few
     /// milliseconds. The SequenceOutcome fires
     /// `AbortedBeforeStep(N)` where N is the index of the first
@@ -668,7 +668,7 @@ mod tests {
         );
     }
 
-    /// §Writer-actor regression #4: a `Resize` command
+    /// #4: a `Resize` command
     /// submitted mid-sequence is processed AFTER the in-flight
     /// sequence completes. The actor's `WriteCmd::Resize` arm is
     /// a no-op (the actual resize still goes through the

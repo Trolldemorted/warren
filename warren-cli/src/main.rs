@@ -728,7 +728,7 @@ fn http_delete(agent: &ureq::Agent, base: &str, token: &str, path: &str) -> Resu
 
 #[cfg(test)]
 mod tests {
-    //! §Reject empty payloads: `read_payload` refuses to return an
+    //! `read_payload` refuses to return an
     //! empty / whitespace-only / missing body. The server side already
     //! guards `RequestNew.payload` and `RequestRespond.response` with
     //! 400 responses, but pushing the check to the CLI turns a

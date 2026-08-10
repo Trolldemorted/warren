@@ -1,4 +1,4 @@
-//! §D Milestone 5 — server-side virtual terminal state (Phase A).
+//! — server-side virtual terminal state (Phase A).
 //!
 //! [`TermTracker`] is a passive observer on the claude PTY byte stream. It
 //! feeds every read chunk into an [`avt::Vt`] (asciinema's virtual terminal)
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(snap.rows, 40);
     }
 
-    /// §A.7 / scrollback invariant — regression guard.
+    /// — regression guard.
     ///
     /// `avt::Buffer::text()` returns the *entire* line history (scrollback +
     /// visible rows + a trailing empty line), **not** just the visible

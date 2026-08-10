@@ -48,7 +48,7 @@ impl MetaRing {
         g.entries.push_back(MetaEntry { seq, bytes, frame });
         g.current_bytes += bytes;
         // Bound the queue. Drop oldest first — long disconnects lose old
-        // events but the bounded terminal replay buffer (§A.6) preserves
+        // events but the bounded terminal replay buffer () preserves
         // the screen state regardless.
         while g.current_bytes > self.max_bytes {
             if let Some(dropped) = g.entries.pop_front() {

@@ -1,4 +1,4 @@
-//! Trust-dialog auto-accept (§A.7 production path).
+//! Trust-dialog auto-accept ().
 //!
 //! On a fresh workdir (e.g. a newly-mounted PVC in a k8s pod), the first
 //! `claude` launch shows a "Do you trust the files in this folder?" dialog and

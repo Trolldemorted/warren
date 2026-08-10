@@ -1,4 +1,4 @@
-//! §D shell WS regression — the page must see buffered shell bytes
+//! — the page must see buffered shell bytes
 //! on connect, and the server must fire a `ShellRepaint` after the
 //! replay drain so bash redraws its prompt for a fresh browser pane.
 //!
@@ -43,7 +43,7 @@ async fn shell_prompt_is_delivered_to_browser_ws_on_open() {
     let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel::<Command>(8);
     let handle = AgentHandle::with_cmd_tx(agent_id, cmd_tx);
     registry.entry(agent_id).or_insert_with(|| handle.clone());
-    // §A.7: register the handle BEFORE the browser WS opens so the
+    // register the handle BEFORE the browser WS opens so the
     // first message we publish is in the term_ring when ws_shell::handle
     // calls `handle.replay_term()`.
     let prompt_bytes: Vec<u8> = b"\x1b[?2004hroot@dev-warren:/tmp# ".to_vec();
@@ -115,7 +115,7 @@ async fn shell_prompt_is_delivered_to_browser_ws_on_open() {
     let _ = tokio::time::timeout(Duration::from_secs(1), server_task).await;
 }
 
-/// §D shell WS late-join repaint: after the replay buffer flushes,
+/// after the replay buffer flushes,
 /// `ws_shell::handle` MUST enqueue `Command::ShellRepaint` on the
 /// actor's cmd_tx so the rabbit SIGWINCH-jiggles the shell PTY.
 /// Without this the bash prompt can be missing on page load when
@@ -194,7 +194,7 @@ async fn ws_shell_handle_fires_shell_repaint_after_replay() {
     let _ = tokio::time::timeout(Duration::from_secs(1), server_task).await;
 }
 
-/// §D fallback: when no `TuiConfig` has arrived yet (the handle's
+/// when no `TuiConfig` has arrived yet (the handle's
 /// cached term_size is None), `ws_shell::handle` must still fire
 /// `ShellRepaint` and use the (160, 50) defaults — matching rabbit's
 /// `DEFAULT_TUI_COLS/DEFAULT_TUI_ROWS` and warren's
@@ -249,7 +249,7 @@ async fn ws_shell_handle_repaint_uses_default_term_size_when_cached_is_none() {
     let _ = tokio::time::timeout(Duration::from_secs(1), server_task).await;
 }
 
-/// §Mobile-input: the shell WS must accept a typed `SendKey` envelope
+/// the shell WS must accept a typed `SendKey` envelope
 /// from the client and translate it to a `Command::SendKeys` aimed at
 /// the shell PTY (`TERM_CHAN_SHELL`). This is the contract that closes
 /// the "iOS keyboard has no Tab/Escape/Arrow keys" gap on the

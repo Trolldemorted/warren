@@ -31,14 +31,14 @@ pub struct Config {
     /// Upper bound on bytes of unacked meta events buffered for replay on
     /// WS reconnect. Default 256 KiB. Long disconnects lose the oldest
     /// buffered events when this is exceeded; the bounded terminal replay
-    /// buffer (§A.6) preserves the screen state regardless.
+    /// buffer () preserves the screen state regardless.
     pub meta_ring_bytes: usize,
     /// Auto-accept claude's first-run "do you trust this folder?" dialog by
     /// injecting Enter when it's detected in the PTY output. Defaults on so an
-    /// unattended pod on a fresh PVC mount (§A.7) doesn't hang on first boot.
+    /// unattended pod on a fresh PVC mount () doesn't hang on first boot.
     /// Set `AUTO_TRUST=0` to disable (e.g. if the workdir is pre-trusted).
     pub auto_trust: bool,
-    /// §D Milestone 5: spawn a second PTY (`bash -i`) on the same rabbit
+    // spawn a second PTY (`bash -i`) on the same rabbit
     /// and expose it at `/agent/:id/shell` on the warren side. Disabled by
     /// default — most production agents don't need a debug shell.
     pub enable_shell: bool,

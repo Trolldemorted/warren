@@ -1,4 +1,4 @@
-//! §A.10 `input_discipline` — bracketed-paste / slash / ESC against a real PTY.
+//! `input_discipline` — bracketed-paste / slash / ESC against a real PTY.
 //!
 //! The byte-exact sequences are pinned by `input::tests` (unit level). This
 //! file is the black-box complement: it drives the `input::*` writers into a

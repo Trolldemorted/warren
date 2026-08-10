@@ -1,4 +1,4 @@
-//! §Parse-layer-1 / text utilities shared by modal parsers.
+//!
 //!
 //! Anything that operates on a TUI byte stream before semantic
 //! extraction lives here. Currently:

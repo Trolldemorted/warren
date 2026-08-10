@@ -747,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_usage_check_returns_accepted_and_lands_on_actor() {
-        // §Usage-limits: the domain function pushes Command::UsageCheck
+        // the domain function pushes Command::UsageCheck
         // onto the actor's cmd channel. We can't observe the actual
         // scrape here (the fake actor doesn't drive a real PTY), but
         // we can assert the call doesn't error and the message lands
@@ -789,12 +789,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // §Context-window: /context endpoint mirrors /usage_check.
+    // /context endpoint mirrors /usage_check.
     // -----------------------------------------------------------------
 
     #[tokio::test]
     async fn http_context_check_returns_accepted_and_lands_on_actor() {
-        // §Context-window: the domain function pushes
+        // the domain function pushes
         // Command::ContextCheck onto the actor's cmd channel. We
         // can't observe the actual scrape here (the fake actor
         // doesn't drive a real PTY), but we can assert the call
@@ -824,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_context_check_rejects_non_admin() {
-        // §Context-window: the endpoint is admin-only; without the
+        // the endpoint is admin-only; without the
         // admin auth grant the function must surface an Auth error
         // and never touch the actor's cmd channel.
         let (state, _store) = build_state(false);

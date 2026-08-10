@@ -1,4 +1,4 @@
-//! §D Milestone 5 — the `/agent/:id/shell` debug PTY (rabbit side).
+//! — the `/agent/:id/shell` debug PTY (rabbit side).
 //!
 //! A second, optional PTY (`bash -i` by default) running on the same rabbit
 //! as claude. It's a plain byte-pump: output is tagged with
@@ -37,7 +37,7 @@ pub enum ShellCmd {
         cols: u16,
         rows: u16,
     },
-    /// §D shell WS late-join repaint: force bash to redraw its prompt
+    // force bash to redraw its prompt
     /// via SIGWINCH jiggle (widen by 1, settle, restore). Triggered by
     /// `EnvelopeBody::ShellRepaint` from warren when a fresh browser
     /// pane opens, so the bash prompt reaches the screen even if the
@@ -168,7 +168,7 @@ fn run_generation(
     log::info!("shell pty spawned: bin={bin} args={args:?}");
 
     // Reader thread: blocking-read PTY output → tagged binary frames to warren.
-    // §A.7: each shell generation owns its own per-channel seq counter,
+    // each shell generation owns its own per-channel seq counter,
     // independent of claude's. Single-producer (this thread), so
     // `Ordering::Relaxed`-equivalent reasoning is fine — just a plain
     // u64. Starts at 1, bumped before assignment.
@@ -273,7 +273,7 @@ mod tests {
                         chan, TERM_CHAN_SHELL,
                         "shell output must carry the shell channel"
                     );
-                    // §A.7: pin the first chunk's seq to 1 — the
+                    // pin the first chunk's seq to 1 — the
                     // counter starts at 1, and increment-before-assign
                     // means the first read off the wire gets seq=1.
                     if first_seq.is_none() {

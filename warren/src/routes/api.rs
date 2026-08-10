@@ -847,7 +847,7 @@ async fn api_run_scheduled_prompt_now(
     Ok(Json(run))
 }
 
-/// §Reject empty payloads: a `RequestNew` whose `payload` is empty (or
+/// a `RequestNew` whose `payload` is empty (or
 /// whitespace-only) is rejected at the API boundary. Empty payloads
 /// produce meaningless inbox rows (the receiving agent has no
 /// instructions to act on) and historically surfaced as confusing
@@ -861,7 +861,7 @@ fn validate_request_new(n: &RequestNew) -> AppResult<()> {
     Ok(())
 }
 
-/// §Reject empty payloads: same rationale as `validate_request_new`, but
+/// same rationale as `validate_request_new`, but
 /// for agent responses to claimed requests. An empty response leaves the
 /// request stuck in `AWAITING_AGENT_RESPONSE` forever — the original
 /// claimer has nothing to ship back to the admin reviewer, and the

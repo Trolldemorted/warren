@@ -7,17 +7,17 @@ pub const CTRL_U: &[u8] = b"\x15";
 /// Bracketed-paste start marker (`ESC[200~`). When the receiver is in
 /// bracketed-paste mode, everything between START and END lands as a single
 /// paste event instead of being interpreted keystroke-by-keystroke. This is
-/// the §A.2 input-discipline rule for `prompt(text)` and is what stops
+/// the `prompt(text)` and is what stops
 /// multi-line prompts from submitting at the first newline.
 pub const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 /// Bracketed-paste end marker (`ESC[201~`).
 pub const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
-/// §A.2 programmatic prompt submission.
+///
 ///
 /// Sequence: `Ctrl-U` (clear the input line) + bracketed-paste open + text
 /// (with `\n` translated to `\r`) + bracketed-paste close + `\r` (Enter).
-/// The Ctrl-U prefix is the §A.2 safety rule for queueing a prompt while the
+/// The Ctrl-U prefix is the
 /// meta plane says Idle — it guarantees the new paste lands on an empty line
 /// even if a prior keystroke left a partial fragment behind.
 ///

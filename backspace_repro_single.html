@@ -189,7 +189,7 @@
         const isBS=(data==='\b'||data==='\x7f'||data.charCodeAt(0)===127);
         log('ta','ev-handler',`onData(${JSON.stringify(data)})`,{});
         if (isBS) inc('odBS'); else inc('odOther');
-        // §Repro echo: in warren, the backend (PTY/claude) echoes typed
+// in warren, the backend (PTY/claude) echoes typed
         // characters back. The standalone repro has no backend, so without
         // this line letters silently vanish into the log pane and the user
         // thinks nothing happens. Skip backspace so we don't double-erase
@@ -224,7 +224,7 @@
       attachInputListeners(ta, 'ta');
 
       // ─────────────────────────────────────────────────────────────────
-      // §FIX: prefill + beforeinput + input-shrink backspace listener
+// prefill + beforeinput + input-shrink backspace listener
       // ─────────────────────────────────────────────────────────────────
       // Root cause (verified empirically): LatinIME refuses to fire
       // `beforeinput{deleteContentBackward}` on an empty input. xterm.js
@@ -381,7 +381,7 @@
       target.dispatchEvent(new InputEvent('beforeinput',{inputType:'deleteContentBackward',bubbles:true,cancelable:true}));
     });
 
-    // §Toggle the xterm helper textarea into an IME-friendly state.
+    //
     //   Hypothesis: the LineageOS soft keyboard refuses to deliver
     //   Backspace events (any kind — keydown, keypress, beforeinput)
     //   to a textarea that's invisible (opacity:0) and 1x1. Pulling it
@@ -419,7 +419,7 @@
       }
     });
 
-    // §Autotest mode — `#autotest` URL hash runs a deterministic event
+    // — `#autotest` URL hash runs a deterministic event
     //   sequence after load and writes the resulting counter state into
     //   #test-results. Used to validate the listener wiring in headless
     //   browsers; doesn't replace real-device IME testing.

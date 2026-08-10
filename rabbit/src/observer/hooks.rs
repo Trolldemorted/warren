@@ -53,14 +53,14 @@ fn normalize_kind(kind: &str) -> String {
 pub struct ObserverHandle {
     pub tx: broadcast::Sender<ObserverEvent>,
     pub latest_session: Arc<parking_lot::Mutex<Option<String>>>,
-    /// Latest lifecycle state observed from hook events (§D prompt policy).
+    /// Latest lifecycle state observed from hook events ().
     /// The supervisor consults this to decide whether an inbound prompt is
     /// allowed: prompts arriving while `Running` are rejected rather than
     /// injected mid-turn. Transitions to `Running` on `UserPromptSubmit` and
     /// back to `Idle` on `Stop`. Starts `Starting` until the first hook fires.
     latest_state: Arc<parking_lot::Mutex<State>>,
     /// Path to the on-disk transcript file, reported by the `SessionStart`
-    /// hook payload as `transcript_path` (§A.3). `None` until the hook fires.
+    /// hook payload as `transcript_path` (). `None` until the hook fires.
     /// The transcript tailer consults this so it follows the *real* path —
     /// `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` — instead of
     /// guessing.
@@ -112,7 +112,7 @@ impl ObserverHandle {
     pub fn ingest(&self, kind: &str, payload: &serde_json::Value) -> ObserverEvent {
         let parsed = parse(kind, payload, self);
         // Track the latest lifecycle state so the supervisor can gate inbound
-        // prompts (reject-when-Running policy, §D). Only events that carry a
+        // prompts (reject-when-Running policy, ). Only events that carry a
         // concrete state advance it; log/notification events leave it unchanged.
         if let Some(st) = parsed.state {
             *self.latest_state.lock() = st;
@@ -148,7 +148,7 @@ fn parse(kind: &str, payload: &serde_json::Value, handle: &ObserverHandle) -> Ob
             if let Some(s) = &session_id {
                 *handle.latest_session.lock() = Some(s.clone());
             }
-            // §A.3: the SessionStart payload carries the absolute path to the
+            // the SessionStart payload carries the absolute path to the
             // transcript jsonl file (`~/.claude/projects/<encoded-cwd>/<id>.jsonl`).
             // Capture it so the transcript tailer can follow the real file
             // instead of guessing. Some hook implementations nest the field
@@ -235,7 +235,7 @@ fn parse(kind: &str, payload: &serde_json::Value, handle: &ObserverHandle) -> Ob
             error: None,
             raw: Some(payload.clone()),
         },
-        // §Scheduled-prompts: Claude fired a `PermissionRequest` hook —
+        // Claude fired a `PermissionRequest` hook —
         // a tool call needs operator approval before the turn can
         // continue. We surface it as a distinct `permission_request`
         // ObserverEvent (not the catch-all `log`) so `build_envelopes`

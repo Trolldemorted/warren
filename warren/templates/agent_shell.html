@@ -8,7 +8,7 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   margin-top: 1rem;
-  /* §Fill the viewport below the fixed navbar (4.5rem from base.html).
+  /* (4.5rem from base.html).
      Caps the page at one screen so wheel scroll stays inside the
      terminal wrap (the term-wrap gets its own overflow below) and
      can't push the whole layout off-screen. Without this on Firefox
@@ -27,7 +27,7 @@
 }
 .shell-grid #term { width: 100%; font-family: ui-monospace, monospace; display: block; }
 
-/* §A.6 / FF-mobile helper-textarea positioning. xterm.js's bundled CSS
+/* 's bundled CSS
    parks the focusable helper textarea at `left: -9999em` so Chromium
    doesn't blink a caret over the canvas. `-9999em` resolves to ~160k px
    — fine on Chromium, but Firefox Mobile (Desktop Mode) refuses to
@@ -47,7 +47,7 @@
   bottom: auto !important;
   width: 1px !important;
   height: 1px !important;
-  /* §A.6 / FF-mobile: prevent auto-zoom on focus. FF Mobile
+/* prevent auto-zoom on focus. FF Mobile
      auto-zooms the viewport when an input with font-size <16px
      receives focus. xterm.js's helper textarea ships at the
      default ~13px, which triggers the zoom and pushes the fixed
@@ -56,7 +56,7 @@
   font-size: 16px !important;
 }
 
-/* §A.6 / FF-mobile scroll containment. Mirror agent_claude.html: keep
+/* keep
    scroll inside the wrap when the soft keyboard opens, so the body
    doesn't scroll up and the prompt leaves the viewport. */
 .shell-grid .term-wrap {
@@ -78,7 +78,7 @@
   padding: 1rem;
 }
 .shell-grid.disconnected .offline-overlay { display: flex; }
-/* §D read-only viewer mode (`?viewer=true`) — same contract as
+/* (`?viewer=true`) — same contract as
    agent_claude.html: CSS hides input affordances; the server-side
    ws_shell handler drops typed bytes regardless. */
 body.viewer-mode #term { pointer-events: none; }
@@ -95,7 +95,7 @@ body.viewer-mode .mobile-keypad { display: none; }
 }
 body.viewer-mode #viewer-mode-banner { display: block; }
 
-/* §Mobile-input: full custom mobile keyboard — mirrors
+/* full custom mobile keyboard — mirrors
    agent_claude.html, dispatched to TERM_CHAN_SHELL (rabbit_lib::wire).
    Always pinned to the bottom of the viewport; hidden only on desktop
    with a fine pointer so FF Mobile in desktop mode (touch + 980px
@@ -163,7 +163,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   color: #1f2937;
 }
 
-/* §Mobile-input: shrink the capped shell-grid height to leave room
+/* shrink the capped shell-grid height to leave room
    for the fixed keypad. The keypad's position:fixed is unconditional
    now (above), so this rule only handles layout. Matches narrow
    viewports OR coarse pointer (touch) — the latter covers FF Mobile
@@ -216,7 +216,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     <div id="term"></div>
     <div class="offline-overlay">agent offline — connect a rabbit to this agent id (with <code>RABBIT_ENABLE_SHELL=1</code>) to see its shell</div>
   </div>
-  {# §Mobile-input: same 4 × ~10-key custom mobile keyboard as
+  {# : same 4 × ~10-key custom mobile keyboard as
      agent_claude.html, dispatched to TERM_CHAN_SHELL via the
      `<0x02><data>` binary-frame path that the server-side ws_shell
      handler strips and feeds to handle::send_terminal_bytes (which
@@ -316,7 +316,7 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
 
-// §Mobile-input: kill the soft keyboard on touch devices.
+// kill the soft keyboard on touch devices.
 // xterm.js focuses its helper textarea on click — that focus is what
 // summons the Android/iOS soft keyboard, which then overlays the
 // page, triggers FF Mobile's viewport auto-zoom, and pushes the
@@ -342,7 +342,7 @@ term.open(document.getElementById('term'));
     });
   }, true);
 })();
-// §A.6 / FF-mobile scroll guard. Mirror the focus path on
+//
 // agent_claude.html: focus the helper textarea directly with
 // `preventScroll: true` so the soft keyboard opening doesn't scroll
 // the body, and a capture-phase focusin handler restores any body
@@ -377,7 +377,7 @@ function setConnected(c) {
 
 term.onData(data => {
   if (!connected || !ws) return;
-  // §D read-only viewer mode: skip sending typed bytes.
+// skip sending typed bytes.
   if (viewerMode) return;
   const buf = new Uint8Array(1 + data.length);
   // TERM_CHAN_SHELL = 0x02 — must match rabbit_lib::wire.
@@ -386,7 +386,7 @@ term.onData(data => {
   ws.send(buf);
 });
 
-// §Mobile-input: custom mobile keyboard — mirrors the impl on
+// custom mobile keyboard — mirrors the impl on
 // agent_claude.html but channels through TERM_CHAN_SHELL (0x02)
 // instead of TERM_CHAN_CLAUDE. Every key tap sends raw bytes via
 // the existing `<chan:1><data>` binary-frame path that `term.onData`
@@ -661,7 +661,7 @@ function connectWs() {
   const viewerQuery = viewerMode ? '?viewer=true' : '';
   ws = new WebSocket(`${proto}//${location.host}/agent/${agentId}/shell/ws${viewerQuery}`);
   ws.binaryType = 'arraybuffer';
-  // §UTF-8 streaming decoder: rebuild on every (re)connect so
+// rebuild on every (re)connect so
   // any partial codepoint buffered by a dying socket never combines
   // with the fresh stream.
   utf8Decoder = new TextDecoder('utf-8', { stream: true });
@@ -680,7 +680,7 @@ function connectWs() {
 
   ws.onmessage = (ev) => {
     if (!(ev.data instanceof ArrayBuffer)) return;
-    // §A.7: server→browser shell binary frames share the wider prelude
+// server→browser shell binary frames share the wider prelude
     // with the claude channel — `<chan:1> <seq:8 BE> <data>`. The shell
     // pane never participates in the snapshot protocol (no VT on the
     // rabbit side today), but the seq is still on the wire for protocol
@@ -717,7 +717,7 @@ function connectWs() {
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
-// §UTF-8 streaming decoder. See agent_claude.html for the
+//
 // rationale — every WS frame would otherwise be decoded in
 // isolation, producing U+FFFD for any multi-byte codepoint that
 // straddles a chunk boundary. Reset on each reconnect (same place

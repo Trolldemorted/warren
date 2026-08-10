@@ -412,7 +412,7 @@ pub async fn unclaimed_work_items_for_agent(
     additional_labels: &[String],
 ) -> AppResult<((Vec<ActionItem>, Vec<ActionItem>), Vec<String>)> {
     if additional_labels.is_empty() {
-        // §Self-defense: the agents page always passes a label list
+        // the agents page always passes a label list
         // (the agent's `class`), so empty here would mean a caller
         // misuse. Return zero items + no errors so the UI shows a
         // clean "0" badge rather than masking the bug behind a fetch
@@ -527,7 +527,7 @@ mod tests {
         );
     }
 
-    /// §D fallback chain: per-schedule override beats per-agent
+    // per-schedule override beats per-agent
     /// override beats `[class]`. Pinned so a future refactor that
     /// changes the precedence is caught at the unit-test level rather
     /// than as a dashboard/scheduler disagreement.

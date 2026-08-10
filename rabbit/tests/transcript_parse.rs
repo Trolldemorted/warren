@@ -1,4 +1,4 @@
-//! §A.10 `transcript_parse` — fixture-driven `TranscriptTail` tests.
+//! `transcript_parse` — fixture-driven `TranscriptTail` tests.
 //!
 //! Drives the real tailer over a temp `.jsonl` file whose path is advertised
 //! through `ObserverHandle` exactly as the `SessionStart` hook would, then

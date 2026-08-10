@@ -28,7 +28,7 @@ pub enum Command {
         by: String,
         wait: bool,
         reply: Option<oneshot::Sender<TurnOutcomeMsg>>,
-        /// §Cross-tab prompt rejection visibility: the originating
+        // the originating
         /// browser's connection id. The actor stamps this onto the
         /// downstream `EnvelopeBody::Prompt` and onto the
         /// `PromptRejected` envelope it publishes when the busy/queue
@@ -42,7 +42,7 @@ pub enum Command {
     },
     Compact,
     Interrupt,
-    /// §Usage-limits: triggered by `POST /api/agents/:id/claude/usage_check`.
+    // triggered by `POST /api/agents/:id/claude/usage_check`.
     /// The actor sends `EnvelopeBody::UsageCheck` to rabbit over the
     /// existing WS link; the rabbit supervisor runs the synchronous
     /// `/usage` scrape (write `\x15/usage\r`, drain ~2s of PTY bytes,
@@ -52,7 +52,7 @@ pub enum Command {
     /// immediately — the parsed data arrives on the SSE
     /// `/events/stream` channel a moment later.
     UsageCheck,
-    /// §Context-window: triggered by `POST /api/agents/:id/claude/context_check`.
+    // triggered by `POST /api/agents/:id/claude/context_check`.
     /// The actor sends `EnvelopeBody::ContextCheck` to rabbit; the
     /// supervisor runs the synchronous `/context` scrape (write
     /// `\x15/context\r`, drain ~700ms of PTY bytes, parse with the new
@@ -74,7 +74,7 @@ pub enum Command {
     /// (jiggle by one column, settle, restore). Used after a late-join
     /// replay buffer has landed in a fresh xterm.js pane.
     Repaint,
-    /// §D shell WS late-join repaint: ask rabbit to SIGWINCH-jiggle the
+    // ask rabbit to SIGWINCH-jiggle the
     /// shell PTY so bash repaints its prompt for a fresh browser pane.
     /// Distinct from `Repaint` (which targets the claude PTY only) so
     /// the two channels can grow independently. `cols, rows` are the
@@ -93,7 +93,7 @@ pub enum Command {
         chan: u8,
         data: Bytes,
     },
-    /// §D Milestone 5 (Phase B): ask rabbit for a current `ScreenSnapshot`
+    /// (Phase B): ask rabbit for a current `ScreenSnapshot`
     /// of the given channel. Sent by the browser WS right after flushing
     /// the bounded replay buffer; rabbit responds with a `ScreenSnapshot`
     /// envelope that the browser applies verbatim.
@@ -111,7 +111,7 @@ pub struct TurnOutcomeMsg {
     pub error: Option<String>,
 }
 
-/// §Simplify TUI sizing: `tui_cols` / `tui_rows` are the cols/rows the
+/// `tui_cols` / `tui_rows` are the cols/rows the
 /// warren side wants the rabbit's PTY to use. Sent to rabbit in a
 /// `TuiConfig` envelope right after the hello, then cached in `handle`
 /// so future `Command::Resize` dispatches reflect the same value.
@@ -185,7 +185,7 @@ async fn run_inner<T: WsTransport>(
             source: "transcript".to_string(),
             ..Default::default()
         },
-        // §Simplify TUI sizing: seed the cached term_size with the
+        // seed the cached term_size with the
         // warren-supplied cols/rows immediately. The rabbit link task
         // reads `snapshot().term_size` to size the PTY before the
         // first user-visible event, so this avoids a (0, 0) window
@@ -196,7 +196,7 @@ async fn run_inner<T: WsTransport>(
         }),
     });
 
-    // §Simplify TUI sizing: send the warren-supplied grid size to
+    // send the warren-supplied grid size to
     // rabbit once, immediately after the hello. This is the single
     // carrier for the size — rabbit no longer reads it from env.
     // Inbound `TuiConfig` from rabbit is a no-op (the variant is
@@ -237,7 +237,7 @@ async fn run_inner<T: WsTransport>(
     let mut last_ack_at: Instant = Instant::now();
     const ACK_BATCH: usize = 16;
     const ACK_INTERVAL: Duration = Duration::from_secs(2);
-    // §Connection-lost surfacing: server-initiated Ping. axum/tungstenite
+    // server-initiated Ping. axum/tungstenite
     // does NOT ship a default keepalive, so without this arm the rabbit
     // WS dies silently at the first intermediary idle timeout (a NAT or
     // load balancer can drop the flow without sending FIN/RST). An empty
@@ -267,152 +267,152 @@ async fn run_inner<T: WsTransport>(
 
     loop {
         tokio::select! {
-            biased;
-            cmd = cmd_rx.recv() => {
-                let Some(cmd) = cmd else { break; };
-                if let Err(e) = dispatch(cmd, &handle, &mut sink, &mut pending, &mut started_at).await {
-                    log::warn!("dispatch error: {e:?}");
-                }
-            }
-            msg = stream.next() => {
-                let Some(msg) = msg else { break; };
-                let msg = match msg {
-                    Ok(m) => m,
-                    Err(e) => {
-                        log::warn!("ws recv error: {e:?}");
-                        break;
+                    biased;
+                    cmd = cmd_rx.recv() => {
+                        let Some(cmd) = cmd else { break; };
+                        if let Err(e) = dispatch(cmd, &handle, &mut sink, &mut pending, &mut started_at).await {
+                            log::warn!("dispatch error: {e:?}");
+                        }
                     }
-                };
-                match msg {
-                    TransportMsg::Text(t) => {
-                        let env: Envelope = match serde_json::from_str(&t) {
-                            Ok(v) => v,
+                    msg = stream.next() => {
+                        let Some(msg) = msg else { break; };
+                        let msg = match msg {
+                            Ok(m) => m,
                             Err(e) => {
-                                log::warn!("bad envelope from rabbit: {e:?}");
-                                continue;
+                                log::warn!("ws recv error: {e:?}");
+                                break;
                             }
                         };
-                        if let EnvelopeBody::State(s) = &env.body {
-                            handle.update_state(AgentStateSnapshot {
-                                state: s.state,
-                                session_id: s.session_id.clone(),
-                                claude_version: None,
-                                last_usage: last_usage.clone(),
-                                // State updates don't carry a fresh term_size;
-                                // leave it None so `update_state` keeps the
-                                // cached value sticky.
-                                term_size: None,
-                            });
-                        }
-                        if let EnvelopeBody::PromptEcho(pe) = &env.body {
-                            started_at.insert(pe.prompt_id, Utc::now());
-                        }
-                        if let EnvelopeBody::StopHook { prompt_id, usage, error } = &env.body {
-                            let actual_id = pending
-                                .front()
-                                .map(|(id, _)| *id)
-                                .unwrap_or(*prompt_id);
-                            let outcome = TurnOutcomeMsg {
-                                prompt_id: actual_id,
-                                started_at: started_at.remove(&actual_id).unwrap_or_else(Utc::now),
-                                ended_at: Utc::now(),
-                                usage: usage.clone(),
-                                error: error.clone(),
-                            };
-                            if let Some(u) = usage {
-                                last_usage = u.clone();
-                            }
-                            if let Some((_, tx)) = pending.pop_front() {
-                                let _ = tx.send(outcome);
-                            }
-                        }
-                        let payload_json = serde_json::to_value(&env).unwrap_or(serde_json::Value::Null);
-                        let kind = envelope_kind(&env.body).to_string();
-                        if matches!(&env.body, EnvelopeBody::Ack { .. }) {
-                            // rabbit shouldn't ack warren; ignore if it does.
-                            continue;
-                        }
-                        // Dedup: events replayed from a previous session
-                        // arrive with seq <= (seq - 1), which is the highest
-                        // we've already persisted. Persist returns Err on
-                        // the unique-index collision, which we swallow.
-                        if env.seq < seq {
-                            log::debug!(
-                                "skipping duplicate seq={} (already persisted up to {})",
-                                env.seq,
-                                seq - 1
-                            );
-                        } else {
-                            persist_event(&*store, agent_id, &payload_json, &kind, seq)
-                                .await
-                                .ok();
-                            seq += 1;
-                            events_since_ack += 1;
-                            if events_since_ack >= ACK_BATCH
-                                || last_ack_at.elapsed() >= ACK_INTERVAL
-                            {
-                                let new_acked = seq - 1;
-                                if new_acked > last_acked_seq {
-                                    send_ack(&mut sink, new_acked).await;
-                                    last_acked_seq = new_acked;
-                                    events_since_ack = 0;
-                                    last_ack_at = Instant::now();
+                        match msg {
+                            TransportMsg::Text(t) => {
+                                let env: Envelope = match serde_json::from_str(&t) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        log::warn!("bad envelope from rabbit: {e:?}");
+                                        continue;
+                                    }
+                                };
+                                if let EnvelopeBody::State(s) = &env.body {
+                                    handle.update_state(AgentStateSnapshot {
+                                        state: s.state,
+                                        session_id: s.session_id.clone(),
+                                        claude_version: None,
+                                        last_usage: last_usage.clone(),
+                                        // State updates don't carry a fresh term_size;
+                                        // leave it None so `update_state` keeps the
+                                        // cached value sticky.
+                                        term_size: None,
+                                    });
                                 }
+                                if let EnvelopeBody::PromptEcho(pe) = &env.body {
+                                    started_at.insert(pe.prompt_id, Utc::now());
+                                }
+                                if let EnvelopeBody::StopHook { prompt_id, usage, error } = &env.body {
+                                    let actual_id = pending
+                                        .front()
+                                        .map(|(id, _)| *id)
+                                        .unwrap_or(*prompt_id);
+                                    let outcome = TurnOutcomeMsg {
+                                        prompt_id: actual_id,
+                                        started_at: started_at.remove(&actual_id).unwrap_or_else(Utc::now),
+                                        ended_at: Utc::now(),
+                                        usage: usage.clone(),
+                                        error: error.clone(),
+                                    };
+                                    if let Some(u) = usage {
+                                        last_usage = u.clone();
+                                    }
+                                    if let Some((_, tx)) = pending.pop_front() {
+                                        let _ = tx.send(outcome);
+                                    }
+                                }
+                                let payload_json = serde_json::to_value(&env).unwrap_or(serde_json::Value::Null);
+                                let kind = envelope_kind(&env.body).to_string();
+                                if matches!(&env.body, EnvelopeBody::Ack { .. }) {
+                                    // rabbit shouldn't ack warren; ignore if it does.
+                                    continue;
+                                }
+                                // Dedup: events replayed from a previous session
+                                // arrive with seq <= (seq - 1), which is the highest
+                                // we've already persisted. Persist returns Err on
+                                // the unique-index collision, which we swallow.
+                                if env.seq < seq {
+                                    log::debug!(
+                                        "skipping duplicate seq={} (already persisted up to {})",
+                                        env.seq,
+                                        seq - 1
+                                    );
+                                } else {
+                                    persist_event(&*store, agent_id, &payload_json, &kind, seq)
+                                        .await
+                                        .ok();
+                                    seq += 1;
+                                    events_since_ack += 1;
+                                    if events_since_ack >= ACK_BATCH
+                                        || last_ack_at.elapsed() >= ACK_INTERVAL
+                                    {
+                                        let new_acked = seq - 1;
+                                        if new_acked > last_acked_seq {
+                                            send_ack(&mut sink, new_acked).await;
+                                            last_acked_seq = new_acked;
+                                            events_since_ack = 0;
+                                            last_ack_at = Instant::now();
+                                        }
+                                    }
+                                }
+                                handle.publish_meta(env.body);
                             }
+                            TransportMsg::Binary(b) => {
+        // server→browser terminal binary frames are
+                                // now `<chan:1> <seq:8 BE> <data>`. Drop malformed
+                                // frames (too short for the prelude) entirely —
+                                // warren is a dumb pipe and would rather miss a
+                                // frame than seed the broadcast with a partial
+                                // seq that downstream panes interpret as
+                                // "everything since seq=N has been delivered." A
+                                // Rabbit that misroutes bytes would still land
+                                // here; the prelude check is cheap (10-byte
+                                // bound) and keeps the invariant auditable.
+                                if b.len() < 10 { continue; }
+                                let chan = b[0];
+                                let mut seq_arr = [0u8; 8];
+                                seq_arr.copy_from_slice(&b[1..9]);
+                                let seq = u64::from_be_bytes(seq_arr);
+                                handle.publish_term(TermFrame {
+                                    chan,
+                                    seq,
+                                    data: b[9..].to_vec(),
+                                });
+                            }
+                            TransportMsg::Close(_) => break,
+                            TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
                         }
-                        handle.publish_meta(env.body);
                     }
-                    TransportMsg::Binary(b) => {
-                        // §A.7: server→browser terminal binary frames are
-                        // now `<chan:1> <seq:8 BE> <data>`. Drop malformed
-                        // frames (too short for the prelude) entirely —
-                        // warren is a dumb pipe and would rather miss a
-                        // frame than seed the broadcast with a partial
-                        // seq that downstream panes interpret as
-                        // "everything since seq=N has been delivered." A
-                        // Rabbit that misroutes bytes would still land
-                        // here; the prelude check is cheap (10-byte
-                        // bound) and keeps the invariant auditable.
-                        if b.len() < 10 { continue; }
-                        let chan = b[0];
-                        let mut seq_arr = [0u8; 8];
-                        seq_arr.copy_from_slice(&b[1..9]);
-                        let seq = u64::from_be_bytes(seq_arr);
-                        handle.publish_term(TermFrame {
-                            chan,
-                            seq,
-                            data: b[9..].to_vec(),
-                        });
+                    _ = ack_ticker.tick() => {
+                        let new_acked = seq - 1;
+                        if new_acked > last_acked_seq
+                            && (events_since_ack > 0 || last_ack_at.elapsed() >= ACK_INTERVAL)
+                        {
+                            send_ack(&mut sink, new_acked).await;
+                            last_acked_seq = new_acked;
+                            events_since_ack = 0;
+                            last_ack_at = Instant::now();
+                        }
                     }
-                    TransportMsg::Close(_) => break,
-                    TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
+                    _ = ping_ticker.tick() => {
+                        // Server-initiated heartbeat — see RABBIT_WS_PING_INTERVAL
+                        // above. If the send fails the rabbit WS is gone; break
+                        // out so the actor publishes the offline state and the
+                        // link task can reconnect with jittered backoff.
+                        if sink.send(TransportMsg::Ping(Vec::new())).await.is_err() {
+                            log::debug!("rabbit ws ping send failed; breaking actor loop");
+                            break;
+                        }
+                    }
                 }
-            }
-            _ = ack_ticker.tick() => {
-                let new_acked = seq - 1;
-                if new_acked > last_acked_seq
-                    && (events_since_ack > 0 || last_ack_at.elapsed() >= ACK_INTERVAL)
-                {
-                    send_ack(&mut sink, new_acked).await;
-                    last_acked_seq = new_acked;
-                    events_since_ack = 0;
-                    last_ack_at = Instant::now();
-                }
-            }
-            _ = ping_ticker.tick() => {
-                // Server-initiated heartbeat — see RABBIT_WS_PING_INTERVAL
-                // above. If the send fails the rabbit WS is gone; break
-                // out so the actor publishes the offline state and the
-                // link task can reconnect with jittered backoff.
-                if sink.send(TransportMsg::Ping(Vec::new())).await.is_err() {
-                    log::debug!("rabbit ws ping send failed; breaking actor loop");
-                    break;
-                }
-            }
-        }
     }
 
-    // §Connection-lost surfacing: the rabbit WS died (stream EOF, recv
+    // the rabbit WS died (stream EOF, recv
     // error, Close frame, ping send failure, or supervisor shutdown).
     // Publish `AgentState::Dead` so subscribers (browser WS, SSE
     // handlers, UI badge) flip to the offline affordance immediately.
@@ -603,7 +603,7 @@ async fn dispatch<T: WsTransport>(
                 .await?;
         }
         Command::UsageCheck => {
-            // §Usage-limits: send a UsageCheck envelope to rabbit; the
+            // send a UsageCheck envelope to rabbit; the
             // supervisor runs the synchronous `/usage` scrape and
             // publishes the parsed result back as an `EnvelopeBody::Usage`
             // carrying the new `weekly_pct` / `session_pct` fields. This
@@ -619,7 +619,7 @@ async fn dispatch<T: WsTransport>(
                 .await?;
         }
         Command::ContextCheck => {
-            // §Context-window: send a ContextCheck envelope to rabbit;
+            // send a ContextCheck envelope to rabbit;
             // the supervisor runs the synchronous `/context` scrape and
             // publishes the parsed result back as an `EnvelopeBody::Usage`
             // carrying the new `ctx_*` fields. This arm is

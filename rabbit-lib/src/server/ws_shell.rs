@@ -1,4 +1,4 @@
-//! §D Milestone 5 — `/agent/:id/shell` WS handler.
+//! — `/agent/:id/shell` WS handler.
 //!
 //! Counterpart to `ws_browser.rs` but for the shell channel. Pure
 //! byte-pump: forwards bytes from rabbit's shell PTY to the browser, and
@@ -18,7 +18,7 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use uuid::Uuid;
 
-/// §D shell WS late-join repaint — defaults when warren hasn't yet
+/// — defaults when warren hasn't yet
 /// shipped a `TuiConfig` for this agent. Mirrors rabbit's
 /// `DEFAULT_TUI_COLS`/`DEFAULT_TUI_ROWS` (rabbit/src/link.rs:30-31)
 /// and warren's `TUI_WIDTH`/`TUI_HEIGHT` defaults. The bash PTY was
@@ -58,7 +58,7 @@ pub async fn handle(
 
     // Replay any buffered shell frames so a late joiner sees the recent
     // shell history (mirrors `ws_browser`'s replay buffer pattern, just
-    // filtered to TERM_CHAN_SHELL). §A.7: each frame is re-emitted as
+    // filtered to TERM_CHAN_SHELL). : each frame is re-emitted as
     // `<chan:1> <seq:8 BE> <data>`, preserving the seq the shell reader
     // thread assigned on the rabbit side.
     for TermFrame { chan, seq, data } in handle.replay_term() {
@@ -77,7 +77,7 @@ pub async fn handle(
         }
     }
 
-    // §D shell WS late-join repaint: bash doesn't redraw its prompt
+    // bash doesn't redraw its prompt
     // without a SIGWINCH, and the bounded term_ring can roll over the
     // initial prompt if the rabbit has been alive long enough or
     // hasn't yet emitted it by the time the browser connects. After
@@ -107,102 +107,102 @@ pub async fn handle(
 
     loop {
         tokio::select! {
-            biased;
-            chunk = term_rx.recv() => {
-                let frame = match chunk {
-                    Ok(f) => f,
-                    Err(_) => break,
-                };
-                // §A.7: dumb-pipe pass-through for the shell channel.
-                // Re-emit `<chan:1> <seq:8 BE> <data>` so the browser pane
-                // can match live shell bytes against any future
-                // snapshot's `after_seq`. (Today there's no shell-side VT
-                // so no snapshot is ever emitted; the seq still rides
-                // through for protocol symmetry.)
-                let TermFrame { chan, seq, data } = frame;
-                if chan != crate::wire::TERM_CHAN_SHELL {
-                    continue;
-                }
-                if data.is_empty() {
-                    continue;
-                }
-                let mut out = Vec::with_capacity(9 + data.len());
-                out.push(chan);
-                out.extend_from_slice(&seq.to_be_bytes());
-                out.extend_from_slice(&data);
-                if sink.send(TransportMsg::Binary(out)).await.is_err() {
-                    break;
-                }
-            }
-            msg = stream.next() => {
-                let Some(msg) = msg else { break; };
-                let msg = match msg {
-                    Ok(m) => m,
-                    Err(_) => break,
-                };
-                match msg {
-                    TransportMsg::Binary(mut b) => {
-                        if b.is_empty() { continue; }
-                        // §D read-only viewer: drop typed bytes for viewer
-                        // connections, mirroring ws_browser's policy.
-                        if viewer_mode { continue; }
-                        let chan = b.remove(0);
+                    biased;
+                    chunk = term_rx.recv() => {
+                        let frame = match chunk {
+                            Ok(f) => f,
+                            Err(_) => break,
+                        };
+        // dumb-pipe pass-through for the shell channel.
+                        // Re-emit `<chan:1> <seq:8 BE> <data>` so the browser pane
+                        // can match live shell bytes against any future
+                        // snapshot's `after_seq`. (Today there's no shell-side VT
+                        // so no snapshot is ever emitted; the seq still rides
+                        // through for protocol symmetry.)
+                        let TermFrame { chan, seq, data } = frame;
                         if chan != crate::wire::TERM_CHAN_SHELL {
-                            // Wrong channel — ignore; the client should
-                            // only send bytes tagged TERM_CHAN_SHELL on
-                            // this WS.
                             continue;
                         }
-                        if let Err(e) =
-                            handle.send_terminal_bytes(
-                                crate::wire::TERM_CHAN_SHELL,
-                                Bytes::from(b),
-                            ).await
-                        {
-                            log::debug!("shell send_terminal_bytes failed: {e:?}");
+                        if data.is_empty() {
+                            continue;
+                        }
+                        let mut out = Vec::with_capacity(9 + data.len());
+                        out.push(chan);
+                        out.extend_from_slice(&seq.to_be_bytes());
+                        out.extend_from_slice(&data);
+                        if sink.send(TransportMsg::Binary(out)).await.is_err() {
+                            break;
                         }
                     }
-                    TransportMsg::Text(text) => {
-                        // §Mobile-input: parse a typed `SendKey` envelope
-                        // and dispatch to the shell PTY. The shell WS
-                        // accepts only `SendKey` envelopes (not the full
-                        // meta-plane set — it's a byte-pump, not a
-                        // control surface). Unknown envelopes and parse
-                        // errors are logged at debug and dropped; we
-                        // never error-out the WS on a bad frame because
-                        // the mobile chip palette should never be the
-                        // cause of a disconnect.
-                        if viewer_mode {
-                            continue;
-                        }
-                        match serde_json::from_str::<Envelope>(&text) {
-                            Ok(env) => match env.body {
-                                EnvelopeBody::SendKey(sk) => {
-                                    let key_dbg = format!("{:?}", sk.key);
-                                    if let Err(e) = handle.send_shell_key(sk.key).await {
+                    msg = stream.next() => {
+                        let Some(msg) = msg else { break; };
+                        let msg = match msg {
+                            Ok(m) => m,
+                            Err(_) => break,
+                        };
+                        match msg {
+                            TransportMsg::Binary(mut b) => {
+                                if b.is_empty() { continue; }
+        // drop typed bytes for viewer
+                                // connections, mirroring ws_browser's policy.
+                                if viewer_mode { continue; }
+                                let chan = b.remove(0);
+                                if chan != crate::wire::TERM_CHAN_SHELL {
+                                    // Wrong channel — ignore; the client should
+                                    // only send bytes tagged TERM_CHAN_SHELL on
+                                    // this WS.
+                                    continue;
+                                }
+                                if let Err(e) =
+                                    handle.send_terminal_bytes(
+                                        crate::wire::TERM_CHAN_SHELL,
+                                        Bytes::from(b),
+                                    ).await
+                                {
+                                    log::debug!("shell send_terminal_bytes failed: {e:?}");
+                                }
+                            }
+                            TransportMsg::Text(text) => {
+        // parse a typed `SendKey` envelope
+                                // and dispatch to the shell PTY. The shell WS
+                                // accepts only `SendKey` envelopes (not the full
+                                // meta-plane set — it's a byte-pump, not a
+                                // control surface). Unknown envelopes and parse
+                                // errors are logged at debug and dropped; we
+                                // never error-out the WS on a bad frame because
+                                // the mobile chip palette should never be the
+                                // cause of a disconnect.
+                                if viewer_mode {
+                                    continue;
+                                }
+                                match serde_json::from_str::<Envelope>(&text) {
+                                    Ok(env) => match env.body {
+                                        EnvelopeBody::SendKey(sk) => {
+                                            let key_dbg = format!("{:?}", sk.key);
+                                            if let Err(e) = handle.send_shell_key(sk.key).await {
+                                                log::debug!(
+                                                    "shell send_shell_key({key_dbg}) failed: {e:?}"
+                                                );
+                                            }
+                                        }
+                                        _ => {
+                                            log::debug!(
+                                                "shell WS: ignoring non-SendKey text envelope"
+                                            );
+                                        }
+                                    },
+                                    Err(e) => {
                                         log::debug!(
-                                            "shell send_shell_key({key_dbg}) failed: {e:?}"
+                                            "shell WS: text frame failed to parse as envelope: {e:?}"
                                         );
                                     }
                                 }
-                                _ => {
-                                    log::debug!(
-                                        "shell WS: ignoring non-SendKey text envelope"
-                                    );
-                                }
-                            },
-                            Err(e) => {
-                                log::debug!(
-                                    "shell WS: text frame failed to parse as envelope: {e:?}"
-                                );
                             }
+                            TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
+                            TransportMsg::Close(_) => break,
                         }
                     }
-                    TransportMsg::Ping(_) | TransportMsg::Pong(_) => {}
-                    TransportMsg::Close(_) => break,
                 }
-            }
-        }
     }
     Ok(())
 }

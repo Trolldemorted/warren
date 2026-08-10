@@ -1,4 +1,4 @@
-//! §A.10 `pty_echo` — PTY byte-pump + replay buffer against a fake TUI.
+//! `pty_echo` — PTY byte-pump + replay buffer against a fake TUI.
 //!
 //! Complements the in-crate `pty::tests` (which cover the jiggle math) with a
 //! black-box round-trip: bytes written to the master must reach a real child
