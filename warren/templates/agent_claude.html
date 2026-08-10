@@ -1081,7 +1081,25 @@ function applyMeta(env) {
       const hasContent = env.text.some(
         row => typeof row === 'string' && row.trim().length > 0,
       );
-      if (!hasContent) break;
+      if (!hasContent) {
+        // §A.7 / empty-snapshot guard: the late-join snapshot has
+        // no paintable content (e.g. claude is mid-turn and the
+        // scrollback is still being populated, or the visible rows
+        // are all whitespace). Skipping the term.reset() preserves
+        // whatever xterm already drew — but the binary-frame gate
+        // must still be dropped here, otherwise every subsequent
+        // frame keeps piling into `pendingFrames` (capped at
+        // 4096) and xterm shows a black canvas with the cursor at
+        // (0,0) forever. Reset the gate; flush any already-buffered
+        // frames so the user sees what was being typed.
+        if (pendingFrames !== null) {
+          for (const f of pendingFrames) {
+            term.write(bytesToUtf8(f.data));
+          }
+          pendingFrames = null;
+        }
+        break;
+      }
       const afterSeq = Number(env.after_seq || 0);
       // §A.7: only frames with `seq > afterSeq` survive the trim.
       // `findIndex` returns the first frame strictly past the
