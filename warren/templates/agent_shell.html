@@ -163,38 +163,32 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   color: #1f2937;
 }
 
-/* shrink the capped shell-grid height to leave room
-   for the fixed keypad. The keypad's position:fixed is unconditional
-   now (above), so this rule only handles layout. Matches narrow
-   viewports OR coarse pointer (touch) — the latter covers FF Mobile
-   in desktop mode where the viewport is spoofed to ~980px. The
-   `15rem` is the visible height of the 5-row keypad (5 × 2.5rem
-   min-height + 4px padding × 2 + 4px gap × 4 + ~0.5rem slack) —
-   bumped from the prior `13.5rem` when the digits row was added.
-   Also pins body to viewport height (no scrolling) so the input
-   cursor (wherever xterm scrollback puts it) is the last visible
-   row before the keyboard — without this, the body extends past
-   the viewport and the keyboard sits in the middle. The
-   `.agent-chrome` hide drops the h1 + Copy/Select button row on
-   mobile (the operator knows which agent they're on from the URL;
-   it's the same vertical space the terminal needs). Pin the
-   term-wrap to fill the remaining grid height so the keyboard sits
-   directly under the input cursor. */
+/* Mobile layout: same fixed-height flex column as agent_claude.html
+   — keypad is in-flow so it cannot detach under pinch-zoom. */
 @media (max-width: 767.98px), (pointer: coarse) {
   html, body { height: 100%; overflow: hidden; }
-  body { padding-top: 4.5rem; }
+  body { padding-top: 0; }
+  .navbar.fixed-top { display: none; }
   .agent-chrome { display: none; }
+  main.container-fluid {
+    height: 100%;
+    padding-left: 0;
+    padding-right: 0;
+    display: flex;
+    flex-direction: column;
+  }
   .shell-grid {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr);
-    height: calc(100vh - 4.5rem - 15rem);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
     margin-top: 0;
   }
-  .shell-grid .term-wrap {
-    height: 100%;
-    min-height: 0;
-  }
-  .mobile-keypad { border-radius: 0; }
+  .shell-grid .term-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .shell-grid .mobile-keypad { position: static; flex: 0 0 auto; border-radius: 0; }
+  #no-shell-warning, #viewer-mode-banner { flex: 0 0 auto; margin-top: 0; }
 }
 </style>
 <div class="agent-chrome">
@@ -405,10 +399,11 @@ term.onData(data => {
 //                 which readline/bash interpret as Meta-letter —
 //                 Meta-B = backward-word, Meta-F = forward-word).
 //
-// mousedown.preventDefault on every key keeps focus on the xterm
-// helper textarea so the soft keyboard can still be summoned for
-// ad-hoc punctuation; without it, tapping a button steals focus and
-// FF Mobile closes the keyboard.
+// Keypad buttons fire on `pointerdown` with preventDefault so the
+// touch reaches the JS on the first contact (no 300 ms click delay),
+// no focus-steal closes the soft keyboard, and FF Android cannot
+// assemble a double-tap-to-zoom gesture from a synthesized `click`
+// we don't listen for.
 const MOBILE_CHAN = 0x02; // TERM_CHAN_SHELL — must match
                           // rabbit_lib::wire::TERM_CHAN_SHELL.
 const KEY_BYTES = {
@@ -482,9 +477,10 @@ function handleKeyAction(action) {
 }
 if (keypad) {
   keypad.querySelectorAll('button.key[data-action]').forEach(btn => {
-    btn.addEventListener('mousedown', e => e.preventDefault());
-    btn.addEventListener('click', () => {
+    btn.addEventListener('pointerdown', e => {
       if (viewerMode) return;
+      if (e.button !== undefined && e.button !== 0) return;
+      e.preventDefault();
       handleKeyAction(btn.dataset.action);
     });
   });

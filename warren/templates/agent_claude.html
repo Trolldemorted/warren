@@ -203,55 +203,36 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   color: #1f2937;
 }
 
-/* collapse the claude-grid to a single column on
-   narrow viewports so the aside no longer steals 18rem of width.
-   The keypad's position:fixed is unconditional now (above), so this
-   rule only handles the grid layout. */
-@media (max-width: 767.98px) {
-  .claude-grid { grid-template-columns: minmax(0, 1fr); }
-  .mobile-keypad { border-radius: 0; }
-}
-
-/* layout calibration for the custom keyboard. The
-   keypad is `position: fixed; bottom: 0` and overlays the bottom of
-   the viewport. Without explicit height on .claude-grid, the xterm
-   area sizes to its content (40 × 13 px = ~520 px) and the body
-   scrolls — leaving the keyboard visually far below the input
-   cursor. Pin the body to viewport height (no scroll), and give
-   .claude-grid the exact remaining height so the input cursor
-   (wherever the xterm scrollback puts it) is the last visible row
-   before the keyboard. The `15rem` constant is the visible height
-   of our 5-row keypad (5 × 2.5rem min-height + 4px padding × 2 +
-   4px gap × 4 + ~0.5rem slack for tap-target rounding); bumped
-   from the prior `13.5rem` when the digits row was added.
-   The `.agent-chrome` rule hides the agent-name h1 + Copy/Select
-   buttons on mobile (the operator knows which agent they're on
-   from the URL; the agent-name + button row was eating ~6rem of
-   vertical space that should belong to the terminal). The
-   `aside` (Status / Usage / Context / Actions) is hidden on mobile
-   for the same reason — the dashboard at `/admin/agents` is the
-   place to monitor state, the mobile page is just for driving the
-   terminal. Without these hides the height-calc'd grid still
-   allocates the full slot, but the term-wrap inside only gets the
-   leftover ~2rem after the aside's ~50rem of content. */
+/* Mobile layout: position the keypad as an in-flow flex item so the
+   layout cannot detach under pinch-zoom (fixed elements resolve
+   against the layout viewport while the user sees the visual
+   viewport). main becomes a flex column so any flash alert or banner
+   takes its natural height without shoving the keypad off-screen. */
 @media (max-width: 767.98px), (pointer: coarse) {
   html, body { height: 100%; overflow: hidden; }
-  body { padding-top: 4.5rem; }
+  body { padding-top: 0; }
+  .navbar.fixed-top { display: none; }
   .agent-chrome { display: none; }
   .claude-grid > aside { display: none; }
-  /* The 4.5rem navbar lives at top of body; the keypad is fixed at
-     bottom. Remaining space = full viewport - both. */
+  main.container-fluid {
+    height: 100%;
+    padding-left: 0;
+    padding-right: 0;
+    display: flex;
+    flex-direction: column;
+  }
   .claude-grid {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr);
-    height: calc(100vh - 4.5rem - 15rem);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
     margin-top: 0;
   }
-  .claude-grid .term-wrap {
-    overflow: auto;
-    min-height: 0;
-    height: 100%;
-  }
+  .claude-grid .term-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .claude-grid .mobile-keypad { position: static; flex: 0 0 auto; border-radius: 0; }
+  #prompt-rejected-banner, #viewer-mode-banner { flex: 0 0 auto; margin-top: 0; }
 }
 </style>
 <div class="agent-chrome">
@@ -798,11 +779,11 @@ term.onData(data => {
 //                 (0x1b 0xNN), which is what readline/bash interpret
 //                 as Meta-letter (e.g. Alt+B = backward-word).
 //
-// mousedown.preventDefault on every key keeps focus on the xterm
-// helper textarea so the soft keyboard can be opened for ad-hoc
-// punctuation if a chord like Ctrl-/ isn't worth a custom button;
-// without it, tapping a button would steal focus and close the soft
-// keyboard on FF Mobile, which the prior palette also avoided.
+// The keypad fires on `pointerdown` with preventDefault so the touch
+// reaches the JS on the first contact (no 300 ms click delay), no
+// focus-steal closes the soft keyboard, and FF Android cannot assemble
+// a double-tap-to-zoom gesture from a synthesized `click` we don't
+// listen for.
 const MOBILE_CHAN = 0x01; // TERM_CHAN_CLAUDE — must match
                           // rabbit_lib::wire::TERM_CHAN_CLAUDE.
 const KEY_BYTES = {
@@ -892,14 +873,10 @@ function handleKeyAction(action) {
 }
 if (keypad) {
   keypad.querySelectorAll('button.key[data-action]').forEach(btn => {
-    // preventDefault on mousedown keeps focus on the xterm helper
-    // textarea so the soft keyboard stays in whatever state the user
-    // left it (the previous chip palette needed this trick too —
-    // without it, tapping a button steals focus and FF Mobile closes
-    // the keyboard).
-    btn.addEventListener('mousedown', e => e.preventDefault());
-    btn.addEventListener('click', () => {
+    btn.addEventListener('pointerdown', e => {
       if (viewerMode) return;
+      if (e.button !== undefined && e.button !== 0) return;
+      e.preventDefault();
       handleKeyAction(btn.dataset.action);
     });
   });

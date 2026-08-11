@@ -6,7 +6,18 @@
   <title>{% block title %}{% if let Some(t) = title %}{{ t }} · warren{% else %}warren{% endif %}{% endblock %}</title>
   <link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
   <style>
-    body { padding-top: 4.5rem; }
+    body { padding-top: 4.5rem; touch-action: manipulation; }
+    .navbar.fixed-top { position: static; }
+    @media (max-width: 767.98px) {
+      body { padding-top: 0; }
+      .navbar.fixed-top { display: block; }
+      .navbar-expand-md { flex-wrap: wrap; }
+      .navbar-expand-md .navbar-nav { flex-direction: row; flex-wrap: wrap; }
+      .navbar-expand-md .nav-link { padding-left: .5rem; padding-right: .5rem; }
+    }
+    @media (min-width: 768px) {
+      .navbar.fixed-top { position: fixed; }
+    }
     .table { table-layout: fixed; width: 100%; }
     .table > thead,
     .table > tbody { vertical-align: top; }
@@ -38,7 +49,7 @@
     .cell-pending.responsible-source { box-shadow: inset 4px 0 0 0 #d97706; }
     .cell-pending.responsible-target { box-shadow: inset 4px 0 0 0 #d97706; }
     @media (max-width: 575.98px) {
-      main.container { padding-left: 0; padding-right: 0; }
+      main.container-fluid { padding-left: 0; padding-right: 0; }
     }
     .modal { display: none; position: fixed; inset: 0; z-index: 1050; overflow: auto; padding: 1rem; }
     .modal:target { display: block; }
