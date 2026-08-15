@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 // emits without having to peek at the `pub(crate) actor` module. The
 // full actor is an implementation detail; `Command` is the public
 // API for callers like `AgentHandle::cmd_tx()`.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
@@ -53,6 +54,18 @@ pub struct AgentHandle {
     /// disconnected (no-receiver) mpsc, and every action button click
     /// on that tab would 500 until the tab reconnected.
     cmd_tx: Arc<Mutex<mpsc::Sender<Command>>>,
+    /// Latches to true the first time a browser-side WS asks for a
+    /// `ScreenSnapshot` for this handle. After that, subsequent browser
+    /// reconnects (silent, mid-session WS flaps from reverse-proxy idle
+    /// timeouts, dev-tools reload, mobile tab restore) must NOT issue
+    /// another snapshot — without this gate, every reconnect would
+    /// `term.reset()` the browser pane, pasting in a redundant `ScreenSnapshot`
+    /// from the meta_ring and erasing any pending typed bytes (the
+    /// spurious-banner / command-disappears glitches). Fresh agent handles
+    /// (a brand-new rabbit registering for the first time) reset the
+    /// latch to false, so each session gets exactly one authoritative
+    /// late-join snapshot.
+    first_browser_snapshot_done: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +108,7 @@ impl AgentHandle {
             term_ring: Arc::new(Mutex::new(VecDeque::with_capacity(TERM_RING_MAX_CHUNKS))),
             meta_tx,
             cmd_tx: Arc::new(Mutex::new(cmd_tx)),
+            first_browser_snapshot_done: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -108,6 +122,7 @@ impl AgentHandle {
             term_ring: Arc::new(Mutex::new(VecDeque::with_capacity(TERM_RING_MAX_CHUNKS))),
             meta_tx,
             cmd_tx: Arc::new(Mutex::new(cmd_tx)),
+            first_browser_snapshot_done: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -435,6 +450,21 @@ impl AgentHandle {
         Ok(())
     }
 
+    /// Try to claim the per-handle "first browser snapshot requested"
+    /// latch. Returns `true` iff this caller is the first browser WS
+    /// to ask for a snapshot for this agent handle, in which case the
+    /// caller should follow up with `snapshot_request`. Returns `false`
+    /// for every subsequent browser (silent reconnects from network
+    /// blips, proxy idle timeouts, dev-tools reload, tab restore). The
+    /// handle is replaced wholesale when a fresh rabbit registers, so
+    /// each session still gets exactly one authoritative late-join
+    /// snapshot.
+    pub fn try_mark_first_browser_snapshot(&self) -> bool {
+        self.first_browser_snapshot_done
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
     /// Route a programmatic resize through rabbit over the wire
     /// (`EnvelopeBody::Resize` → `PtyCmd::Resize` → `ioctl(TIOCSWINSZ)`
     /// + SIGWINCH). With the per-leader resize model gone, the only
@@ -456,6 +486,51 @@ mod tests {
 
     fn h() -> AgentHandle {
         AgentHandle::new(Uuid::nil())
+    }
+
+    /// `try_mark_first_browser_snapshot` must be exactly-once across
+    /// every clone of the handle (handle.clone() shares the inner
+    /// `Arc<AtomicBool>`). The first browser WS to call it gets
+    /// `true`; every later reconnect gets `false`, mirroring the
+    /// "one snapshot per session" server-side guarantee the browser
+    /// pair relies on. Without this, the gate in `ws_browser.rs` would
+    /// let two adjacent reconnecting tabs both snapshot and the second
+    /// one would clobber the first's already-applied xterm state.
+    #[test]
+    fn try_mark_first_browser_snapshot_is_exactly_once() {
+        let handle = h();
+        let clone_a = handle.clone();
+        let clone_b = handle.clone();
+
+        assert!(
+            handle.try_mark_first_browser_snapshot(),
+            "first caller wins the latch"
+        );
+        assert!(
+            !clone_a.try_mark_first_browser_snapshot(),
+            "second caller loses the latch"
+        );
+        assert!(
+            !clone_b.try_mark_first_browser_snapshot(),
+            "third caller loses the latch"
+        );
+
+        // The latch is sticky on every clone — even the original handle.
+        assert!(!handle.try_mark_first_browser_snapshot());
+
+        // A brand-new handle resets the latch. This is the model the
+        // server relies on: a fresh rabbit registering a new agent
+        // session produces a brand-new `AgentHandle`, which gets its
+        // own first-snapshot budget.
+        let fresh = h();
+        assert!(
+            fresh.try_mark_first_browser_snapshot(),
+            "fresh handle has its own latch and grants the first request"
+        );
+        assert!(
+            !handle.try_mark_first_browser_snapshot(),
+            "old handle's latch must stay latched — state didn't leak"
+        );
     }
 
     /// Regression: `install_cmd_tx` must propagate the new sender to *every*

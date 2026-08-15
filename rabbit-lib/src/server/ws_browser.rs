@@ -94,12 +94,28 @@ pub async fn handle(
     // 250 ms sleep + SIGWINCH jiggle that used to live here. That jiggle
     // was a heuristic to coerce claude into redrawing for late joiners; the
     // server-side VT snapshot is exact, so the jiggle is gone.
+    //
+    // Only the *first* browser WS for this handle gets the snapshot.
+    // Every later reconnect (silent proxy idle flush, dev-tools reload,
+    // mobile tab restore) skips it — otherwise the `ScreenSnapshot`
+    // would replay through the meta ring, the browser would `term.reset()`,
+    // and in-progress typed bytes (kept in `pendingFrames` but trimmed to
+    // `keep=[]` because `pendingFrames` went `null` on the very first
+    // apply) would silently vanish. The bug is the "spurious claude banner"
+    // / "command I just typed disappeared" symptom on desktop and mobile.
     let snapshot_after = handle.clone();
-    tokio::spawn(async move {
-        if let Err(e) = snapshot_after.snapshot_request(TERM_CHAN_CLAUDE).await {
-            log::debug!("snapshot request failed for agent {}: {e:?}", agent_id);
-        }
-    });
+    if handle.try_mark_first_browser_snapshot() {
+        tokio::spawn(async move {
+            if let Err(e) = snapshot_after.snapshot_request(TERM_CHAN_CLAUDE).await {
+                log::debug!("snapshot request failed for agent {}: {e:?}", agent_id);
+            }
+        });
+    } else {
+        log::debug!(
+            "skipping redundant snapshot request on reconnect for agent {}",
+            agent_id
+        );
+    }
 
     // Heartbeat: the WS has no application-level keepalive by default,
     // so any reverse proxy in front of warren (the user is on

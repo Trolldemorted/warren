@@ -536,8 +536,24 @@ term.focus();
 // snapshot apply drains the buffer.
 const PENDING_FRAMES_MAX = 4096;
 let pendingFrames = []; // null after first snapshot apply
+// Highest seq xterm has actually written on the Claude channel since
+// this page loaded. Survives WS reconnects — `connectWs` does not
+// reset it — so a stale `ScreenSnapshot` whose `after_seq` is below
+// this watermark can be dropped without `term.reset()`. The server
+// only requests one snapshot per session (gated by
+// `try_mark_first_browser_snapshot` in rabbit-lib), but the rabbit
+// → warren link's bounded meta ring can still replay unacked frames
+// (acks fire every 16 envelopes / 2 s) when a flap happens during a
+// modal cleanup. Without the client guard, such a replay would reset
+// xterm and silently drop any pendingFrames that were already trimmed
+// to `keep=[]` on the first apply — losing in-progress typed bytes.
+// 0 at first WS open so the initial late-join snapshot (which has
+// `after_seq` = latest PTY seq at snapshot time, i.e. > 0 in
+// practice, ≥ 0 in degenerate cases) passes through.
+let lastWrittenSeq = 0;
 
 function writeBinaryFrame(seq, data) {
+  if (seq > lastWrittenSeq) lastWrittenSeq = seq;
   if (pendingFrames === null) {
     term.write(bytesToUtf8(data));
     return;
@@ -1055,6 +1071,25 @@ function applyMeta(env) {
       // frames are already a closer approximation of the user's
       // current view.
       if (!Array.isArray(env.text)) break;
+      // Stale-snapshot guard. After the first snapshot applies,
+      // `pendingFrames === null` and `lastWrittenSeq` already covers
+      // every byte xterm has drawn. A late snapshot whose
+      // `after_seq < lastWrittenSeq` reflects older PTY state — it
+      // carries no information the user doesn't already see, and
+      // re-applying would `term.reset()` and paint over in-progress
+      // bytes that haven't been typed into a `pendingFrame` (they
+      // went straight to xterm). Drop it silently; the next genuine
+      // snapshot — when rabbit's modal `/usage`/`/context` cleanup
+      // publishes one with `after_seq ≥ lastWrittenSeq` — still
+      // applies normally. Skipping this guard produced the
+      // "spurious claude banner" / "command I typed disappeared"
+      // glitches on desktop and mobile alike.
+      if (pendingFrames === null) {
+        const incomingAfter = Number(env.after_seq || 0);
+        if (incomingAfter < lastWrittenSeq) {
+          break;
+        }
+      }
       const hasContent = env.text.some(
         row => typeof row === 'string' && row.trim().length > 0,
       );
