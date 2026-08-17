@@ -1147,9 +1147,32 @@ function applyMeta(env) {
       // line past the bottom (even with no scrollback), forcing
       // another scroll-up and landing the cursor on a blank row.
       const visibleRows = Math.max(1, Number(env.rows) || term.rows);
-      const visibleText = env.text.slice(-visibleRows);
-      term.write(visibleText.join('\r\n'));
-      const r = (env.cursor_row || 0) + 1;
+      // Prefer the v2 wire shape: one Vec entry per physical row, no
+      // merge. avt's `text()` collapses consecutive `wrapped=true`
+      // rows into one Vec slot, which loses the wrap-continuation tail
+      // once a TUI's clear-EOL (Claude Code repaints its wrap row with
+      // `\x1b[2K` before the next bullet) reshapes the merge window.
+      // `physical_rows` keeps each VT row as its own entry — including
+      // the row that the TUI just cleared — so the cursor can be
+      // indexed against an honest row count instead of an N-merged-into-1
+      // string. v1 envelopes (no `physical_rows`) default to an empty
+      // Vec, so the branch below falls through to the legacy `text`
+      // slice path automatically. Cursor row is the PHYSICAL index, so
+      // clamping against `physical.length` (when present) avoids a
+      // post-merge off-screen jump.
+      const usePhysical = Array.isArray(env.physical_rows) && env.physical_rows.length > 0;
+      const visible = usePhysical
+        ? env.physical_rows.slice(-visibleRows)
+        : env.text.slice(-visibleRows);
+      if (usePhysical) {
+        for (let i = 0; i < visible.length; i++) {
+          term.write(`\x1b[${i + 1};1H${visible[i]}`);
+        }
+      } else {
+        term.write(visible.join('\r\n'));
+      }
+      const effLen = Math.max(1, visible.length);
+      const r = Math.min((env.cursor_row || 0), Math.max(0, effLen - 1)) + 1;
       const c = (env.cursor_col || 0) + 1;
       term.write(`\x1b[${r};${c}H`);
       // Flush the surviving live frames IN ORDER. We rely on each

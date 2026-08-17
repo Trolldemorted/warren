@@ -176,6 +176,7 @@ async fn screen_snapshot_serializes_with_all_fields_and_correct_tag() {
         cursor_row: 1,
         cursor_visible: true,
         text: vec!["hi  ".into(), "yo  ".into(), "    ".into()],
+        physical_rows: vec!["hi  ".into(), "yo  ".into(), "    ".into()],
         // pre-seq test value. Pin to 0 here so the test doesn't
         // accidentally imply a future seq-counter wiring that hasn't
         // been added yet.
@@ -246,6 +247,7 @@ async fn envelope_tags_are_snake_case_to_match_warren_derive() {
             cursor_row: 0,
             cursor_visible: false,
             text: vec!["ok".into()],
+            physical_rows: vec!["ok".into()],
             after_seq: 0,
         }),
     };
@@ -276,6 +278,7 @@ async fn screen_snapshot_body_after_seq_field_roundtrips_through_wire() {
         cursor_row: 0,
         cursor_visible: true,
         text: vec!["abcd    ".into()],
+        physical_rows: vec!["abcd    ".into()],
         // The interesting value: a non-zero HWM. The wire must carry
         // it through verbatim.
         after_seq: 1024,

@@ -755,6 +755,7 @@ mod tests {
             cursor_row: 0,
             cursor_visible: true,
             text: vec!["".into()],
+            physical_rows: vec![],
             after_seq: 42,
         };
         h.publish_meta(EnvelopeBody::ScreenSnapshot(snap.clone()));

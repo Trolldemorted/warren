@@ -810,6 +810,37 @@ async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
     }
 }
 
+/// Env-gated raw-bytes tee for diagnosing TUI repaint bugs. When
+/// `WARREN_DEBUG_DUMP_PTY_BYTES=1`, every PTY read on the Claude
+/// channel is appended to `/tmp/warren-pty-<agent>.bin`. Default off;
+/// `std::env::var` is called per read but short-circuits to `None`
+/// without allocation in the common path.
+fn debug_pty_path() -> Option<std::path::PathBuf> {
+    match std::env::var("WARREN_DEBUG_DUMP_PTY_BYTES").ok().as_deref() {
+        Some("1") | Some("true") | Some("yes") => {
+            let agent = std::env::var("AGENT_ID").unwrap_or_else(|_| "unknown".into());
+            Some(std::path::PathBuf::from(format!(
+                "/tmp/warren-pty-{agent}.bin"
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// Best-effort PTY byte dump. Used in tandem with `debug_pty_path()` to
+/// capture a problematic Claude Code repaint for offline analysis. Failures
+/// are swallowed (this is a diagnostic, not a correctness path).
+fn debug_pty_append(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = f.write_all(bytes);
+    }
+}
+
 fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
     #[cfg(unix)]
     {
@@ -1235,6 +1266,7 @@ fn spawn_run_one(
                             cursor_row: snap.cursor_row,
                             cursor_visible: snap.cursor_visible,
                             text: snap.text,
+                            physical_rows: snap.physical_rows,
                             after_seq,
                         };
                         if pty_evt_tx
@@ -1302,6 +1334,9 @@ fn spawn_run_one(
                     break;
                 }
                 Ok(n) => {
+                    if let Some(path) = debug_pty_path() {
+                        debug_pty_append(&path, &io_buf[..n]);
+                    }
                     vt_arc.lock().feed(&io_buf[..n]);
                     if let Some(tw) = trust_watcher.as_mut() {
                         if let Some(resp) = tw.observe(&io_buf[..n]) {
@@ -2067,6 +2102,7 @@ async fn run_context_scrape(
         cursor_row: restore.cursor_row,
         cursor_visible: restore.cursor_visible,
         text: restore.text,
+        physical_rows: restore.physical_rows,
         after_seq,
     };
     if let Err(e) = cmd_tx
@@ -3356,6 +3392,7 @@ mod tests {
             cursor_row: 0,
             cursor_visible: true,
             text: vec!["".into()],
+            physical_rows: vec!["".into()],
             after_seq,
         };
 

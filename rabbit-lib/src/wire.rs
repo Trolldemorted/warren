@@ -200,6 +200,18 @@ pub struct ScreenSnapshotBody {
     pub cursor_row: u16,
     pub cursor_visible: bool,
     pub text: Vec<String>,
+    /// Per-visible-VT-row text, no `wrapped` merging. Populated from
+    /// `vt.view().map(|l| l.text().into_owned()).collect()` so each row's
+    /// own clear-EOL is its own entry. `avt::Buffer::text()` collapses
+    /// consecutive `wrapped=true` rows into one Vec slot — fine for the
+    /// `text` field but lossy once a TUI uses clear-EOL before its next
+    /// bullet: the merge window reshapes and the wrap-continuation tail
+    /// is gone from the merged string. The browser prefers `physical_rows`
+    /// when non-empty and writes each row at its index; falls back to
+    /// `text.slice(-rows)` otherwise. `#[serde(default)]` keeps v1
+    /// envelopes (which had no `physical_rows`) deserializable.
+    #[serde(default)]
+    pub physical_rows: Vec<String>,
     /// — per-`chan` counter of the
     /// last byte whose cells are *fully represented* in `text`. `0` means
     /// "no bytes fed yet on this channel"; a positive value tells the
@@ -599,6 +611,7 @@ mod tests {
             cursor_row: 0,
             cursor_visible: true,
             text: vec!["".into()],
+            physical_rows: vec!["".into()],
             after_seq: 42,
         };
         let v = serde_json::to_value(&body).expect("serialize");
@@ -622,6 +635,59 @@ mod tests {
         let body: ScreenSnapshotBody = serde_json::from_value(v1_json)
             .expect("v1 envelope must deserialize under a v2 struct");
         assert_eq!(body.after_seq, 0);
+    }
+
+    /// `physical_rows` is added with `#[serde(default)]` so v1 producers
+    /// (which never emit the field) still deserialize cleanly under the
+    /// v2 struct. Pin that property so the v2 rollout is wire-stable.
+    #[test]
+    fn screen_snapshot_body_v2_serializes_physical_rows_field() {
+        let body = ScreenSnapshotBody {
+            chan: 0x01,
+            cols: 80,
+            rows: 3,
+            cursor_col: 0,
+            cursor_row: 0,
+            cursor_visible: true,
+            text: vec!["a".into(), "b".into(), "c".into()],
+            physical_rows: vec!["a".into(), "b".into(), "c".into()],
+            after_seq: 0,
+        };
+        let v = serde_json::to_value(&body).expect("serialize");
+        assert!(v["physical_rows"].is_array());
+        assert_eq!(
+            v["physical_rows"].as_array().unwrap().len(),
+            3,
+            "physical_rows round-trips as a JSON array of strings"
+        );
+        assert_eq!(
+            v["physical_rows"][0].as_str().unwrap(),
+            "a",
+            "first row content preserved"
+        );
+    }
+
+    /// A v1 envelope (no `physical_rows` key) must default the field to
+    /// an empty Vec on the v2 side so older rabbits still broadcast clean
+    /// envelopes during a mixed-version window.
+    #[test]
+    fn screen_snapshot_body_v1_json_without_physical_rows_deserializes_to_empty() {
+        let v1_json = serde_json::json!({
+            "chan": 0x01,
+            "cols": 80,
+            "rows": 24,
+            "cursor_col": 0,
+            "cursor_row": 0,
+            "cursor_visible": true,
+            "text": [""],
+        });
+        let body: ScreenSnapshotBody = serde_json::from_value(v1_json)
+            .expect("v1 envelope must deserialize under a v2 struct");
+        assert!(
+            body.physical_rows.is_empty(),
+            "v1 envelope defaults physical_rows to empty Vec, got {:?}",
+            body.physical_rows
+        );
     }
 
     // the `TuiConfig` envelope carries the warren-

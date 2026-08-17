@@ -29,7 +29,18 @@ pub struct ScreenSnapshot {
     pub cursor_col: u16,
     pub cursor_row: u16,
     pub cursor_visible: bool,
+    /// Merged view: avt `Buffer::text()` collapses consecutive
+    /// `wrapped=true` rows into one Vec slot. Kept for backwards
+    /// compat with the v1 wire shape and as a fallback.
     pub text: Vec<String>,
+    /// Per-visible-row view: one Vec entry per physical row, no merge.
+    /// `vt.view()` skips scrollback and yields each `wrapped` row as
+    /// its own entry, so the browser's per-row apply can place each
+    /// string at its own xterm row via CSI positioning. Cleared rows
+    /// stay cleared; the wrap-continuation tail that avt's `text()`
+    /// would have absorbed into the previous entry is preserved here
+    /// until a TUI explicitly clears it.
+    pub physical_rows: Vec<String>,
 }
 
 /// Passive VT observer over the PTY byte stream.
@@ -103,6 +114,7 @@ impl TermTracker {
     pub fn snapshot(&self) -> ScreenSnapshot {
         let cursor = self.vt.cursor();
         let (cols, rows) = self.vt.size();
+        let physical_rows: Vec<String> = self.vt.view().map(|line| line.text()).collect();
         ScreenSnapshot {
             cols: cols as u16,
             rows: rows as u16,
@@ -110,6 +122,7 @@ impl TermTracker {
             cursor_row: cursor.row as u16,
             cursor_visible: cursor.visible,
             text: self.vt.text(),
+            physical_rows,
         }
     }
 }
@@ -229,5 +242,96 @@ mod tests {
         // contains 8 scrollback lines above it.
         assert_eq!(snap.cursor_row, 2);
         assert_eq!(snap.cursor_col, 0);
+    }
+
+    /// Per-physical-row contract: with no wrap, `physical_rows` should
+    /// have one entry per visible row, identical in content to the
+    /// merged slice. The "one entry per row" invariant is what makes the
+    /// browser CSI-positioning safe — `cursor_row` indexes into this Vec
+    /// without offsets.
+    #[test]
+    fn physical_rows_returns_one_entry_per_visible_row() {
+        let mut t = TermTracker::new(20, 3, 100);
+        for i in 0..4 {
+            t.feed(format!("line {i}\r\n").as_bytes());
+        }
+        let snap = t.snapshot();
+        assert_eq!(
+            snap.physical_rows.len(),
+            snap.rows as usize,
+            "physical_rows must equal visible row count"
+        );
+        // No wrap → each visible row is its own logical line; the merged
+        // `text` slice and `physical_rows` should agree on content.
+        let visible_text = &snap.text[snap.text.len() - snap.rows as usize..];
+        for i in 0..snap.rows as usize {
+            assert_eq!(
+                snap.physical_rows[i].trim_end(),
+                visible_text[i].trim_end(),
+                "row {i} content must match merged text slice"
+            );
+        }
+    }
+
+    /// Contract pin: a `wrapped` row stays its own `physical_rows`
+    /// entry, with the wrap continuation visible on the next physical
+    /// row. This is the property the browser relies on to place each
+    /// row at its own xterm position — the browser does NOT re-merge
+    /// rows on apply, so each `physical_rows[i]` must be a single
+    /// physical row of <= `cols` chars.
+    #[test]
+    fn physical_rows_keeps_wrapped_row_as_its_own_entry() {
+        // cols=20 forces a 40-char line to wrap exactly once.
+        let mut t = TermTracker::new(20, 2, 100);
+        t.feed(b"01234567890123456789ABCDEFGHIJKLMNOPQRST");
+        let snap = t.snapshot();
+        assert_eq!(
+            snap.physical_rows.len(),
+            2,
+            "two visible rows, two physical_rows entries"
+        );
+        assert_eq!(
+            snap.physical_rows[0], "01234567890123456789",
+            "first 20 chars on row 0"
+        );
+        assert_eq!(
+            snap.physical_rows[1], "ABCDEFGHIJKLMNOPQRST",
+            "continuation on row 1"
+        );
+        // The merged text, by contrast, collapses the two into one
+        // logical-line entry — that's why we ship both.
+        assert_eq!(snap.physical_rows[0].len(), 20);
+        assert_eq!(snap.physical_rows[1].len(), 20);
+    }
+
+    /// Demonstrates the symptom's mechanism: after Claude Code's TUI
+    /// issues a clear-EOL on the wrap row, the merged `text()` "fixes"
+    /// the merge window (the cleared row's `wrapped` flag flips to
+    /// false), absorbing wrap-continuation content into the prior
+    /// entry. `physical_rows` keeps the cleared row as its own empty
+    /// entry — exactly what the operator's screen looks like on the
+    /// wire. The browser cannot recover what the TUI erased, but it
+    /// does know where the cursor actually sits.
+    #[test]
+    fn cleared_wrap_row_becomes_empty_in_physical_rows() {
+        let mut t = TermTracker::new(20, 2, 100);
+        // Long line wraps to row 1.
+        t.feed(b"01234567890123456789ABCDEFGHIJKLMNOPQRST");
+        // Cursor at (row 1, col 20). TUI does \x1b[2K to clear the
+        // wrap row before painting the next bullet.
+        t.feed(b"\x1b[2K");
+        let snap = t.snapshot();
+        assert_eq!(snap.physical_rows.len(), 2);
+        assert_eq!(snap.physical_rows[0], "01234567890123456789");
+        assert!(
+            snap.physical_rows[1].trim().is_empty(),
+            "cleared wrap row is empty/whitespace; got {:?}",
+            snap.physical_rows[1]
+        );
+        // Cursor stays at (row 1, col 20) after the clear — CSI 2K
+        // erases cells without moving the cursor. The TUI typically
+        // follows up with `\r\n` to position the next bullet.
+        assert_eq!(snap.cursor_row, 1);
+        assert_eq!(snap.cursor_col, 20);
     }
 }
