@@ -160,15 +160,13 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .keypad-row {
   display: grid;
   gap: 4px;
-  /* Distribute vertical space equally across the keypad rows so the
-     keys fill the area beneath the terminal instead of hugging the
-     hardcoded min-height. Combined with the button `height: 100%`
-     below, this is what makes the keypad "take all space beneath
-     the terminal" — the keypad's flex container expands to the
-     natural content height (it stays `flex: 0 0 auto` in the mobile
-     media query), and these rows divide that height evenly.
-     `min-height: 0` lets the rows shrink below their content size
-     when the keypad would otherwise overflow the viewport. */
+  /* Distribute vertical space equally across the keypad rows. The
+     keypad itself is `flex: 1 1 0` in the mobile media query and
+     fills the remaining vertical space below the (capped)
+     term-wrap; these rows divide that height evenly with
+     `flex: 1 1 0`. `min-height: 0` lets the rows shrink below
+     their content size when the keypad would otherwise overflow
+     the viewport. */
   flex: 1 1 0;
   min-height: 0;
 }
@@ -193,12 +191,15 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   font-size: 1rem;
   line-height: 1;
   padding: 0;
-  /* `height: 100%` lets each button fill its `.keypad-row` cell so
-     the keys visibly grow as more rows are added (punctuation row)
-     or as the keypad's available vertical space changes between
-     phone sizes. The `min-height` floor guards against pathological
-     small viewports collapsing the keys to nothing. */
-  min-height: 2.25rem;
+  /* `height: 100%` lets each button fill its `.keypad-row` cell.
+     The keypad itself is `flex: 1 1 0` with `min-height: 30vh` on
+     mobile, and each row is `flex: 1 1 0`, so on a 700px-tall
+     viewport each row gets ~100px (≈ 6rem). The `min-height`
+     floor (3rem ≈ 48px) keeps the keys tappable even if a phone
+     in landscape + soft-keyboard-up leaves only a sliver of
+     vertical space — without it, flexbox can collapse rows
+     below their natural content height. */
+  min-height: 3rem;
   height: 100%;
   background: #21262d;
   color: #c9d1d9;
@@ -254,7 +255,24 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     height: auto;
     margin-top: 0;
   }
-  .claude-grid .term-wrap { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  .claude-grid .term-wrap {
+    /* Capped at 40vh so the keypad (which fills the remaining
+       space below) gets a guaranteed 60vh on every phone. The
+       terminal grid is intrinsically much taller than 40vh on
+       portrait phones (160×50 cells × ~16px line-height ≈ 800px),
+       so the user sees only the bottom portion of the screen —
+       acceptable because xterm's scrollback handles navigation.
+       `flex: 0 0 auto` + `max-height` is the reliable cap pattern;
+       `flex: 1 1 auto` + `max-height` would compete with the
+       keypad's `flex: 1 1 0` for the same remaining space and the
+       prior version of this rule had the keypad content-sized
+       (flex: 0 0 auto) which made the keys barely bigger than
+       min-height. */
+    flex: 0 0 auto;
+    min-height: 0;
+    max-height: 40vh;
+    overflow: hidden;
+  }
   /* xterm.js 5.5 has no `touchScrollEnabled` flag — its touchmove
      handler hardcodes a programmatic `scrollTop += delta` and a
      `_bubbleScroll` that tries to drive the parent scroll context.
@@ -268,7 +286,18 @@ body.viewer-mode #viewer-mode-banner { display: block; }
      momentum after release — acceptable for a terminal where users
      make precise scroll adjustments rather than flicking. */
   .xterm-viewport { touch-action: none; }
-  .claude-grid .mobile-keypad { position: static; flex: 0 0 auto; border-radius: 0; }
+  .claude-grid .mobile-keypad {
+    position: static;
+    /* Fills the remaining vertical space below the capped
+       term-wrap. Combined with the per-row `flex: 1 1 0` and
+       button `height: 100%` below, the keys take the full 60vh
+       minus padding, divided across six rows — each row gets
+       roughly 10vh, so on a 700px-tall phone viewport the keys
+       end up ~60–65px tall (≈ 4rem), comfortable for thumbs. */
+    flex: 1 1 0;
+    min-height: 30vh;
+    border-radius: 0;
+  }
   #prompt-rejected-banner, #viewer-mode-banner { flex: 0 0 auto; margin-top: 0; }
 }
 </style>
