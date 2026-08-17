@@ -160,6 +160,17 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .keypad-row {
   display: grid;
   gap: 4px;
+  /* Distribute vertical space equally across the keypad rows so the
+     keys fill the area beneath the terminal instead of hugging the
+     hardcoded min-height. Combined with the button `height: 100%`
+     below, this is what makes the keypad "take all space beneath
+     the terminal" — the keypad's flex container expands to the
+     natural content height (it stays `flex: 0 0 auto` in the mobile
+     media query), and these rows divide that height evenly.
+     `min-height: 0` lets the rows shrink below their content size
+     when the keypad would otherwise overflow the viewport. */
+  flex: 1 1 0;
+  min-height: 0;
 }
 .keypad-row.row-1,
 .keypad-row.row-2,
@@ -170,12 +181,25 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .keypad-row.row-5 {
   grid-template-columns: 1fr 1fr 3fr 1fr 1fr 1fr 1fr 1fr 1fr;
 }
+.keypad-row.row-6 {
+  /* Punctuation row added because shell / CLI work uses
+     `--flag`, `./run.sh`, `?` for help, etc. — all common in
+     terminal input but missing from the 5-row QWERTY layout. Same
+     10-column grid as rows 1–4 so the keys line up vertically. */
+  grid-template-columns: repeat(10, 1fr);
+}
 .mobile-keypad button.key {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 1rem;
   line-height: 1;
   padding: 0;
-  min-height: 2.5rem;
+  /* `height: 100%` lets each button fill its `.keypad-row` cell so
+     the keys visibly grow as more rows are added (punctuation row)
+     or as the keypad's available vertical space changes between
+     phone sizes. The `min-height` floor guards against pathological
+     small viewports collapsing the keys to nothing. */
+  min-height: 2.25rem;
+  height: 100%;
   background: #21262d;
   color: #c9d1d9;
   border: 1px solid #30363d;
@@ -230,7 +254,20 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     height: auto;
     margin-top: 0;
   }
-  .claude-grid .term-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .claude-grid .term-wrap { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  /* xterm.js 5.5 has no `touchScrollEnabled` flag — its touchmove
+     handler hardcodes a programmatic `scrollTop += delta` and a
+     `_bubbleScroll` that tries to drive the parent scroll context.
+     With two scrollable parents (this wrap + `.xterm-viewport`), the
+     bubble races with native pan and produces the glitchy
+     scrollback the user reported. `overflow: hidden` on the wrap
+     removes the second scroll target — bubble has nowhere to go,
+     and only the xterm viewport scrolls. Combined with the
+     `touch-action: none` below, xterm's JS becomes the sole scroll
+     source: no race, no double scroll. Trade-off: no inertial
+     momentum after release — acceptable for a terminal where users
+     make precise scroll adjustments rather than flicking. */
+  .xterm-viewport { touch-action: none; }
   .claude-grid .mobile-keypad { position: static; flex: 0 0 auto; border-radius: 0; }
   #prompt-rejected-banner, #viewer-mode-banner { flex: 0 0 auto; margin-top: 0; }
 }
@@ -350,6 +387,18 @@ body.viewer-mode #viewer-mode-banner { display: block; }
       <button class="key" type="button" data-action="Right" aria-label="arrow right">Rgt</button>
       <button class="key" type="button" data-action="Up" aria-label="arrow up">Up</button>
       <button class="key" type="button" data-action="Down" aria-label="arrow down">Dn</button>
+    </div>
+    <div class="keypad-row row-6">
+      <button class="key" type="button" data-action=".">.</button>
+      <button class="key" type="button" data-action=",">,</button>
+      <button class="key" type="button" data-action="?">?</button>
+      <button class="key" type="button" data-action="!">!</button>
+      <button class="key" type="button" data-action="-">-</button>
+      <button class="key" type="button" data-action="_">_</button>
+      <button class="key" type="button" data-action="+">+</button>
+      <button class="key" type="button" data-action="=">=</button>
+      <button class="key" type="button" data-action="'">'</button>
+      <button class="key" type="button" data-action=";">;</button>
     </div>
   </div>
   <div id="prompt-rejected-banner" role="status" aria-live="polite"></div>
