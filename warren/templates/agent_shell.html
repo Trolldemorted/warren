@@ -186,8 +186,29 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     height: auto;
     margin-top: 0;
   }
-  .shell-grid .term-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
-  .shell-grid .mobile-keypad { position: static; flex: 0 0 auto; border-radius: 0; }
+  .shell-grid .term-wrap {
+    /* Fills the remaining space below the content-sized keypad.
+       The xterm canvas overflows (term-rows is fixed at 40 on
+       shell, font line-height makes the canvas ~520 px), so
+       overflow:auto + touch-action:pan-y lets the user pan
+       within the wrap to reach the bottom of the buffer — the
+       previous content-sized keypad rule hid everything below
+       the first screen of scrollback. */
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    touch-action: pan-y;
+  }
+  .shell-grid .mobile-keypad {
+    /* Content-sized — only as tall as the five rows + gaps +
+       padding (each button has min-height: 2.5rem). The previous
+       flex:0 0 auto plus the fixed-height wrap pushed the wrap
+       off the bottom of the screen on landscape phones; now the
+       term-wrap above eats the leftover space. */
+    position: static;
+    flex: 0 0 auto;
+    border-radius: 0;
+  }
   #no-shell-warning, #viewer-mode-banner { flex: 0 0 auto; margin-top: 0; }
 }
 </style>
@@ -309,6 +330,18 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   scrollback: 5000,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
+
+// xterm.js's internal viewport starts at scrollTop=0 on `open()`,
+// so the user sees the top of the (currently empty) buffer. Auto-
+// scroll to the bottom on initial render so the prompt lands in
+// the wrap's visible area — without this the user would have to
+// pan to find their prompt on every page load.
+function scrollXtermToBottom() {
+  const vp = document.querySelector('.shell-grid .xterm-viewport');
+  if (!vp) return;
+  vp.scrollTop = vp.scrollHeight;
+}
+scrollXtermToBottom();
 
 // kill the soft keyboard on touch devices.
 // xterm.js focuses its helper textarea on click — that focus is what

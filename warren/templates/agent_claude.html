@@ -256,46 +256,55 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     margin-top: 0;
   }
   .claude-grid .term-wrap {
-    /* Capped at 40vh so the keypad (which fills the remaining
-       space below) gets a guaranteed 60vh on every phone. The
-       terminal grid is intrinsically much taller than 40vh on
-       portrait phones (160×50 cells × ~16px line-height ≈ 800px),
-       so the user sees only the bottom portion of the screen —
-       acceptable because xterm's scrollback handles navigation.
-       `flex: 0 0 auto` + `max-height` is the reliable cap pattern;
-       `flex: 1 1 auto` + `max-height` would compete with the
-       keypad's `flex: 1 1 0` for the same remaining space and the
-       prior version of this rule had the keypad content-sized
-       (flex: 0 0 auto) which made the keys barely bigger than
-       min-height. */
-    flex: 0 0 auto;
+    /* Fills the remaining vertical space below the keypad (which
+       is content-sized — see below). The xterm canvas is taller
+       than any plausible mobile viewport (160×50 × ~13px line-height
+       ≈ 650 px), so the canvas overflows the wrap; `overflow: auto`
+       lets the user pan the wrap to reach the bottom of the buffer
+       (the prompt, the cursor, the just-typed bytes). `touch-action:
+       pan-y` keeps native vertical pan working on the wrap while
+       `.xterm-viewport { touch-action: none }` below routes pans on
+       the xterm canvas to xterm's JS scrollback handler — the two
+       scroll targets serve different purposes (wrap = move the
+       viewport-window into the 50-row buffer; xterm-viewport =
+       scrollback within xterm) and don't race because they live in
+       disjoint touch regions. Without this, the previous 40vh cap
+       clipped the bottom of the buffer (the prompt) and the keypad
+       visually floated up to mid-screen because it stretched to
+       fill the rest. */
+    flex: 1 1 auto;
     min-height: 0;
-    max-height: 40vh;
-    overflow: hidden;
+    overflow: auto;
+    touch-action: pan-y;
   }
   /* xterm.js 5.5 has no `touchScrollEnabled` flag — its touchmove
      handler hardcodes a programmatic `scrollTop += delta` and a
      `_bubbleScroll` that tries to drive the parent scroll context.
      With two scrollable parents (this wrap + `.xterm-viewport`), the
-     bubble races with native pan and produces the glitchy
-     scrollback the user reported. `overflow: hidden` on the wrap
-     removes the second scroll target — bubble has nowhere to go,
-     and only the xterm viewport scrolls. Combined with the
-     `touch-action: none` below, xterm's JS becomes the sole scroll
-     source: no race, no double scroll. Trade-off: no inertial
-     momentum after release — acceptable for a terminal where users
-     make precise scroll adjustments rather than flicking. */
+     bubble would race with native pan and produce the glitchy
+     scrollback the user reported. `touch-action: none` on the
+     xterm-viewport keeps all touch inside the canvas going to
+     xterm's JS (its own scrollback handler), while the wrap's
+     `touch-action: pan-y` above routes native vertical pan to the
+     wrap whenever the touch lands on a non-canvas pixel (e.g. the
+     dark background around the canvas). The two scroll regions
+     are disjoint, so there's no race. Trade-off: no inertial
+     momentum after release on the canvas — acceptable for a
+     terminal where users make precise scroll adjustments rather
+     than flicking. */
   .xterm-viewport { touch-action: none; }
   .claude-grid .mobile-keypad {
     position: static;
-    /* Fills the remaining vertical space below the capped
-       term-wrap. Combined with the per-row `flex: 1 1 0` and
-       button `height: 100%` below, the keys take the full 60vh
-       minus padding, divided across six rows — each row gets
-       roughly 10vh, so on a 700px-tall phone viewport the keys
-       end up ~60–65px tall (≈ 4rem), comfortable for thumbs. */
-    flex: 1 1 0;
-    min-height: 30vh;
+    /* Content-sized — only as tall as the six rows + gaps + padding
+       (each row has `flex: 1 1 0` and each button has
+       `min-height: 3rem`, so the keypad is roughly
+       6 × 3rem + gaps ≈ 19rem ≈ 300 px on every phone). The
+       term-wrap above is `flex: 1 1 auto` and absorbs all leftover
+       vertical space, so the user gets a much larger terminal pane
+       than the previous "keypad eats 60vh" layout — and the keys
+       stay at the natural `min-height: 3rem` tap target rather
+       than getting stretched by `min-height: 30vh`. */
+    flex: 0 0 auto;
     border-radius: 0;
   }
   #prompt-rejected-banner, #viewer-mode-banner { flex: 0 0 auto; margin-top: 0; }
@@ -570,6 +579,23 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
 term.focus();
+
+// xterm.js's internal viewport starts at scrollTop=0 on `open()`,
+// so the user sees the top of the (currently empty) buffer. Auto-
+// scroll the viewport to its bottom on initial render and after
+// every `screen_snapshot` apply so the prompt + just-typed input
+// (the "last lines") is in view by default — without this, the
+// wrap overflow: auto would expose scrollback history first and
+// the user would have to pan up to find their prompt. Idempotent:
+// no-op when there's nothing to scroll. The viewport element is
+// recreated on term re-open, so we cache the selector via
+// `.xterm-viewport` (one per term).
+function scrollXtermToBottom() {
+  const vp = term.element && term.element.querySelector('.xterm-viewport');
+  if (!vp) return;
+  vp.scrollTop = vp.scrollHeight;
+}
+scrollXtermToBottom();
 
 // kill the soft keyboard. xterm.js focuses its helper
 // textarea on click — that focus is what summons the Android/iOS
@@ -1260,6 +1286,12 @@ function applyMeta(env) {
       for (const f of keep) {
         term.write(bytesToUtf8(f.data));
       }
+      // term.reset() and the CSI writes above leave xterm's internal
+      // viewport at scrollTop=0 (top of the new buffer). Auto-scroll
+      // back to the bottom so the prompt lands in the wrap's visible
+      // area — without this the user sees the top of the snapshot and
+      // has to pan to find the prompt.
+      scrollXtermToBottom();
       break;
   }
 }
