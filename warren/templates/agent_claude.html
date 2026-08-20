@@ -160,14 +160,18 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 .keypad-row {
   display: grid;
   gap: 4px;
-  /* Distribute vertical space equally across the keypad rows. The
-     keypad itself is `flex: 1 1 0` in the mobile media query and
-     fills the remaining vertical space below the (capped)
-     term-wrap; these rows divide that height evenly with
-     `flex: 1 1 0`. `min-height: 0` lets the rows shrink below
-     their content size when the keypad would otherwise overflow
-     the viewport. */
-  flex: 1 1 0;
+  /* Content-sized — each row's height is set by its buttons'
+     `min-height: 3rem`. The keypad itself is `flex: 0 0 auto`
+     in the mobile media query and bases its size on the sum of
+     these row heights (≈ 6 × 3rem + gaps ≈ 19rem on a phone).
+     Leaving rows at their natural intrinsic size matters: a
+     leftover `flex: 1 1 0` from the previous "keypad fills the
+     rest" layout collapses each row's basis to 0, which makes
+     the keypad's own intrinsic size collapse too — the keypad
+     div renders at 28px instead of 19rem and the 48px buttons
+     overflow downward past the viewport, invisible to the user.
+     `min-height: 0` lets the rows shrink if the keypad ever
+     does get flex-shrunk (landscape phone, very short viewport). */
   min-height: 0;
 }
 .keypad-row.row-1,
