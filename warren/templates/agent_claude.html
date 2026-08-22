@@ -73,11 +73,13 @@ body.viewer-mode .mobile-keypad { display: none; }
 }
 body.viewer-mode #viewer-mode-banner { display: block; }
 
-/* TUI grid sizing: the xterm canvas is set to a fixed `cols × rows` from
-   the template-injected TUI_WIDTH/TUI_HEIGHT. Browsers smaller than that
-   get scrollbars (overflow: auto) on `.term-wrap`; larger windows just
-   show extra empty space, since the PTY is the source of truth for the
-   grid and the kernel winsize is fixed. */
+/* TUI grid sizing: the xterm canvas starts at the template-injected
+   TUI_WIDTH/TUI_HEIGHT and then `FitAddon` (see JS below) re-fits it to
+   the actual `.term-wrap` width and pushes a `Resize` envelope to
+   rabbit so the PTY winsize tracks the canvas. `overflow: auto` stays
+   on for the case where the wrap height is shorter than the canvas
+   (landscape phone, very short windows) — the user can pan the wrap
+   to reach the cursor. */
 .claude-grid .term-wrap { overflow: auto; }
 .claude-grid #term { display: block; }
 
@@ -500,6 +502,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   </aside>
 </div>
 <script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/xterm-addon-fit.js"></script>
 <script>
 const agentId = "{{ agent.id }}";
 const grid = document.getElementById('claude-grid');
@@ -600,6 +603,68 @@ function scrollXtermToBottom() {
   vp.scrollTop = vp.scrollHeight;
 }
 scrollXtermToBottom();
+
+// FitAddon sizes the xterm canvas to whatever the .term-wrap actually
+// measures on screen, so the 160-col PTY grid warren starts the session
+// with collapses to whatever fits the visible wrap on a narrow desktop
+// window (the user reported lines like `(esc to interrupt · 7s · timeout
+// 10m)` rendering cut off at the right edge — that was the canvas
+// overflow past the wrap). The same `cols/rows` are pushed to rabbit via
+// the existing `Resize` envelope (server→rabbit `ioctl(TIOCSWINSZ)` +
+// SIGWINCH), so Claude repaints at the new winsize and the next
+// `ScreenSnapshot` reflects the new cols. The PTY's winsize is the
+// single source of truth — no separate browser-side "fake" cols — so
+// snapshot apply stays correct. Re-fit on a `ResizeObserver` callback
+// (wrap width changes when the user resizes the window or toggles the
+// dev-tools panel). 50ms debounce so we don't flood the WS during a
+// drag-resize.
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+let pendingResize = null;
+let resizeDebounce = null;
+function maybeSendResize() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!pendingResize) return;
+  const { cols, rows } = pendingResize;
+  pendingResize = null;
+  ws.send(JSON.stringify({
+    v: PROTOCOL_VERSION, seq: 0,
+    body: { t: 'resize', cols, rows },
+  }));
+}
+function refit() {
+  const dims = fitAddon.proposeDimensions();
+  if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
+  const cols = Math.max(2, Math.floor(dims.cols));
+  const rows = Math.max(1, Math.floor(dims.rows));
+  if (cols === term.cols && rows === term.rows) return;
+  term.resize(cols, rows);
+  pendingResize = { cols, rows };
+  maybeSendResize();
+  scrollXtermToBottom();
+}
+// One rAF so the wrap has its final layout (e.g. after the desktop
+// media query settles the .claude-grid columns). The TUI_WIDTH=160
+// default from the template is just a safe upper bound; the real
+// canvas size comes from this refit.
+requestAnimationFrame(refit);
+const termWrap = document.querySelector('.claude-grid .term-wrap');
+if (typeof ResizeObserver !== 'undefined' && termWrap) {
+  const ro = new ResizeObserver(() => {
+    clearTimeout(resizeDebounce);
+    resizeDebounce = setTimeout(refit, 50);
+  });
+  ro.observe(termWrap);
+}
+// also refit on viewport resize — covers the case where the wrap
+// width is driven by the window (e.g. the user goes from a wide
+// monitor to a narrow laptop screen). ResizeObserver catches most of
+// this via wrap width, but a window-resize belt-and-braces keeps it
+// snappy when no observer fires (e.g. the user toggles dev-tools).
+window.addEventListener('resize', () => {
+  clearTimeout(resizeDebounce);
+  resizeDebounce = setTimeout(refit, 50);
+});
 
 // kill the soft keyboard. xterm.js focuses its helper
 // textarea on click — that focus is what summons the Android/iOS
@@ -1317,6 +1382,10 @@ function connectWs() {
 
   ws.onopen = () => {
     wsBackoff = 500;
+    // Flush any deferred fit-driven `Resize` envelope that fired before
+    // the WS was open — common when refit runs in the first rAF tick
+    // and the WS handshake completes milliseconds later.
+    maybeSendResize();
     // Don't flip `connected` to true on the WS handshake alone. The
     // server now holds the WS open indefinitely when no rabbit has
     // registered yet (so the browser doesn't reconnect-loop), but
@@ -1484,13 +1553,14 @@ function showActionToast(msg, kind = 'info') {
 
 //
 //
-// The TUI grid is fixed at template-render time from warren's
-// TUI_WIDTH/TUI_HEIGHT env vars. Every browser renders the same grid
-// regardless of window size; smaller windows get scrollbars (CSS
-// `overflow: auto` on `.term-wrap`). The PTY's winsize is set to match
-// by the `TuiConfig` envelope warren sends to rabbit on connect.
-// There is no per-tab resize, no leader, and no `Resize` frame
-// originating from the browser.
+// The TUI grid starts at template-render time from warren's
+// TUI_WIDTH/TUI_HEIGHT env vars, then the browser re-fits it to the
+// visible `.term-wrap` width via `FitAddon` and pushes the new
+// cols/rows to rabbit as a `Resize` envelope — rabbit resizes the PTY
+// (ioctl(TIOCSWINSZ) + SIGWINCH) and Claude repaints. So the canvas
+// always matches the PTY winsize, and `ScreenSnapshot.apply` stays
+// correct. The PTY winsize is still the single source of truth; no
+// per-tab virtual cols.
 
 connectWs();
 </script>
