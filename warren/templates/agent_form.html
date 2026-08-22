@@ -76,18 +76,20 @@
     {% endfor %}
   </tbody>
 </table>
+{% if !forgejo_configs.is_empty() %}
 <h3 class="h6 mt-4">Add a config</h3>
 <table class="table table-sm align-middle">
   <tbody>
     <tr>
-      <td><input name="new[0][base_url]" placeholder="https://codeberg.org" class="form-control form-control-sm"></td>
-      <td><input name="new[0][owner]" placeholder="myorg" class="form-control form-control-sm"></td>
-      <td><input name="new[0][repo]" placeholder="myrepo" class="form-control form-control-sm"></td>
-      <td><input name="new[0][forgejo_username]" placeholder="alice" class="form-control form-control-sm"></td>
+      <td><input name="new[0][base_url]" autocomplete="off" placeholder="https://codeberg.org" class="form-control form-control-sm"></td>
+      <td><input name="new[0][owner]" autocomplete="off" placeholder="myorg" class="form-control form-control-sm"></td>
+      <td><input name="new[0][repo]" autocomplete="off" placeholder="myrepo" class="form-control form-control-sm"></td>
+      <td><input name="new[0][forgejo_username]" autocomplete="off" placeholder="alice" class="form-control form-control-sm"></td>
       <td><input type="password" autocomplete="off" name="new[0][access_token]" placeholder="access token" class="form-control form-control-sm"></td>
     </tr>
   </tbody>
 </table>
+{% endif %}
 {% endif %}
   <button type="submit" class="btn btn-primary">Save</button>
   <a href="/admin/agents" class="btn btn-link">Cancel</a>

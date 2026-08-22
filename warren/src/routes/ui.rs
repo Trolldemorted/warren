@@ -331,7 +331,7 @@ impl AgentForgejoConfigNewForm {
             && self.owner.trim().is_empty()
             && self.repo.trim().is_empty()
             && self.forgejo_username.trim().is_empty()
-            && self.access_token.is_empty()
+            && self.access_token.trim().is_empty()
     }
     fn into_model(self) -> AgentForgejoConfigNew {
         AgentForgejoConfigNew {
@@ -651,7 +651,7 @@ async fn apply_forgejo_config_diff(
             || n.owner.trim().is_empty()
             || n.repo.trim().is_empty()
             || n.forgejo_username.trim().is_empty()
-            || n.access_token.is_empty()
+            || n.access_token.trim().is_empty()
         {
             return Err(AppError::BadRequest(
                 "forgejo config has empty required field".into(),
