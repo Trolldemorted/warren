@@ -166,7 +166,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
 /* Mobile layout: same fixed-height flex column as agent_claude.html
    — keypad is in-flow so it cannot detach under pinch-zoom. */
 @media (max-width: 767.98px), (pointer: coarse) {
-  html, body { height: 100%; overflow: hidden; }
+  html, body { height: 100dvh; overflow: hidden; }
   body { padding-top: 0; }
   .navbar.fixed-top { display: none; }
   .agent-chrome { display: none; }
@@ -379,7 +379,13 @@ function focusTerm(opts = { preventScroll: true }) {
   if (ta) ta.focus(opts);
   else term.focus();
 }
-focusTerm();
+// Skip the initial focus on touch devices — focusing the helper
+// textarea summons the OS soft keyboard on page load and the layout
+// then has to absorb the keypad sliding under the keyboard. The
+// keypad handles all input itself.
+if (!window.matchMedia('(pointer: coarse)').matches) {
+  focusTerm();
+}
 document.addEventListener('focusin', e => {
   const t = e.target;
   if (!(t && t.classList && t.classList.contains('xterm-helper-textarea'))) return;

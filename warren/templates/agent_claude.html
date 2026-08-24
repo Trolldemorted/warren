@@ -240,7 +240,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    viewport). main becomes a flex column so any flash alert or banner
    takes its natural height without shoving the keypad off-screen. */
 @media (max-width: 767.98px), (pointer: coarse) {
-  html, body { height: 100%; overflow: hidden; }
+  html, body { height: 100dvh; overflow: hidden; }
   body { padding-top: 0; }
   .navbar.fixed-top { display: none; }
   .agent-chrome { display: none; }
@@ -585,7 +585,14 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   mouseEvents: false,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
-term.focus();
+// Skip the initial `term.focus()` on touch devices — focusing the
+// helper textarea is what summons the OS soft keyboard on page load,
+// which then overlays the page and partially hides the custom keypad.
+// The keypad handles every keypress itself, so the term doesn't need
+// to hold focus until the user explicitly clicks the canvas.
+if (!window.matchMedia('(pointer: coarse)').matches) {
+  term.focus();
+}
 
 // xterm.js's internal viewport starts at scrollTop=0 on `open()`,
 // so the user sees the top of the (currently empty) buffer. Auto-
