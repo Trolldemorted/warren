@@ -264,9 +264,9 @@ mod tests {
         // No wrap → each visible row is its own logical line; the merged
         // `text` slice and `physical_rows` should agree on content.
         let visible_text = &snap.text[snap.text.len() - snap.rows as usize..];
-        for i in 0..snap.rows as usize {
+        for (i, row) in snap.physical_rows.iter().enumerate() {
             assert_eq!(
-                snap.physical_rows[i].trim_end(),
+                row.trim_end(),
                 visible_text[i].trim_end(),
                 "row {i} content must match merged text slice"
             );
