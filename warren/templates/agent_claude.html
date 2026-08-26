@@ -8,6 +8,13 @@
   grid-template-columns: minmax(0, 1fr) 18rem;
   gap: 1rem;
   margin-top: 1rem;
+  /* Cap row at viewport so aside's intrinsic height doesn't blow up the page. Same pattern as agent_shell.html. */
+  height: calc(100vh - 4.5rem);
+  min-height: 0;
+}
+/* Narrow-desktops: keep the wrap readable by shrinking the aside from 18rem to 14rem. Below 768px the mobile rule hides aside entirely. */
+@media (max-width: 1023.98px) {
+  .claude-grid { grid-template-columns: minmax(0, 1fr) 14rem; }
 }
 .claude-grid .term-wrap {
   background: #0d1117;
@@ -34,6 +41,10 @@
   padding: 1rem;
 }
 .claude-grid.disconnected .offline-overlay { display: flex; }
+.claude-grid > aside {
+  min-height: 0;
+  overflow: auto;
+}
 .claude-grid .status { font-family: ui-monospace, monospace; }
 button.action { width: 100%; margin-bottom: .25rem; }
 
@@ -314,6 +325,10 @@ body.viewer-mode #viewer-mode-banner { display: block; }
     border-radius: 0;
   }
   #prompt-rejected-banner, #viewer-mode-banner { flex: 0 0 auto; margin-top: 0; }
+  /* Short-viewport (<=500px tall): shrink keys from 3rem to 2rem so the wrap keeps usable height. */
+  @media (max-height: 500px) {
+    .mobile-keypad button.key { min-height: 2rem; }
+  }
 }
 </style>
 <div class="agent-chrome">
