@@ -53,5 +53,18 @@ jobs:
       - name: OpenAPI drift
         run: cargo test -p warren --test openapi_drift -- --nocapture
 
+      - name: Install Python deps for layout driver
+        run: pip install --break-system-packages websocket-client
+
+      - name: Layout integration (warren + browser + screenshots)
+        run: ./tests/mobile-layout/run.sh
+
+      - name: Upload mobile-layout screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-layout-screenshots
+          path: tests/mobile-layout/artifacts/
+
       - name: Warren test suite
         run: cargo test -p warren -- --test-threads=1
