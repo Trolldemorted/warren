@@ -8,8 +8,17 @@
   grid-template-columns: minmax(0, 1fr) 18rem;
   gap: 1rem;
   margin-top: 1rem;
-  /* Cap row at viewport so aside's intrinsic height doesn't blow up the page. Same pattern as agent_shell.html. */
-  height: calc(100vh - 4.5rem);
+  /* The grid flexes inside main (set to a column flex container below) so
+     the agent-chrome header keeps its natural height and the grid
+     absorbs the rest. Hard-coding `calc(100vh - 4.5rem)` was wrong: the
+     4.5rem accounted for the navbar alone, but the .agent-chrome block
+     (h1 + Copy/Copy-selection buttons + state badge) is another ~95px,
+     so the grid bottom landed ~95px past the viewport on every desktop
+     width and the page scrolled. Using a flex column with `min-height: 0`
+     lets the grid size to whatever vertical space remains regardless of
+     the chrome's actual height, so a future chrome change can't silently
+     re-introduce the overflow. Same pattern as agent_shell.html. */
+  flex: 1 1 auto;
   min-height: 0;
 }
 /* Narrow-desktops: keep the wrap readable by shrinking the aside from 18rem to 14rem. Below 768px the mobile rule hides aside entirely. */
@@ -90,9 +99,15 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    rabbit so the PTY winsize tracks the canvas. `overflow: auto` stays
    on for the case where the wrap height is shorter than the canvas
    (landscape phone, very short windows) — the user can pan the wrap
-   to reach the cursor. */
-.claude-grid .term-wrap { overflow: auto; }
-.claude-grid #term { display: block; }
+   to reach the cursor. #term has `height: 100%` so it takes the
+   wrap's flex-computed height rather than self-sizing to its own
+   canvas — without it FitAddon's proposeDimensions() measures a
+   #term whose height equals its own row count (50 rows × 17px ≈
+   850px) and proposes 50 rows regardless of the wrap, so the
+   terminal never shrinks. Width was already fine because `#term` has
+   `width: 100%`. */
+.claude-grid .term-wrap { overflow: auto; min-height: 0; }
+.claude-grid #term { display: block; width: 100%; height: 100%; }
 
 /* prevent auto-zoom on focus. FF Mobile (in any
    mode) auto-zooms the viewport when an input with font-size <16px
@@ -244,6 +259,26 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   border-color: #f59e0b;
   color: #1f2937;
 }
+
+/* Page-level layout: main is a column flex container on every breakpoint
+   so the agent-chrome block keeps its natural height and the grid
+   absorbs the rest via `flex: 1 1 auto; min-height: 0` above. The
+   previous `calc(100vh - 4.5rem)` only accounted for the navbar and
+   didn't subtract the chrome, so the grid bottom sat ~95px past the
+   viewport on every desktop width. Using `100vh - 4.5rem` as a
+   definite height here (not min-height) is required: with min-height
+   the aside's intrinsic 1235px content can stretch the grid row to
+   match, pushing the page past the viewport. The mobile media query
+   below overrides this to fill 100dvh with chrome hidden, which fits
+   the keypad-as-flex-item layout. */
+main.container-fluid {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 4.5rem);
+  overflow: hidden;
+}
+main.container-fluid > .alert { flex: 0 0 auto; }
+.agent-chrome { flex: 0 0 auto; }
 
 /* Mobile layout: position the keypad as an in-flow flex item so the
    layout cannot detach under pinch-zoom (fixed elements resolve

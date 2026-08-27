@@ -8,13 +8,16 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   margin-top: 1rem;
-  /* (4.5rem from base.html).
-     Caps the page at one screen so wheel scroll stays inside the
-     terminal wrap (the term-wrap gets its own overflow below) and
-     can't push the whole layout off-screen. Without this on Firefox
-     Mobile, zooming in and typing into the helper textarea can
-     scroll the body up so the prompt is no longer visible. */
-  height: calc(100vh - 4.5rem);
+  /* The grid flexes inside main (set to a column flex container below)
+     so any preceding blocks (flash banner, agent-chrome on claude) keep
+     their natural height and the grid absorbs the rest. The previous
+     `calc(100vh - 4.5rem)` only accounted for the navbar (4.5rem), not
+     the chrome + copy buttons above the grid, so the grid bottom landed
+     ~95px past the viewport and the page scrolled. flex+min-height:0
+     sizes the grid to whatever vertical space remains regardless of
+     what sits above it, so future chrome changes can't silently
+     re-introduce the overflow. */
+  flex: 1 1 auto;
   min-height: 0;
 }
 .shell-grid .term-wrap {
@@ -25,7 +28,7 @@
   min-height: 0;
   overflow: auto;
 }
-.shell-grid #term { width: 100%; font-family: ui-monospace, monospace; display: block; }
+.shell-grid #term { width: 100%; height: 100%; font-family: ui-monospace, monospace; display: block; }
 
 /* 's bundled CSS
    parks the focusable helper textarea at `left: -9999em` so Chromium
@@ -162,6 +165,21 @@ body.viewer-mode #viewer-mode-banner { display: block; }
   border-color: #f59e0b;
   color: #1f2937;
 }
+
+/* Page-level layout: main is a column flex container on every breakpoint
+   so the agent-chrome block keeps its natural height and the grid
+   absorbs the rest via `flex: 1 1 auto; min-height: 0` above. Mirrors
+   the same rule in agent_claude.html. Definite `height` (not
+   min-height) is required so the aside's intrinsic content height
+   can't stretch the grid row past the viewport. */
+main.container-fluid {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 4.5rem);
+  overflow: hidden;
+}
+main.container-fluid > .alert { flex: 0 0 auto; }
+.agent-chrome { flex: 0 0 auto; }
 
 /* Mobile layout: same fixed-height flex column as agent_claude.html
    — keypad is in-flow so it cannot detach under pinch-zoom. */
