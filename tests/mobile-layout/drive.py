@@ -232,6 +232,14 @@ PROBE = r"""
       keypadLastRow = text;
     }
   }
+  // The xterm canvas cols/rows as last seen by `refit()` in the
+  // template (or at `term.open()` for the shell template, which
+  // doesn't use FitAddon). Reads `window.__lastCols`/`__lastRows`,
+  // which stay 0 until the first successful refit — that's exactly
+  // the regression we want to catch (the page shipped at 160×50
+  // because the wrap was transiently 0×0 and refit bailed).
+  const lastCols = window.__lastCols || 0;
+  const lastRows = window.__lastRows || 0;
   return {
     vw, vh: window.innerHeight,
     docScrollW: de.scrollWidth,
@@ -249,6 +257,8 @@ PROBE = r"""
     keypad: rect(keypad),
     keypadLastRow,
     keypadLastRowBottom,
+    lastCols,
+    lastRows,
   };
 })()
 """
@@ -285,11 +295,53 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                 f"keypad last row ({m['keypadLastRow']!r}) clipped: "
                 f"bottom={m['keypadLastRowBottom']} > vh={m['vh']}"
             )
+    # xterm canvas was actually refit to the wrap. `window.__lastCols`
+    # stays 0 if `refitWhenReady` exhausted its retries without ever
+    # getting valid dims from `fitAddon.proposeDimensions()` — that's
+    # the "desktop page sometimes broken at load" regression, where
+    # xterm ships at the 160×50 template default. We don't check the
+    # *value* of lastCols when 0; we just refuse to silently green a
+    # build that never sized its canvas.
+    if m["lastCols"] <= 0:
+        fails.append("xterm canvas was never refit (window.__lastCols == 0)")
+    else:
+        # Coarse viewports: xterm canvas cols must be narrow enough to
+        # fit a phone. The wrap at 390 CSS px is ~370 px inside
+        # padding; at 8 px/char (ui-monospace 13px) that's ~46 cols.
+        # Anything ≥ 80 means the refit fell back to the template
+        # 160-col default and long lines will wrap character-by-
+        # character on the user's phone.
+        if mobile and m["lastCols"] > 80:
+            fails.append(
+                f"xterm too wide on mobile: cols={m['lastCols']} "
+                f"(wrap.clientWidth={m['wrap']['w'] if m['wrap'] else '?'}px) "
+                f"— long lines will wrap mid-word"
+            )
+        # Fine viewports: xterm canvas should at least span most of
+        # the wrap. A 60-col canvas in a 1200px wrap means the refit
+        # bailed early — about the same as the mobile-side regression.
+        if not mobile and m["lastCols"] < 60:
+            fails.append(
+                f"xterm too narrow on desktop: cols={m['lastCols']} "
+                f"(wrap.clientWidth={m['wrap']['w'] if m['wrap'] else '?'}px)"
+            )
+        # Sanity: refit dims should match `wrap.clientWidth / 8`
+        # (monospace char width at 13px). ±2 tolerates the padding
+        # the wrap loses to its `.5rem` inner padding and the
+        # renderer rounding to integer cols.
+        if m["wrap"] and m["wrap"]["w"] > 0:
+            expected_cols = m["wrap"]["w"] // 8
+            if abs(m["lastCols"] - expected_cols) > 2:
+                fails.append(
+                    f"xterm cols {m['lastCols']} != wrap.clientWidth/8 ≈ {expected_cols} "
+                    f"(wrap.clientWidth={m['wrap']['w']}px)"
+                )
     log(f"  {name}: "
         f"vw={m['vw']}x{m['vh']} "
         f"mqCoarse={m['mqCoarse']} "
         f"term.h={m['term']['h'] if m['term'] else 'n/a'} "
         f"wrap.h={m['wrap']['h'] if m['wrap'] else 'n/a'} "
+        f"lastCols={m['lastCols']} "
         f"keypad.row.bottom={m['keypadLastRowBottom']} "
         f"{'FAIL ' + '; '.join(fails) if fails else 'ok'}")
     return fails
@@ -447,8 +499,13 @@ def main() -> int:
                 time.sleep(0.4)
                 url = f"{base}/agent/{agent_id}/claude"
                 cdp.navigate(url)
-                # wait for the page to settle — xterm or the offline overlay
-                time.sleep(3.0)
+                # wait for the page to settle — xterm or the offline
+                # overlay. 4s gives `refitWhenReady`'s 20-frame
+                # retry loop (~320ms typical, up to ~640ms in
+                # slow-paint cases) time to finish before the WS
+                # `ScreenSnapshot` arrives and writes content into
+                # the canvas.
+                time.sleep(4.0)
 
                 m = cdp.evaluate(PROBE, timeout_s=PROBE_TIMEOUT_S)
                 m["viewport"] = name

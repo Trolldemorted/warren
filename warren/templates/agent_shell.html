@@ -207,15 +207,29 @@ main.container-fluid > .alert { flex: 0 0 auto; }
   .shell-grid .term-wrap {
     /* Fills the remaining space below the content-sized keypad.
        The xterm canvas overflows (term-rows is fixed at 40 on
-       shell, font line-height makes the canvas ~520 px), so
-       overflow:auto + touch-action:pan-y lets the user pan
-       within the wrap to reach the bottom of the buffer — the
-       previous content-sized keypad rule hid everything below
-       the first screen of scrollback. */
+       shell, font line-height makes the canvas ~520 px), so the
+       wrap needs to scroll. `overflow-y: scroll` (not `auto`) keeps
+       a thin vertical scrollbar always visible on touch devices,
+       which hide `auto` scrollbars until the user actively pans —
+       the previous `overflow: auto` left shell users wondering why
+       output below the fold looked cut off. Width stays `auto` so
+       landscape phones whose canvas overflows the wrap can still
+       pan horizontally. `touch-action: pan-y` lets the user pan
+       vertically via native scroll while `.xterm-viewport { touch-
+       action: none }` (on the claude template) routes canvas pans
+       to xterm's JS scrollback handler — disjoint regions, no race. */
     flex: 1 1 auto;
     min-height: 0;
-    overflow: auto;
+    overflow-x: auto;
+    overflow-y: scroll;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255,255,255,0.35) transparent;
     touch-action: pan-y;
+  }
+  .shell-grid .term-wrap::-webkit-scrollbar { width: 6px; height: 6px; }
+  .shell-grid .term-wrap::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.35);
+    border-radius: 3px;
   }
   .shell-grid .mobile-keypad {
     /* Content-sized — only as tall as the five rows + gaps +
@@ -352,6 +366,14 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   scrollback: 5000,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
 term.open(document.getElementById('term'));
+// Exposed for the layout integration test
+// (`tests/mobile-layout/drive.py`). The shell template doesn't use
+// FitAddon — TERM_COLS/TERM_ROWS are fixed at template-render time
+// from `TUI_WIDTH`/`TUI_HEIGHT` env (default 120×40) — so the test
+// reads this directly to confirm the canvas dimensions the page
+// thinks it has.
+window.__lastCols = TERM_COLS;
+window.__lastRows = TERM_ROWS;
 
 // xterm.js's internal viewport starts at scrollTop=0 on `open()`,
 // so the user sees the top of the (currently empty) buffer. Auto-
