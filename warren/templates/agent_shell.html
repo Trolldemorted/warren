@@ -6,6 +6,16 @@
 .shell-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  /* `grid-template-rows: minmax(0, 1fr)` is required: without it the row
+     auto-sizes to the wrap's intrinsic height, which is 0 (#term's
+     `height: 100%` is circular without a definite parent), so the wrap
+     collapses to zero and the terminal is invisible. Declaring a single
+     1fr row makes the row fill the grid's flex-resolved height (the
+     grid is `flex: 1 1 auto; min-height: 0` inside `main.container-fluid`
+     column flex, so it gets the vertical space left after navbar +
+     chrome). Mirrors the same fix on .claude-grid; see that template
+     for the longer writeup. */
+  grid-template-rows: minmax(0, 1fr);
   gap: 1rem;
   margin-top: 1rem;
   /* The grid flexes inside main (set to a column flex container below)

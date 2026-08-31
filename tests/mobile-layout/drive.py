@@ -240,6 +240,43 @@ PROBE = r"""
   // because the wrap was transiently 0×0 and refit bailed).
   const lastCols = window.__lastCols || 0;
   const lastRows = window.__lastRows || 0;
+  // The .claude-grid gets the .disconnected class server-side if
+  // the live-registry snapshot at page-render time had no entry for
+  // this agent (i.e. rabbit is not currently connected to warren).
+  // `setConnected(true)` removes it on first WS message. When true,
+  // the .offline-overlay covers the wrap — the buffer is empty by
+  // design (no ScreenSnapshot will arrive), so the content probe
+  // below has to skip.
+  const grid = q('#claude-grid') || q('#shell-grid');
+  const disconnected = !!(grid && grid.classList.contains('disconnected'));
+  // Walk the visible xterm rows and dump the painted text. Returns
+  // null when the terminal isn't there (shell template, or before
+  // xterm.js loaded). Returns the *joined text* of every non-blank
+  // visible row (up to `MAX_CONTENT_LINES`) plus the concatenated
+  // length so a future assertion can check *what* was painted, not
+  // just whether *something* was — the user's gripe with the
+  // previous dimension-only probe was exactly that "xterm refit ok"
+  // doesn't imply "the Claude greeting actually rendered". Capture
+  // ANSI escape sequences as the raw character codes (no strip)
+  // because translateToString(true) already drops them — but
+  // box-drawing chars / arrows stay as the JS string the buffer
+  // holds, so a `Claude` substring or `Welcome` substring search is
+  // the right assertion shape for downstream checks.
+  const MAX_CONTENT_LINES = 20;
+  const contentLines = [];
+  let contentLen = 0;
+  if (window.term && window.term.buffer && window.term.buffer.active) {
+    const buf = window.term.buffer.active;
+    for (let i = 0; i < buf.length && contentLines.length < MAX_CONTENT_LINES; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const t = line.translateToString(true).replace(/\s+$/, '');
+      if (t.length > 0) {
+        contentLines.push(t);
+        contentLen += t.length;
+      }
+    }
+  }
   return {
     vw, vh: window.innerHeight,
     docScrollW: de.scrollWidth,
@@ -259,6 +296,9 @@ PROBE = r"""
     keypadLastRowBottom,
     lastCols,
     lastRows,
+    disconnected,
+    contentLen,
+    contentLines,
   };
 })()
 """
@@ -336,6 +376,56 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                     f"xterm cols {m['lastCols']} != wrap.clientWidth/8 ≈ {expected_cols} "
                     f"(wrap.clientWidth={m['wrap']['w']}px)"
                 )
+        # Content probe: when the grid is *not* in offline-overlay
+        # mode (the WS handshake succeeded and `setConnected(true)`
+        # removed the `.disconnected` class), xterm must have
+        # actually painted the Claude TUI — not just sized the canvas.
+        # This is the assertion that would have caught the
+        # "fully-black terminal pane on desktop" regression: every
+        # layout assertion above passes when the canvas is the right
+        # size but the buffer was never written to (no `term.write()`
+        # ever fired). The previous test suite was dimension-only and
+        # let this slip. Skip in offline mode — no `ScreenSnapshot`
+        # flows when rabbit is absent (CI on `ubuntu-latest` doesn't
+        # ship `/usr/bin/claude`), so the buffer is empty by design.
+        #
+        # Three layered checks when online:
+        # 1. `contentLen >= 200` — the Claude greeting banner alone
+        #    is several hundred characters across ~10 lines; a value
+        #    well below that means the canvas is mostly blank.
+        # 2. `len(contentLines) >= 3` — the banner has structure (a
+        #    border, multiple rows of content, a prompt indicator).
+        #    A single non-blank line would mean only the cursor or a
+        #    single char got through.
+        # 3. At least one line contains "claude" (case-insensitive)
+        #    — Claude Code's TUI greets with "Welcome to Claude Code"
+        #    or similar; "claude" appears in every version we've
+        #    shipped. If Anthropic drops the substring from the
+        #    greeting entirely, this is the canary that catches it
+        #    (and the assertion message makes the failure obvious).
+        if not m["disconnected"]:
+            joined = " ".join(m["contentLines"])
+            if m["contentLen"] < 200:
+                fails.append(
+                    f"xterm canvas is online but only {m['contentLen']} chars "
+                    f"of text rendered across {len(m['contentLines'])} lines "
+                    f"— Claude's greeting banner is several hundred chars. "
+                    f"Captured lines: {m['contentLines']!r}"
+                )
+            elif len(m["contentLines"]) < 3:
+                fails.append(
+                    f"xterm canvas is online but only "
+                    f"{len(m['contentLines'])} non-blank line(s) rendered — "
+                    f"the greeting banner has multiple rows. "
+                    f"Captured lines: {m['contentLines']!r}"
+                )
+            elif "claude" not in joined.lower():
+                fails.append(
+                    f"xterm canvas is online and painted "
+                    f"{m['contentLen']} chars but none of them contain "
+                    f"'claude' — the Claude Code greeting should be visible. "
+                    f"Captured lines: {m['contentLines']!r}"
+                )
     log(f"  {name}: "
         f"vw={m['vw']}x{m['vh']} "
         f"mqCoarse={m['mqCoarse']} "
@@ -343,7 +433,17 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         f"wrap.h={m['wrap']['h'] if m['wrap'] else 'n/a'} "
         f"lastCols={m['lastCols']} "
         f"keypad.row.bottom={m['keypadLastRowBottom']} "
+        f"disconnected={m['disconnected']} "
+        f"contentLen={m['contentLen']} "
+        f"contentLines={len(m['contentLines'])} "
         f"{'FAIL ' + '; '.join(fails) if fails else 'ok'}")
+    # When the content probe is what failed, dump the captured lines
+    # so the human reviewer can see exactly what got painted — much
+    # faster debugging than re-running with a browser.
+    if any('contentLen' in f or 'non-blank' in f or "'claude'" in f for f in fails):
+        log(f"  {name} captured content:")
+        for i, line in enumerate(m["contentLines"]):
+            log(f"    [{i:02d}] {line!r}")
     return fails
 
 

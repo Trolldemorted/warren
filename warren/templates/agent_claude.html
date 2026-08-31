@@ -6,6 +6,21 @@
 .claude-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 18rem;
+  /* `grid-template-rows: minmax(0, 1fr)` is required on desktop: without
+     it the row auto-sizes to its largest item's intrinsic height. The
+     aside has ~1235px of intrinsic content (Status / Usage / Context /
+     Actions panels), so the row auto-sizes to 1235px and the term-wrap
+     stretches to match, which paints ~95 rows of #0d1117 background.
+     Main's `overflow: hidden` then clips the canvas to the viewport and
+     the user sees a fully-black terminal pane. Declaring a single 1fr
+     row makes the row fill the grid's flex-resolved height (the grid is
+     `flex: 1 1 auto; min-height: 0` inside `main.container-fluid`'s
+     column flex, so it gets exactly the vertical space left after the
+     navbar + chrome) and the aside scrolls internally via its own
+     `overflow: auto`. The mobile rule below overrides the grid display
+     entirely (`display: flex; flex-direction: column`), so this row
+     declaration only matters on desktop. */
+  grid-template-rows: minmax(0, 1fr);
   gap: 1rem;
   margin-top: 1rem;
   /* The grid flexes inside main (set to a column flex container below) so
@@ -656,6 +671,18 @@ term.open(document.getElementById('term'));
 if (!window.matchMedia('(pointer: coarse)').matches) {
   term.focus();
 }
+// Expose the Terminal instance for the layout integration test
+// (`tests/mobile-layout/drive.py`). Without a content assertion, the
+// existing dimension tests would pass when the canvas was the right
+// size but no `term.write()` ever fired — that's the "fully-black
+// terminal pane on desktop" regression that slipped past the suite
+// before. The probe reads `window.term.buffer.active.getLine(i)`
+// for any non-blank row; in offline-overlay mode (`.disconnected`
+// class present), the buffer is empty by design and the assertion
+// is skipped. Only the claude page exposes this — the shell page
+// uses `TERM_COLS`/`TERM_ROWS` from server config and never has
+// xterm content in the test fixture.
+window.term = term;
 
 // xterm.js's internal viewport starts at scrollTop=0 on `open()`,
 // so the user sees the top of the (currently empty) buffer. Auto-
