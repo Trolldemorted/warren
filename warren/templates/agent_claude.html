@@ -719,6 +719,17 @@ const fitAddon = new FitAddon.FitAddon();
 term.loadAddon(fitAddon);
 let pendingResize = null;
 let resizeDebounce = null;
+// WebSocket + connection state. Hoisted above `refitWhenReady(20)` so
+// `maybeSendResize()` (called from `refit()` during the early refit
+// loop) does not trip a TDZ throw on `ws` — that throw aborts the
+// script before `connectWs()` ever runs, which is why no WS appears
+// in the browser's devtools. The handlers further down (setConnected,
+// connectWs, onmessage/onclose) only execute on later events, so the
+// forward references to `setConnected`/etc. from those bodies are
+// fine: function declarations are hoisted but their bodies wait.
+let ws = null;
+let wsBackoff = 500;
+let connected = false;
 // Exposed for the layout integration test
 // (`tests/mobile-layout/drive.py`) so the CDP probe can verify xterm
 // was actually resized to the wrap width — without this the test would
@@ -1022,10 +1033,6 @@ copySelectionBtn.addEventListener('click', copySelection);
 term.onSelectionChange(() => {
   copySelectionBtn.disabled = !term.hasSelection();
 });
-
-let ws = null;
-let wsBackoff = 500;
-let connected = false;
 
 function setConnected(c) {
   connected = c;

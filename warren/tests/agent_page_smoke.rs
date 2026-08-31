@@ -113,6 +113,58 @@ fn templates_expose_term_for_layout_test() {
     );
 }
 
+/// Catch the "lexical TDZ throw aborts the script before `connectWs()`
+/// runs" regression on the claude page. `refitWhenReady(20)` is invoked
+/// at top level and calls `refit()` → `maybeSendResize()` on the first
+/// valid frame. `maybeSendResize()` reads the module-scoped `ws`/`connected`
+/// bindings. If the `let ws = null;` / `let connected = false;`
+/// declarations sit BELOW the `refitWhenReady(20)` call site, the
+/// script throws `ReferenceError: can't access lexical declaration
+/// 'ws' before initialization` from inside the rAF tick, the whole
+/// `<script>` aborts, and `connectWs()` is never reached — the browser
+/// then opens zero WebSockets and the terminal pane stays fully
+/// black. This test pins the ordering so that exact failure mode can't
+/// silently regress.
+///
+/// The shell template doesn't have this TDZ hazard (no `refitWhenReady`
+/// loop, no `maybeSendResize`), so it's deliberately not pinned here.
+#[test]
+fn agent_claude_template_declares_ws_state_before_refit_when_ready() {
+    let body = read_template("agent_claude.html");
+    // Match the call site (`refitWhenReady(20);` with the trailing
+    // semicolon) rather than the bare identifier — the explanatory
+    // comment above the `let ws = null;` block also mentions
+    // `refitWhenReady(20)`, which would otherwise match first and
+    // invert the ordering check.
+    let refit_pos = body
+        .find("refitWhenReady(20);")
+        .expect("agent_claude.html no longer calls `refitWhenReady(20)`");
+    for decl in [
+        "let ws = null;",
+        "let wsBackoff = 500;",
+        "let connected = false;",
+    ] {
+        let count = body.matches(decl).count();
+        assert_eq!(
+            count, 1,
+            "agent_claude.html must declare `{decl}` exactly once (found {count}). \
+             Multiple declarations cause the second `let` to throw a SyntaxError, \
+             and zero means `ws`/`wsBackoff`/`connected` are accessed before \
+             initialization."
+        );
+        let pos = body.find(decl).unwrap();
+        assert!(
+            pos < refit_pos,
+            "agent_claude.html declares `{decl}` at byte offset {pos}, which is \
+             AFTER `refitWhenReady(20)` at byte offset {refit_pos}. \
+             `refitWhenReady` -> `refit` -> `maybeSendResize` reads `ws`/`connected` \
+             in the first rAF tick; if those `let` bindings are still in their \
+             temporal dead zone the script throws and aborts before `connectWs()` \
+             is ever called, leaving the browser with zero WebSockets."
+        );
+    }
+}
+
 // -- HTTP smoke test (gated). Mirrors tests/mobile-layout/run.sh step 3/4 --
 
 fn has(cmd: &str) -> bool {
