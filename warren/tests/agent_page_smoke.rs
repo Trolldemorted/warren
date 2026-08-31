@@ -165,6 +165,97 @@ fn agent_claude_template_declares_ws_state_before_refit_when_ready() {
     }
 }
 
+/// Pin the auto-follow-output behavior on the claude page. After
+/// Claude Code's "detail mode" toggle (Ctrl+O) the TUI re-emits
+/// history above the prompt. xterm.js's default follow-output only
+/// fires when the cursor is in the visible area; the cursor ends up
+/// below the pre-toggle viewport, so the viewport stays parked at its
+/// old scrollTop and the prompt (input bar) is left stranded mid-wrap
+/// with stale scrollback below. The fix re-pins the viewport to the
+/// bottom on every binary frame write, gated by a wheel/touch-scroll
+/// listener that detects when the user has intentionally scrolled up
+/// to read scrollback (in which case we leave the viewport alone so
+/// the user isn't yanked back mid-keystroke).
+///
+/// This test pins the contract that future template edits must keep:
+///   - a single `userScrolledAwayFromBottom` `let` is declared
+///   - it is declared BEFORE the `watchUserScroll` IIFE that mutates it
+///     (otherwise the script hits a TDZ throw at `term.open` time and
+///     no xterm content ever reaches the user)
+///   - `writeBinaryFrame` calls `scrollXtermToBottom()` in the
+///     `pendingFrames === null` path (the only path that fires after
+///     the first `screen_snapshot` apply, i.e. the steady state)
+///   - the gate (`if (!userScrolledAwayFromBottom)`) sits between the
+///     write and the scroll, so a user scrolled up to read scrollback
+///     is not yanked back to the bottom on every frame.
+#[test]
+fn agent_claude_template_auto_follows_output_unless_user_scrolled_away() {
+    let body = read_template("agent_claude.html");
+
+    let flag_count = body
+        .matches("let userScrolledAwayFromBottom = false;")
+        .count();
+    assert_eq!(
+        flag_count, 1,
+        "agent_claude.html must declare `let userScrolledAwayFromBottom = false;` \
+         exactly once (found {flag_count}). Two declarations cause a SyntaxError; \
+         zero means the auto-follow gate is missing entirely."
+    );
+
+    let decl_pos = body
+        .find("let userScrolledAwayFromBottom = false;")
+        .expect("flag declaration missing");
+
+    // The IIFE that mutates the flag runs synchronously during script
+    // init. If the `let` is below the IIFE call, the IIFE's body
+    // executes while the binding is still in TDZ and the whole
+    // `<script>` aborts — leaving the page with no scroll-follow
+    // logic AND no xterm content.
+    let iife_pos = body
+        .find("function watchUserScroll()")
+        .expect("watchUserScroll IIFE missing — auto-follow listener was removed");
+    assert!(
+        decl_pos < iife_pos,
+        "`let userScrolledAwayFromBottom` at byte offset {decl_pos} is AFTER \
+         the `watchUserScroll` IIFE at byte offset {iife_pos}. The IIFE runs \
+         at script-init time and would hit a TDZ throw on `userScrolledAwayFromBottom`, \
+         aborting the whole script before `connectWs()` is reached."
+    );
+
+    // The write path must re-pin to the bottom in the steady state.
+    // Find the `writeBinaryFrame` body — it's a function declaration,
+    // so any text occurrence with the right trailing `(` is unique.
+    let write_pos = body
+        .find("function writeBinaryFrame(seq, data) {")
+        .expect("writeBinaryFrame function missing");
+    let write_end = body[write_pos..]
+        .find("}")
+        .map(|p| write_pos + p)
+        .expect("writeBinaryFrame body not closed");
+    let write_body = &body[write_pos..write_end];
+    assert!(
+        write_body.contains("scrollXtermToBottom("),
+        "writeBinaryFrame never calls `scrollXtermToBottom` — without it, \
+         a Claude detail-mode toggle strands the prompt mid-wrap with \
+         stale scrollback below."
+    );
+    assert!(
+        write_body.contains("userScrolledAwayFromBottom"),
+        "writeBinaryFrame never reads `userScrolledAwayFromBottom` — the \
+         gate that protects users scrolled up in scrollback is missing, \
+         so every frame yanks them back to the bottom."
+    );
+    // Order: write first, then check the flag, then scroll. The exact
+    // `if (!userScrolledAwayFromBottom) scrollXtermToBottom();` line
+    // is the contract — pin it so a future refactor doesn't reorder.
+    assert!(
+        write_body.contains("if (!userScrolledAwayFromBottom) scrollXtermToBottom();"),
+        "writeBinaryFrame must call `scrollXtermToBottom()` *after* the \
+         `term.write()` and *only* when the user hasn't scrolled away. \
+         Look for the literal `if (!userScrolledAwayFromBottom) scrollXtermToBottom();`."
+    );
+}
+
 // -- HTTP smoke test (gated). Mirrors tests/mobile-layout/run.sh step 3/4 --
 
 fn has(cmd: &str) -> bool {

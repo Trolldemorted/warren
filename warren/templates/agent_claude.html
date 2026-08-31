@@ -662,6 +662,23 @@ const term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS,
   // respond to clicks (acceptable — the War UI is keyboard-driven).
   mouseEvents: false,
   theme: { background: '#0d1117', foreground: '#c9d1d9' } });
+// Tracks whether the user has manually scrolled *away* from the
+// bottom of the xterm scrollback to read history. While true, we
+// leave the viewport alone on `term.write()` so we don't yank them
+// back to the bottom mid-keystroke. Resets to false the moment they
+// scroll back to (or past) the bottom — at which point standard
+// follow-output resumes.
+//
+// Why this exists: after Claude Code's "detail mode" toggle (Ctrl+O)
+// the TUI re-emits history above the prompt. xterm.js's default
+// follow-output behavior only fires when the cursor is in the visible
+// area, and the cursor lands below the pre-toggle viewport — so the
+// viewport stays parked at its old scrollTop, leaving the prompt
+// (input bar) stranded in the middle of the wrap with stale scrollback
+// below. A wheel/touch listener (added once at term-open time below)
+// flips this flag so the next `writeBinaryFrame` re-pins to bottom.
+let userScrolledAwayFromBottom = false;
+
 term.open(document.getElementById('term'));
 // Skip the initial `term.focus()` on touch devices — focusing the
 // helper textarea is what summons the OS soft keyboard on page load,
@@ -671,6 +688,44 @@ term.open(document.getElementById('term'));
 if (!window.matchMedia('(pointer: coarse)').matches) {
   term.focus();
 }
+// Detect the user's manual scrollback intent. While the user is
+// wheel/touch-scrolling inside xterm's viewport, we don't yank them
+// back to the bottom on each `term.write()` (see
+// `userScrolledAwayFromBottom` written upstack). Listening on
+// `wheel` catches mouse + trackpad; `touchmove` covers FF Mobile and
+// other touch devices where the browser converts pans into
+// touch-scroll events instead of wheel. The check runs *after* the
+// default scroll handler resolves (rAF), so we read the settled
+// scrollTop rather than racing the browser's scroll application.
+(function watchUserScroll() {
+  const vp = term.element && term.element.querySelector('.xterm-viewport');
+  if (!vp) return;
+  let pending = false;
+  const recompute = () => {
+    pending = false;
+    const distFromBottom = vp.scrollHeight - vp.scrollTop - vp.clientHeight;
+    // 2px slop — at exact bottom the browser may report 0 or a
+    // sub-pixel value depending on rounding, and we don't want a
+    // single-pixel rounding error to count as "user scrolled away".
+    userScrolledAwayFromBottom = distFromBottom > 2;
+  };
+  const onScrollIntent = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(recompute);
+  };
+  vp.addEventListener('wheel', onScrollIntent, { passive: true });
+  vp.addEventListener('touchmove', onScrollIntent, { passive: true });
+  // xterm.js exposes a `scroll` event on the viewport when its own
+  // scrollback handler scrolls (programmatic scroll, e.g. on write
+  // follow). Listen so a programmatic scroll-to-bottom also clears
+  // the flag, otherwise the next user wheel event might race.
+  vp.addEventListener('scroll', () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(recompute);
+  });
+})();
 // Expose the Terminal instance for the layout integration test
 // (`tests/mobile-layout/drive.py`). Without a content assertion, the
 // existing dimension tests would pass when the canvas was the right
@@ -865,6 +920,10 @@ function writeBinaryFrame(seq, data) {
   if (seq > lastWrittenSeq) lastWrittenSeq = seq;
   if (pendingFrames === null) {
     term.write(bytesToUtf8(data));
+    // Re-pin to the bottom on every frame *unless* the user has
+    // explicitly scrolled up to read scrollback. See
+    // `userScrolledAwayFromBottom` for the full rationale.
+    if (!userScrolledAwayFromBottom) scrollXtermToBottom();
     return;
   }
   pendingFrames.push({ seq, data });
