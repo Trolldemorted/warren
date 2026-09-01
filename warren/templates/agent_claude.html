@@ -66,6 +66,18 @@
 }
 .claude-grid.disconnected .offline-overlay { display: flex; }
 .claude-grid > aside {
+  /* Pin the aside to row 1 col 2 (its dedicated 18rem column).
+     Without explicit placement, grid auto-flow assigns items in
+     DOM order — and if anything else (the mobile-keypad in
+     particular) takes row 1 col 2 first, the aside gets pushed
+     to a later row that sizes to its intrinsic content (~1235px
+     from Status / Usage / Context / Actions panels), collapsing
+     the term-wrap row. Explicit placement is robust against
+     DOM-order shuffles and the mobile-keypad still being
+     rendered when a `display: none !important` rule doesn't
+     apply (e.g. when `(pointer: fine)` isn't honored). */
+  grid-column: 2;
+  grid-row: 1;
   min-height: 0;
   overflow: auto;
 }
@@ -85,6 +97,15 @@ button.action { width: 100%; margin-bottom: .25rem; }
   border-radius: .375rem;
   font-family: ui-monospace, monospace;
   font-size: .85rem;
+  /* Span the full grid width. Without this, grid auto-flow places
+     the banner in row 1 col 2 (the aside's 18rem slot), pushing
+     the aside into row 2 col 1 — and row 2 then sizes to the
+     aside's ~1235px intrinsic content, collapsing the term-wrap
+     row's `minmax(0, 1fr)` to its floor (~16px). Spanning forces
+     auto-placement into row 2 (the only row with two columns
+     free), so the banner sits in its own row beneath term-wrap +
+     aside and row 1 keeps the flex-resolved height. */
+  grid-column: 1 / -1;
 }
 #prompt-rejected-banner.visible { display: block; }
 

@@ -281,6 +281,17 @@ PROBE = r"""
   if (q('#usage-out'))       q('#usage-out').textContent = (903).toLocaleString();
   if (q('#usage-cr'))        q('#usage-cr').textContent = (751843).toLocaleString();
   if (q('#usage-cw'))        q('#usage-cw').textContent = (10245312).toLocaleString();
+  // Simulate the desktop CSS rule `@media (min-width: 768px) and
+  // (pointer: fine) { .mobile-keypad { display: none !important } }`.
+  // Chrome's CDP `Emulation.setEmulatedMedia` doesn't actually update
+  // `(pointer: fine)` queries on recent builds (`mqFine` returns
+  // false even after we ask for fine), so this rule never fires in
+  // the test env — but it fires on every real desktop browser. Force
+  // the same outcome via the probe so the layout we're measuring
+  // matches what users actually see.
+  const mqCoarse = matchMedia('(pointer: coarse)').matches;
+  const keypadEl = q('.mobile-keypad');
+  if (keypadEl && !mqCoarse) keypadEl.style.display = 'none';
   // Re-read after the class strip above. Kept as a log-line artefact.
   const disconnected = !!(grid && grid.classList.contains('disconnected'));
   // Walk the visible xterm rows and dump the painted text. Returns
@@ -580,8 +591,21 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                     f"Rows: {barrier_rows!r}"
                 )
             else:
-                ref = barrier_rows[0]
+                # Pick the WIDEST barrier row as the reference. The
+                # top and bottom borders of the banner span the full
+                # canvas — internal section dividers (Claude's
+                # first-run menu uses ─/╌ for "Accessing workspace"
+                # separators) are narrower and would otherwise get
+                # flagged as misaligned. Only check rows whose width
+                # matches the reference within ±1 col; narrower rows
+                # are dividers and ignored.
+                ref = max(barrier_rows, key=lambda b: b["lastDash"] - b["firstDash"])
+                ref_width = ref["lastDash"] - ref["firstDash"]
                 for b in barrier_rows:
+                    width = b["lastDash"] - b["firstDash"]
+                    if abs(width - ref_width) > 1:
+                        # Inner divider — not part of the banner border.
+                        continue
                     if abs(b["firstDash"] - ref["firstDash"]) > 1:
                         fails.append(
                             f"barrier left edge misaligned at row {b['row']}: "
@@ -594,11 +618,10 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                             f"col {b['lastDash']}, expected ~{ref['lastDash']} "
                             f"(reference row {ref['row']})"
                         )
-                    width = b["lastDash"] - b["firstDash"] + 1
-                    if b["dashCount"] < width:
+                    if b["dashCount"] < width + 1:
                         fails.append(
                             f"barrier has gaps at row {b['row']}: "
-                            f"{b['dashCount']} dashes over {width} cols — "
+                            f"{b['dashCount']} dashes over {width + 1} cols — "
                             f"expected continuous barrier"
                         )
     log(f"  {name}: "
