@@ -13,26 +13,20 @@ diffs. Screenshots and `measurements.json` are saved to
 ./tests/mobile-layout/run.sh
 ```
 
-The script **skips gracefully** (prints `skip: <reason>`, exits 0)
-when any prerequisite is missing. Mirrors the pattern used by
-`cargo test -p warren --test schema_drift -- --ignored`.
+Every prerequisite is **hard-required** — missing any of them fails
+the script with the install command, no silent skip. There is no
+"exit 0 if infrastructure missing" path: a silent skip here is the
+exact failure mode this test exists to prevent.
 
-| Prerequisite | Skip reason printed                              |
-| ------------ | ------------------------------------------------ |
-| `psql`       | `psql not on PATH`                               |
-| Postgres     | `postgres unreachable at 127.0.0.1:5432`         |
-| `warren`     | `warren binary not found (run: cargo build …)`   |
-| `atlas`      | `atlas binary not on PATH`                       |
-| A real browser | `no usable chrome/chromium binary on PATH`     |
-| `rabbit` binary | (built by `cargo build --workspace`; CI does this) |
-| `claude` on PATH | (CI installs via `curl -fsSL https://claude.ai/install.sh \| bash`; locally: install it) |
-
-`rabbit` and `claude` are **required** — without them the xterm
-buffer is empty and every barrier/content assertion is a no-op. CI
-provides them via `cargo build --workspace` and the upstream
-installer respectively; local contributors running the script
-without them will get a `FAIL:` message with the install command
-rather than a silent skip.
+| Prerequisite | How CI provides it |
+| ------------ | ------------------ |
+| `psql` client | `sudo apt-get install -y postgresql-client` |
+| Postgres server | `services.postgres: postgres:16` in workflow |
+| `atlas` | `ariga/setup-atlas@v0` |
+| `warren` + `rabbit` | `cargo build --workspace` |
+| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| Chrome | `google-chrome-stable_current_amd64.deb` from dl.google.com |
+| `websocket-client` | `pip install --break-system-packages websocket-client` |
 
 ## What it asserts
 
