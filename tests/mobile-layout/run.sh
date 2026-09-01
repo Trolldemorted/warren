@@ -11,7 +11,14 @@
 # master uncaught, which is the failure mode this whole test exists
 # to prevent.
 set -euo pipefail
-cd "$(dirname "$0")"
+# Don't `cd "$(dirname "$0")"` here — that breaks when the runner's
+# cwd already is the script's directory (e.g. via a workflow
+# `working-directory:` directive, or `bash run.sh` from inside
+# tests/mobile-layout), where `cd ./tests/mobile-layout` fails with
+# "No such file or directory". The script never needs its own dir;
+# SCRIPT_DIR is resolved via ${BASH_SOURCE[0]} for the warren
+# binary lookup, and drive.py is invoked as an absolute path
+# below.
 
 # 1. python deps. websocket-client drives the CDP websocket.
 python3 -c 'import websocket' 2>/dev/null \
@@ -88,4 +95,4 @@ fi
 #    on PATH for ubuntu-latest runners) and rabbit via
 #    `cargo build --workspace`. No need to re-check here.
 
-exec python3 drive.py "$@"
+exec python3 "$SCRIPT_DIR/drive.py" "$@"
