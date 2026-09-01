@@ -103,9 +103,12 @@ always available.
 ## CI
 
 `.github/workflows/ci-integration.yml` runs this after the existing
-drift steps. `ubuntu-latest` ships `google-chrome-stable` on PATH,
-so the skip branch is only hit when the workflow explicitly removes
-the browser.
+drift steps. The workflow installs all prerequisites that
+`ubuntu-latest` doesn't ship by default: `psql` (postgresql-client
+apt package), Chrome (the `dl.google.com` deb — GitHub's runner has
+no browser on PATH), `claude` (the upstream `claude.ai/install.sh`,
+which writes to `~/.local/bin/claude` already on PATH), and the
+`websocket-client` Python package.
 
 ## How it works (drive.py)
 

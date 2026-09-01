@@ -41,6 +41,17 @@ jobs:
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
+      - name: Install Chrome for headless layout driver
+        # ubuntu-latest doesn't ship chrome/chromium on PATH. The
+        # layout driver needs a real CDP-capable browser binary to
+        # drive the agent page across viewports; without it run.sh
+        # silently exits 0 at the `no usable chrome/chromium binary`
+        # guard. google-chrome-stable from dl.google.com is what
+        # `apt-cache search ^google-chrome` resolves to on noble.
+        run: |
+          wget -qO /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/chrome.deb
+
       - name: Build
         run: cargo build --workspace
 
