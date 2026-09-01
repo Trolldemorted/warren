@@ -85,7 +85,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mobile-layout-screenshots
-          path: tests/mobile-layout/artifacts/
+          # v4 wants an explicit glob — a trailing-slash directory
+          # path used to be accepted in v3 but v4 treats it as a
+          # literal filename and warns "No files were found".
+          path: tests/mobile-layout/artifacts/**/*
 
       - name: Warren test suite
         run: cargo test -p warren -- --test-threads=1
