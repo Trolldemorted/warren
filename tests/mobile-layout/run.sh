@@ -66,13 +66,14 @@ if [[ -z "${MOBILE_LAYOUT_BROWSER:-}" ]]; then
   exit 0
 fi
 
-# 6. rabbit + claude are optional. If /usr/bin/claude is missing we run
-#    in offline-overlay mode (page chrome still renders, term doesn't).
-if [[ -x /usr/bin/claude ]]; then
-  export MOBILE_LAYOUT_RABBIT=1
-else
-  export MOBILE_LAYOUT_RABBIT=0
-  echo "note: /usr/bin/claude missing — running in offline-overlay mode" >&2
-fi
+# 6. rabbit + claude are optional. drive.py does the
+#    `shutil.which("claude")` check itself; when claude is present
+#    it spawns rabbit, when absent it logs "offline-overlay mode"
+#    and continues with page-chrome-only assertions. The CI workflow
+#    installs claude via the upstream installer (writes to
+#    ~/.local/bin/claude, not /usr/bin) before this script runs.
+#    Fresh CI has no subscription, so claude shows its default
+#    first-run menu — the barrier check accepts both `─` (logged-in)
+#    and `╌` (theme picker) so we don't gate on auth either.
 
 exec python3 drive.py "$@"

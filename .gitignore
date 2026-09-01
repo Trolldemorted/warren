@@ -9,3 +9,5 @@ Cargo.lock.bak
 /compose.yml
 /TODOs.md
 /CLAUDE.md
+__pycache__/
+*.pyc

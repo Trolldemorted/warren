@@ -56,6 +56,16 @@ jobs:
       - name: Install Python deps for layout driver
         run: pip install --break-system-packages websocket-client
 
+      - name: Install Claude Code CLI
+        # The official upstream installer writes to ~/.local/bin.
+        # run.sh uses `command -v claude` to detect, so this works
+        # regardless of where the installer drops the binary. CI
+        # has no subscription — claude still renders its default
+        # first-run menu (the welcome / theme-picker banner), which
+        # is exactly the structure the barrier-arrangement check
+        # needs to fire against. We don't gate on auth.
+        run: curl -fsSL https://claude.ai/install.sh | bash
+
       - name: Layout integration (warren + browser + screenshots)
         run: ./tests/mobile-layout/run.sh
 

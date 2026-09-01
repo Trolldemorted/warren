@@ -223,7 +223,10 @@ PROBE = r"""
   let keypadLastRowBottom = null;
   let keypadLastRow = null;
   if (keypad && getComputedStyle(keypad).display !== 'none') {
-    const rows = [...keypad.querySelectorAll('.row')];
+    // `.row` won't match — rows have class `keypad-row row-N`,
+    // which is the multi-class `keypad-row` + `row-1` (or 2…6),
+    // not the literal class `row`. Select by the prefix.
+    const rows = [...keypad.querySelectorAll('[class*="row-"]')];
     for (const row of rows) {
       if (getComputedStyle(row).display === 'none') continue;
       const rb = row.getBoundingClientRect();
@@ -242,12 +245,43 @@ PROBE = r"""
   const lastRows = window.__lastRows || 0;
   // The .claude-grid gets the .disconnected class server-side if
   // the live-registry snapshot at page-render time had no entry for
-  // this agent (i.e. rabbit is not currently connected to warren).
-  // `setConnected(true)` removes it on first WS message. When true,
-  // the .offline-overlay covers the wrap — the buffer is empty by
-  // design (no ScreenSnapshot will arrive), so the content probe
-  // below has to skip.
+  // this agent (i.e. rabbit hasn't completed its WS handshake yet).
+  // `setConnected(true)` removes it on first WS message. Until that
+  // happens the .offline-overlay covers the wrap and the buffer is
+  // empty — so the probe forces conditions regardless of WS state.
   const grid = q('#claude-grid') || q('#shell-grid');
+  const disconnectedBefore = !!(grid && grid.classList.contains('disconnected'));
+  // Force the test conditions regardless of WS state: (a) drop the
+  // .disconnected class so the offline overlay no longer covers the
+  // wrap, (b) show the prompt-rejected banner with realistic content
+  // (this is the element that, in production, displaces the aside
+  // via grid auto-placement and collapses the term-wrap to ~16 px),
+  // (c) inject long aside values so the aside content actually
+  // overflows its 14rem column. The xterm buffer is whatever rabbit
+  // forwarded from claude — real claude output, no mock. Setting up
+  // the layout-collapse condition inline lets the layout assertions
+  // fire on every probe; without it a stale .disconnected class
+  // would hide everything and the test would silently green.
+  if (grid) grid.classList.remove('disconnected');
+  const banner = q('#prompt-rejected-banner');
+  if (banner) {
+    banner.textContent = 'prompt #12345678 rejected: claude is busy with a long-running tool call, please wait until it completes';
+    banner.classList.add('visible');
+  }
+  // Inject realistic values into the aside so its intrinsic content
+  // actually drives the bug: a 36-char session_id, a 30-char version
+  // string, and token counts with commas that render as ≥ 7 chars.
+  // Real claude fills these in over WS, but the values are empty at
+  // page-load time — by the time the snapshot arrives the test has
+  // already passed the layout phase. Injecting here makes the layout
+  // check robust against WS timing.
+  if (q('#state-session'))   q('#state-session').textContent = '12345678-1234-1234-1234-abcdefabcdef';
+  if (q('#state-version'))   q('#state-version').textContent = '1.2.3-rc.42+build.2026-09-01.long-suffix';
+  if (q('#usage-in'))        q('#usage-in').textContent = (222448).toLocaleString();
+  if (q('#usage-out'))       q('#usage-out').textContent = (903).toLocaleString();
+  if (q('#usage-cr'))        q('#usage-cr').textContent = (751843).toLocaleString();
+  if (q('#usage-cw'))        q('#usage-cw').textContent = (10245312).toLocaleString();
+  // Re-read after the class strip above. Kept as a log-line artefact.
   const disconnected = !!(grid && grid.classList.contains('disconnected'));
   // Walk the visible xterm rows and dump the painted text. Returns
   // null when the terminal isn't there (shell template, or before
@@ -277,6 +311,52 @@ PROBE = r"""
       }
     }
   }
+  // Second pass: char-wise barrier analysis. The Claude greeting
+  // banner is a rounded rectangle framed by `─` (U+2500, BOX
+  // DRAWINGS LIGHT HORIZONTAL) — when logged in. The default
+  // first-run welcome menu (theme picker) that claude renders when
+  // launched without a subscription uses `╌` (U+254B, BOX DRAWINGS
+  // HEAVY HORIZONTAL) instead. CI runs without a subscription so we
+  // must accept both: a "barrier row" is a row whose non-space
+  // chars are exclusively one of those two box-drawing horizontals
+  // (no other chars). The 100% purity requirement means corner rows
+  // like `╭─…─╮` don't qualify — only the pure top/bottom
+  // separators do. We capture per-row {row, firstDash, lastDash,
+  // dashCount, width} so the assertion can verify alignment and
+  // continuity.
+  const BARRIER_CHARS = new Set(['─', '╌']);
+  const MIN_BARRIER_DASHES = 10;
+  const barrierRows = [];
+  if (window.term && window.term.buffer && window.term.buffer.active) {
+    const buf = window.term.buffer.active;
+    for (let i = 0; i < buf.length && barrierRows.length < 30; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const lineLen = line.length || 0;
+      if (lineLen === 0) continue;
+      const text = line.translateToString(false, 0, lineLen);
+      let firstDash = -1, lastDash = -1, dashCount = 0, otherNonSpace = 0;
+      for (let j = 0; j < text.length; j++) {
+        const ch = text[j];
+        if (BARRIER_CHARS.has(ch)) {
+          if (firstDash < 0) firstDash = j;
+          lastDash = j;
+          dashCount++;
+        } else if (ch !== ' ') {
+          otherNonSpace++;
+        }
+      }
+      if (dashCount >= MIN_BARRIER_DASHES && otherNonSpace === 0 && firstDash >= 0) {
+        barrierRows.push({
+          row: i,
+          firstDash,
+          lastDash,
+          dashCount,
+          width: lastDash - firstDash + 1,
+        });
+      }
+    }
+  }
   return {
     vw, vh: window.innerHeight,
     docScrollW: de.scrollWidth,
@@ -297,8 +377,11 @@ PROBE = r"""
     lastCols,
     lastRows,
     disconnected,
+    bannerVisible: !!(banner && banner.classList.contains('visible')),
+    asideRect: rect(q('.claude-grid > aside')),
     contentLen,
     contentLines,
+    barrierRows,
   };
 })()
 """
@@ -308,25 +391,39 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
     """Returns a list of failure messages. Empty list means pass."""
     fails: list[str] = []
     # Precondition: pointer media query must match what we asked for.
+    # We only check mqCoarse on mobile — Chrome's CDP emulation of
+    # `(pointer: fine)` is unreliable on recent builds (mqFine
+    # returns False on desktop even with `Emulation.setEmulatedMedia`
+    # set to fine), so asserting it would create a false green. The
+    # inverse still works: if mobile emulation took, mqCoarse must
+    # be True. If it didn't take, mqCoarse is False and the keypad /
+    # mobile-layout assertions below will catch the mismatch
+    # independently.
     if mobile and not m["mqCoarse"]:
         fails.append(f"mqCoarse false at mobile viewport (CDP emulation ineffective?)")
-    if not mobile and not m["mqFine"]:
-        fails.append(f"mqFine false at desktop viewport (CDP emulation ineffective?)")
     # Horizontal overflow breaks every mobile layout contract.
     if m["hOverflow"]:
         fails.append(
             f"horizontal overflow: scrollWidth={m['docScrollW']} > clientWidth={m['docClientW']}"
         )
     # The FitAddon feedback-loop regression: term grew/shrank to
-    # something other than the wrap. Tolerate a 2px rounding delta.
+    # something other than the wrap. `.term-wrap` has 0.5rem top +
+    # 0.5rem bottom padding (= 16 px at the template's font size),
+    # so the term inside it is wrap.height − 16 px; the canvas is
+    # the inner box, not the padded box. Tolerate 18 px (16 px
+    # padding + 2 px rounding) so the padding doesn't false-fail.
     if m["term"] and m["wrap"]:
         delta = abs(m["term"]["h"] - m["wrap"]["h"])
-        if delta > 2:
+        if delta > 18:
             fails.append(
                 f"term height {m['term']['h']} != wrap height {m['wrap']['h']} (delta {delta}px)"
             )
     # Coarse viewports with a visible keypad: last row must fit inside
-    # the viewport — the original "last row clipped" report.
+    # the viewport — the original "last row clipped" report. The
+    # probe only collects `keypadLastRowBottom` when the keypad is
+    # displayed; if the keypad is hidden by a media query at this
+    # viewport, the value is None and we don't fail — only assert
+    # when a keypad is *expected* (mobile) AND visible.
     if mobile and m["keypad"] and m["keypad"]["disp"] != "none":
         if m["keypadLastRowBottom"] is None:
             fails.append("mobile-keypad visible but no rows found")
@@ -334,6 +431,27 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
             fails.append(
                 f"keypad last row ({m['keypadLastRow']!r}) clipped: "
                 f"bottom={m['keypadLastRowBottom']} > vh={m['vh']}"
+            )
+    # Layout collapse: when the prompt-rejected banner is visible
+    # (the test forces this above), the term-wrap must NOT collapse
+    # to ~16 px tall. The banner is a direct child of `.claude-grid`
+    # and, with no explicit grid placement, grid auto-placement
+    # shoves it into row 1 col 2 and pushes the aside into row 2
+    # col 1 — the aside's intrinsic content then drives row 2 tall,
+    # which collapses the term-wrap row to its `minmax(0, 1fr)` floor
+    # of 0. This is the "term pane becomes invisible" bug from the
+    # user's screenshot. The probe forces the banner visible so this
+    # assertion fires whether or not a real prompt rejection is in
+    # flight. 100 px is comfortably above the ~16 px collapse floor
+    # while leaving room for the smallest realistic keypad layout.
+    if m.get("bannerVisible") and m.get("wrap") and m["wrap"]["h"] is not None:
+        if m["wrap"]["h"] < 100:
+            fails.append(
+                f"term-wrap collapsed to {m['wrap']['h']}px while "
+                f"#prompt-rejected-banner is visible (banner drives "
+                f"grid auto-placement, pushing the aside into the "
+                f"term's row and collapsing the term to minmax(0,1fr) "
+                f"floor). wrap={m['wrap']}"
             )
     # xterm canvas was actually refit to the wrap. `window.__lastCols`
     # stays 0 if `refitWhenReady` exhausted its retries without ever
@@ -345,18 +463,22 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
     if m["lastCols"] <= 0:
         fails.append("xterm canvas was never refit (window.__lastCols == 0)")
     else:
-        # Coarse viewports: xterm canvas cols must be narrow enough to
-        # fit a phone. The wrap at 390 CSS px is ~370 px inside
-        # padding; at 8 px/char (ui-monospace 13px) that's ~46 cols.
-        # Anything ≥ 80 means the refit fell back to the template
-        # 160-col default and long lines will wrap character-by-
-        # character on the user's phone.
-        if mobile and m["lastCols"] > 80:
-            fails.append(
-                f"xterm too wide on mobile: cols={m['lastCols']} "
-                f"(wrap.clientWidth={m['wrap']['w'] if m['wrap'] else '?'}px) "
-                f"— long lines will wrap mid-word"
-            )
+        # Coarse viewports: xterm canvas cols must NOT be the
+        # template 160-col default — that means `refitWhenReady`
+        # bailed and long lines will wrap mid-word on the user's
+        # phone. The previous fixed-threshold check (> 80) was
+        # wrong for tablet-coarse (980px viewport, wrap ≈ 950px, so
+        # ~119 cols is correct math). Use a viewport-relative bound:
+        # anything wider than the wrap can possibly accommodate
+        # means the refit fell back.
+        if mobile and m["wrap"] and m["wrap"]["w"] > 0:
+            max_cols = m["wrap"]["w"] // 8 + 5  # 8 px/char + 5 px padding slack
+            if m["lastCols"] > max_cols + 20:  # +20 to catch "fell back to 160"
+                fails.append(
+                    f"xterm too wide on mobile: cols={m['lastCols']} "
+                    f"(wrap.clientWidth={m['wrap']['w']}px, expected ≤ {max_cols + 20}) "
+                    f"— refit fell back to a wide default"
+                )
         # Fine viewports: xterm canvas should at least span most of
         # the wrap. A 60-col canvas in a 1200px wrap means the refit
         # bailed early — about the same as the mobile-side regression.
@@ -365,31 +487,32 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                 f"xterm too narrow on desktop: cols={m['lastCols']} "
                 f"(wrap.clientWidth={m['wrap']['w'] if m['wrap'] else '?'}px)"
             )
-        # Sanity: refit dims should match `wrap.clientWidth / 8`
-        # (monospace char width at 13px). ±2 tolerates the padding
-        # the wrap loses to its `.5rem` inner padding and the
-        # renderer rounding to integer cols.
+        # Sanity: refit dims should match `wrap.clientWidth / char_w`.
+        # The naive `/8` assumes 13.33px font × 0.6 = 8px — actual
+        # rendered char width lands between 8.1 and 8.5 px on this
+        # stack (depends on the user's browser's monospace metrics),
+        # so for a 390px wrap we see anywhere from 46 to 48 cols.
+        # ±4 tolerates that band + `.5rem` wrap padding + FitAddon's
+        # integer-cols rounding. Tighter catches nothing but the
+        # renderer variance; looser would let the refit-fallback
+        # regression (canvas stays at 160 cols) sneak through on
+        # narrow viewports.
         if m["wrap"] and m["wrap"]["w"] > 0:
             expected_cols = m["wrap"]["w"] // 8
-            if abs(m["lastCols"] - expected_cols) > 2:
+            if abs(m["lastCols"] - expected_cols) > 4:
                 fails.append(
                     f"xterm cols {m['lastCols']} != wrap.clientWidth/8 ≈ {expected_cols} "
                     f"(wrap.clientWidth={m['wrap']['w']}px)"
                 )
-        # Content probe: when the grid is *not* in offline-overlay
-        # mode (the WS handshake succeeded and `setConnected(true)`
-        # removed the `.disconnected` class), xterm must have
-        # actually painted the Claude TUI — not just sized the canvas.
-        # This is the assertion that would have caught the
-        # "fully-black terminal pane on desktop" regression: every
-        # layout assertion above passes when the canvas is the right
-        # size but the buffer was never written to (no `term.write()`
-        # ever fired). The previous test suite was dimension-only and
-        # let this slip. Skip in offline mode — no `ScreenSnapshot`
-        # flows when rabbit is absent (CI on `ubuntu-latest` doesn't
-        # ship `/usr/bin/claude`), so the buffer is empty by design.
+        # Content probe: xterm must have actually painted the Claude
+        # TUI — not just sized the canvas. This is the assertion that
+        # would have caught the "fully-black terminal pane on desktop"
+        # regression: every layout assertion above passes when the
+        # canvas is the right size but the buffer was never written to
+        # (no `term.write()` ever fired). The previous test suite was
+        # dimension-only and let this slip.
         #
-        # Three layered checks when online:
+        # Three layered checks:
         # 1. `contentLen >= 200` — the Claude greeting banner alone
         #    is several hundred characters across ~10 lines; a value
         #    well below that means the canvas is mostly blank.
@@ -397,12 +520,14 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         #    border, multiple rows of content, a prompt indicator).
         #    A single non-blank line would mean only the cursor or a
         #    single char got through.
-        # 3. At least one line contains "claude" (case-insensitive)
-        #    — Claude Code's TUI greets with "Welcome to Claude Code"
-        #    or similar; "claude" appears in every version we've
-        #    shipped. If Anthropic drops the substring from the
-        #    greeting entirely, this is the canary that catches it
-        #    (and the assertion message makes the failure obvious).
+        # 3. At least one line contains "claude" or "workspace"
+        #    (case-insensitive) — Claude Code's TUI greets with
+        #    "Welcome to Claude Code" (logged-in) or "Accessing
+        #    workspace:" (first-run menu). Both substrings appear in
+        #    every claude version that ships a TUI greeting. The
+        #    probe forces the `.disconnected` class off so this
+        #    branch always fires; a true disconnect would block the
+        #    whole assertion set above it on real layout bugs first.
         if not m["disconnected"]:
             joined = " ".join(m["contentLines"])
             if m["contentLen"] < 200:
@@ -419,13 +544,63 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                     f"the greeting banner has multiple rows. "
                     f"Captured lines: {m['contentLines']!r}"
                 )
-            elif "claude" not in joined.lower():
+            elif "claude" not in joined.lower() and "workspace" not in joined.lower():
+                # Accept either "claude" (visible at desktop width
+                # where the welcome banner is on one row) or
+                # "workspace" (claude's first-run "Accessing
+                # workspace" / "trust this folder" dialog — appears
+                # at every width, even when the rest of the greeting
+                # is wrapped char-by-char at narrow viewports and
+                # the literal "claude" substring never lands on a
+                # single buffer row).
                 fails.append(
                     f"xterm canvas is online and painted "
                     f"{m['contentLen']} chars but none of them contain "
-                    f"'claude' — the Claude Code greeting should be visible. "
+                    f"'claude' or 'workspace' — the Claude Code TUI "
+                    f"should be visible (greeting banner or "
+                    f"trust-this-folder dialog). "
                     f"Captured lines: {m['contentLines']!r}"
                 )
+            # Barrier arrangement: the Claude greeting banner is a
+            # rounded rectangle framed by `─` (U+2500) horizontal
+            # box-drawing borders. The top and bottom borders must be
+            # present, aligned at the same start/end columns, and
+            # contain no internal gaps. This is the char-wise
+            # counterpart to the content probe above: even if the
+            # buffer has 200+ chars and "claude" appears, a banner
+            # with broken geometry (a missing cell from a bad reflow,
+            # a banner that wrapped because the canvas was too narrow
+            # so the top and bottom are no longer aligned) would
+            # otherwise silently green.
+            barrier_rows = m.get("barrierRows", [])
+            if len(barrier_rows) < 2:
+                fails.append(
+                    f"only {len(barrier_rows)} barrier row(s) in xterm buffer "
+                    f"(expected ≥2 for the banner top + bottom borders). "
+                    f"Rows: {barrier_rows!r}"
+                )
+            else:
+                ref = barrier_rows[0]
+                for b in barrier_rows:
+                    if abs(b["firstDash"] - ref["firstDash"]) > 1:
+                        fails.append(
+                            f"barrier left edge misaligned at row {b['row']}: "
+                            f"col {b['firstDash']}, expected ~{ref['firstDash']} "
+                            f"(reference row {ref['row']})"
+                        )
+                    if abs(b["lastDash"] - ref["lastDash"]) > 1:
+                        fails.append(
+                            f"barrier right edge misaligned at row {b['row']}: "
+                            f"col {b['lastDash']}, expected ~{ref['lastDash']} "
+                            f"(reference row {ref['row']})"
+                        )
+                    width = b["lastDash"] - b["firstDash"] + 1
+                    if b["dashCount"] < width:
+                        fails.append(
+                            f"barrier has gaps at row {b['row']}: "
+                            f"{b['dashCount']} dashes over {width} cols — "
+                            f"expected continuous barrier"
+                        )
     log(f"  {name}: "
         f"vw={m['vw']}x{m['vh']} "
         f"mqCoarse={m['mqCoarse']} "
@@ -436,6 +611,7 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         f"disconnected={m['disconnected']} "
         f"contentLen={m['contentLen']} "
         f"contentLines={len(m['contentLines'])} "
+        f"barrierRows={len(m.get('barrierRows', []))} "
         f"{'FAIL ' + '; '.join(fails) if fails else 'ok'}")
     # When the content probe is what failed, dump the captured lines
     # so the human reviewer can see exactly what got painted — much
@@ -444,6 +620,13 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         log(f"  {name} captured content:")
         for i, line in enumerate(m["contentLines"]):
             log(f"    [{i:02d}] {line!r}")
+    # Same idea for the barrier check: dump the captured barrier
+    # rows so a reviewer can see the geometry without re-running.
+    if any('barrier' in f for f in fails):
+        log(f"  {name} captured barrier rows:")
+        for b in m.get("barrierRows", []):
+            log(f"    row={b['row']:>3} cols={b['firstDash']:>3}..{b['lastDash']:<3} "
+                f"width={b['width']} dashCount={b['dashCount']}")
     return fails
 
 
@@ -467,7 +650,28 @@ def find_chrome_page_target(port: int) -> dict:
 def main() -> int:
     warren_bin = os.environ["WARREN_BIN"]
     browser = os.environ["MOBILE_LAYOUT_BROWSER"]
-    with_rabbit = os.environ.get("MOBILE_LAYOUT_RABBIT") == "1"
+    # `claude` is REQUIRED. The whole point of this test is to render
+    # real Claude Code output through rabbit → warren → chromium and
+    # assert on the actual painted TUI. Without it the buffer is
+    # empty and every barrier/content check is a no-op. CI installs
+    # claude via the upstream installer (writes to ~/.local/bin/)
+    # before invoking run.sh; local contributors can do the same.
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        log("FAIL: `claude` not on PATH. Install it:")
+        log("  curl -fsSL https://claude.ai/install.sh | bash")
+        log("(CI installs it automatically in the workflow step that")
+        log(" precedes this test.)")
+        return 2
+    # Rabbit binary too — the workspace build produces it.
+    rabbit_bin = HERE.parent.parent / "target" / "debug" / "rabbit"
+    if not rabbit_bin.exists():
+        fallback = shutil.which("rabbit")
+        if fallback:
+            rabbit_bin = Path(fallback)
+        else:
+            log(f"FAIL: rabbit binary not found at {rabbit_bin} (run: cargo build -p rabbit --bin rabbit)")
+            return 2
 
     db = f"warren_layout_{os.getpid()}_{time.time_ns()}"
     admin_url = "postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable"
@@ -548,23 +752,17 @@ def main() -> int:
         authtoken = agent.get("authtoken", "")
         log(f"created agent {agent_id}")
 
-        # 4. optionally spawn rabbit
-        if with_rabbit:
-            rabbit_bin = HERE.parent.parent / "target" / "debug" / "rabbit"
-            if not rabbit_bin.exists():
-                rabbit_bin_path = shutil.which("rabbit")
-                rabbit_bin = Path(rabbit_bin_path) if rabbit_bin_path else rabbit_bin  # type: ignore[arg-type]
-            if not rabbit_bin.exists():  # type: ignore[union-attr]
-                log("note: rabbit binary not built — skipping rabbit spawn")
-            else:
-                rabbit_env = dict(os.environ, DATABASE_URL=target_url,
-                                  WARREN_URL=base, WARREN_TOKEN=authtoken,
-                                  WORKDIR="/tmp", RUST_LOG="warn")
-                log(f"booting rabbit on :{rabbit_port}")
-                rabbit = subprocess.Popen(
-                    [str(rabbit_bin)],
-                    env=rabbit_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                )
+        # 4. spawn rabbit (required — its absence is caught at the
+        # top of main() with a clear install instruction, so by the
+        # time we reach this point rabbit_bin is a real Path).
+        rabbit_env = dict(os.environ, DATABASE_URL=target_url,
+                          WARREN_URL=base, WARREN_TOKEN=authtoken,
+                          WORKDIR="/tmp", RUST_LOG="warn")
+        log(f"booting rabbit on :{rabbit_port}")
+        rabbit = subprocess.Popen(
+            [str(rabbit_bin)],
+            env=rabbit_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
 
         # 5. boot chromium with remote debugging
         profile = tempfile.mkdtemp(prefix="warren-chrome-")
@@ -575,6 +773,11 @@ def main() -> int:
              "--no-sandbox",
              "--disable-gpu",
              "--disable-dev-shm-usage",
+             # Chrome ≥ 111 rejects CDP websocket connections unless
+             # the origin is explicitly allowed. CI runs modern
+             # chrome so this is required; the dev container's older
+             # chromium-browser ignores it.
+             "--remote-allow-origins=*",
              f"--user-data-dir={profile}",
              f"--remote-debugging-port={cdp_port}",
              "--window-size=1400,900",
@@ -641,7 +844,6 @@ def main() -> int:
                 json.dumps({
                     "run_id": run_id,
                     "agent_id": agent_id,
-                    "with_rabbit": with_rabbit,
                     "viewports": measurements,
                 }, indent=2)
             )

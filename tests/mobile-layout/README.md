@@ -24,7 +24,15 @@ when any prerequisite is missing. Mirrors the pattern used by
 | `warren`     | `warren binary not found (run: cargo build …)`   |
 | `atlas`      | `atlas binary not on PATH`                       |
 | A real browser | `no usable chrome/chromium binary on PATH`     |
-| `/usr/bin/claude` | (not a skip — rabbit spawn is dropped, page chrome still measured) |
+| `rabbit` binary | (built by `cargo build --workspace`; CI does this) |
+| `claude` on PATH | (CI installs via `curl -fsSL https://claude.ai/install.sh \| bash`; locally: install it) |
+
+`rabbit` and `claude` are **required** — without them the xterm
+buffer is empty and every barrier/content assertion is a no-op. CI
+provides them via `cargo build --workspace` and the upstream
+installer respectively; local contributors running the script
+without them will get a `FAIL:` message with the install command
+rather than a silent skip.
 
 ## What it asserts
 
@@ -42,6 +50,30 @@ For each viewport in
    "fix mobile" running gag in the commit log.
 4. **Mobile keypad last row visible** on coarse-pointer viewports:
    the bottom-most `.row`'s `bottom` must be ≤ `window.innerHeight`.
+5. **Claude greeting barrier arrangement**: the xterm buffer's top
+   + bottom banner borders are present (≥ 2 barrier rows detected),
+   aligned at the same start/end columns (± 1 for renderer
+   rounding), and contain no internal gaps (between first and last
+   `─` of a row, every cell must be `─`). Accepts both `─`
+   (U+2500, light horizontal — Claude Code's logged-in banner) and
+   `╌` (U+254B, heavy horizontal — the first-run theme-picker menu
+   that claude shows without a subscription; CI runs in this
+   state). Catches banner geometry that survived the content
+   probe but is structurally broken — e.g., a missing cell from a
+   bad reflow, or the banner wrapping because the canvas was too
+   narrow so top and bottom borders no longer line up.
+
+6. **Layout collapse under banner-visible state** (every viewport):
+   when the `#prompt-rejected-banner` is visible (the probe forces
+   this so the assertion fires regardless of whether a real prompt
+   rejection is in flight), `.term-wrap.height` must be ≥ 100 px.
+   This catches the regression where the banner — a direct child
+   of `.claude-grid` — gets grid-auto-placed into row 1 col 2,
+   pushing the aside into row 2 col 1. The aside's intrinsic
+   content then drives row 2 tall, collapsing the term-wrap row to
+   its `minmax(0, 1fr)` floor (~16 px) and making the term pane
+   invisible. The check fires whether or not rabbit is online —
+   the probe forces the banner visible itself.
 
 ## Viewports
 
