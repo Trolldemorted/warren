@@ -69,8 +69,15 @@ For each viewport in
    just happen to contain a typed `>` echo). To exercise the
    post-accept input-box state (the state real users see), the
    probe advances past Claude's first-run workspace trust dialog
-   on the first viewport by sending `1\r` over a secondary
-   WebSocket opened from the page context.
+   on the first viewport by sending `\r` over a secondary
+   WebSocket opened from the page context, then a Down arrow +
+   Enter to dismiss Claude's account-type picker menu (CI runs
+   Claude fresh without a subscription, which shows that menu
+   after the trust dialog). If the second menu can't be dismissed
+   (Claude can't reach anonymous login), the probe detects the
+   menu state from the buffer — `❯ N.` pattern at column 1 — and
+   suppresses the prompt-glyph check rather than false-failing
+   the menu's intentional cursor position.
 
 6. **Layout collapse under banner-visible state** (every viewport):
    when the `#prompt-rejected-banner` is visible (the probe forces

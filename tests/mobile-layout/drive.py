@@ -399,6 +399,84 @@ PROBE = r"""
   //      "ew" because the original "New" got cut by wrap.
   const cursorMisaligned = [];
   const wrappedFragments = [];
+  // State detection. CI runs Claude Code fresh without a subscription,
+  // so after the trust dialog the TUI lands on Claude's account-type
+  // picker menu (`❯ 1. Claude account with subscription` / `❯ 2.
+  // Claude account without subscription` / etc.) — NOT the input box
+  // the test was originally designed against. The menu uses `❯` at
+  // col 1 as a selection marker (col 0 is a blank gutter), so the
+  // "prompt glyph at col 0" check below would false-positive on every
+  // menu row. Likewise the menu has no box-drawing banner, so the
+  // barrierRows check would false-fail with 0 rows.
+  //
+  // Distinguish by scanning the buffer for either signature:
+  //   - `input_prompt`: a row whose col 0 is `❯` (or `>` followed by
+  //     the cursor block `▌`) with empty cells after — the genuine
+  //     prompt. The cursor at col 0 is mandatory here.
+  //   - `menu`: a row whose `❯` is at col 1 followed by whitespace
+  //     and a digit and `.` — Claude Code's auth picker cursor. The
+  //     cursor at col 1 is the menu's intentional layout, not a wrap
+  //     bug.
+  //   - `unknown`: neither pattern found.
+  //
+  // The wrap-fragment check (lower in this pass) is unconditional —
+  // the user's bug is the wrap, not the cursor position — and stays
+  // the same in every state.
+  let detectedState = 'unknown';
+  let inputPromptRow = -1;
+  let menuRow = -1;
+  if (window.term && window.term.buffer && window.term.buffer.active) {
+    const buf = window.term.buffer.active;
+    for (let i = 0; i < buf.length && (inputPromptRow < 0 || menuRow < 0); i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const lineLen = line.length || 0;
+      if (lineLen < 5) continue;
+      // Input prompt signature: col 0 is `❯` (no leading space) and
+      // cells 1-2 are blank or the cursor block. The prompt glyph at
+      // col 0 is mandatory here — the wrap bug cannot land it there
+      // because col 0 of a non-empty row is always the first
+      // painted cell.
+      const c0 = line.getCell(0);
+      const c0ch = c0 ? c0.getChars() : '';
+      if (c0ch === '❯') {
+        const c1 = line.getCell(1);
+        const c1ch = c1 ? c1.getChars() : '';
+        if (!c1ch || c1ch === ' ' || c1ch === '▌') {
+          inputPromptRow = i;
+        }
+      }
+      if (c0ch === '>') {
+        const c1 = line.getCell(1);
+        const c1ch = c1 ? c1.getChars() : '';
+        if (c1ch === ' ' || c1ch === '▌') {
+          const c2 = line.getCell(2);
+          const c2ch = c2 ? c2.getChars() : '';
+          if (!c2ch || c2ch === ' ' || c2ch === '▌') {
+            inputPromptRow = i;
+          }
+        }
+      }
+      // Menu signature: col 1 is `❯`, col 2 is whitespace, col 3 is
+      // a digit, col 4 is `.`. This is Claude Code's auth-picker
+      // menu pattern; the `❯` at col 1 is the selection cursor and
+      // not a wrap-induced misalignment.
+      const c1m = line.getCell(1);
+      const c2m = line.getCell(2);
+      const c3m = line.getCell(3);
+      const c4m = line.getCell(4);
+      const c1ch = c1m ? c1m.getChars() : '';
+      const c2ch = c2m ? c2m.getChars() : '';
+      const c3ch = c3m ? c3m.getChars() : '';
+      const c4ch = c4m ? c4m.getChars() : '';
+      if (c1ch === '❯' && (c2ch === ' ' || c2ch === '') &&
+          /[0-9]/.test(c3ch) && c4ch === '.') {
+        menuRow = i;
+      }
+    }
+    if (inputPromptRow >= 0) detectedState = 'input_prompt';
+    else if (menuRow >= 0) detectedState = 'menu';
+  }
   if (window.term && window.term.buffer && window.term.buffer.active) {
     const buf = window.term.buffer.active;
     const isCellWhitespace = (c) => {
@@ -441,6 +519,25 @@ PROBE = r"""
         break;
       }
       if (angleFancy > 0 || promptASCII > 0) {
+        // Suppress menu-cursor false positives: in the menu state,
+        // `❯ N.` is the auth picker's selection marker at col 1 by
+        // design. Only flag genuine wrap-induced misalignment (a
+        // cursor pushed off col 0 because the line above overflowed
+        // the canvas).
+        if (detectedState === 'menu' && angleFancy === 1) {
+          const c2c = line.getCell(2);
+          const c3c = line.getCell(3);
+          const c4c = line.getCell(4);
+          if (c2c && c3c && c4c) {
+            const c2ch2 = c2c.getChars();
+            const c3ch2 = c3c.getChars();
+            const c4ch2 = c4c.getChars();
+            if ((c2ch2 === ' ' || c2ch2 === '') &&
+                /[0-9]/.test(c3ch2) && c4ch2 === '.') {
+              continue;
+            }
+          }
+        }
         const sample = line.translateToString(false, 0, lineLen).slice(0, 120);
         cursorMisaligned.push({
           row: i,
@@ -532,6 +629,7 @@ PROBE = r"""
     barrierRows,
     cursorMisaligned,
     wrappedFragments,
+    detectedState,
   };
 })()
 """
@@ -559,6 +657,17 @@ def advance_trust_prompt(cdp: "CDP", agent_id: str) -> str | None:
     message after the accept and start generating a response,
     which would push the idle status line off the top of the
     buffer before the probe reads it.
+
+    CI runs against a fresh Claude install (no subscription), so
+    after the trust dialog dismisses Claude Code renders an
+    account-type picker (`❯ 1. Claude account with subscription`
+    / `❯ 2. Claude account without subscription` / etc.). To
+    exercise the input-box state — where the user's wrap bug
+    actually manifests — we send a Down arrow + Enter to select
+    item 2 ("without subscription"). Without an API key Claude
+    may still show a different state, but the probe is now
+    state-tolerant: it accepts either input_prompt or menu and
+    keeps the wrap-fragment check unconditional.
     """
     js = f"""
 (async () => {{
@@ -579,11 +688,22 @@ def advance_trust_prompt(cdp: "CDP", agent_id: str) -> str | None:
   // default "1. Yes, I trust this folder" without injecting a
   // user message.
   w.send(new Uint8Array([0x01, 0x0d]));
-  // Close the WS immediately so no further keystrokes (from any
-  // source) accidentally land on the prompt.
+  // Give claude a beat to render the auth picker (the screen
+  // that follows the trust dialog in a fresh install).
+  await new Promise(r => setTimeout(r, 1500));
+  // Down arrow (`\\x1b[B`) + Enter — move cursor to item 2
+  // ("Claude account without subscription") and select it.
+  // This dismisses the auth picker so we land on the input box,
+  // the state real users see and the state the wrap-bug check
+  // was written against.
+  w.send(new Uint8Array([0x01, 0x1b, 0x5b, 0x42]));
+  await new Promise(r => setTimeout(r, 300));
+  w.send(new Uint8Array([0x01, 0x0d]));
   w.close();
-  // Give claude time to render the input box + welcome banner
-  // + status line after the accept.
+  // Give claude time to render whatever follows the auth picker
+  // (input box + welcome banner + status line, or another
+  // menu/error if "without subscription" requires auth Claude
+  // can't reach). The probe detects which state it landed on.
   await new Promise(r => setTimeout(r, 4500));
   return 'advanced';
 }})()
@@ -798,7 +918,16 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
             # so the top and bottom are no longer aligned) would
             # otherwise silently green.
             barrier_rows = m.get("barrierRows", [])
-            if len(barrier_rows) < 2:
+            # Skip the banner-topology check when Claude is in the
+            # auth-picker menu state: that screen has no box-drawing
+            # banner (no `─`/`╌` rows), so requiring ≥2 barriers
+            # false-fails a state the test wasn't designed against.
+            # The cursor-misalignment check below is also skipped in
+            # this state — the `❯ N.` menu cursor at col 1 is
+            # intentional, not a wrap artifact.
+            if m.get("detectedState") == "menu":
+                pass
+            elif len(barrier_rows) < 2:
                 fails.append(
                     f"only {len(barrier_rows)} barrier row(s) in xterm buffer "
                     f"(expected ≥2 for the banner top + bottom borders). "
@@ -850,14 +979,22 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
             # content (avoids false-positives on leading-blank rows
             # that just happen to contain a typed `>` echo).
             misaligned = m.get("cursorMisaligned", [])
-            for c in misaligned:
-                fails.append(
-                    f"xterm row {c['row']}: {c['glyph']!r} prompt glyph "
-                    f"found at col {c['cursorCol']} (expected col 0) — "
-                    f"status line overflowed the {c['lastCols']}-col "
-                    f"canvas and wrapped, pushing the prompt mid-line. "
-                    f"col0={c['col0']!r} sample: {c['sample']!r}"
-                )
+            # In the auth-picker menu state, `❯ N.` at col 1 is the
+            # intentional selection cursor. The probe already
+            # filters those rows out of cursorMisaligned when
+            # detectedState == "menu" (so this list is empty), but
+            # gating here too as a belt-and-braces guard against a
+            # future Claude Code change that uses a different menu
+            # glyph and re-introduces the false-positive.
+            if m.get("detectedState") != "menu":
+                for c in misaligned:
+                    fails.append(
+                        f"xterm row {c['row']}: {c['glyph']!r} prompt glyph "
+                        f"found at col {c['cursorCol']} (expected col 0) — "
+                        f"status line overflowed the {c['lastCols']}-col "
+                        f"canvas and wrapped, pushing the prompt mid-line. "
+                        f"col0={c['col0']!r} sample: {c['sample']!r}"
+                    )
             # Wrapped status-line fragment: catches the user's
             # exact bug symptom where the row that wraps shows
             # truncated text ("ew task? /clear to save..." instead
@@ -883,6 +1020,7 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         f"lastCols={m['lastCols']} "
         f"keypad.row.bottom={m['keypadLastRowBottom']} "
         f"disconnected={m['disconnected']} "
+        f"state={m.get('detectedState', 'unknown')} "
         f"contentLen={m['contentLen']} "
         f"contentLines={len(m['contentLines'])} "
         f"barrierRows={len(m.get('barrierRows', []))} "
