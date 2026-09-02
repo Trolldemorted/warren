@@ -142,7 +142,7 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    850px) and proposes 50 rows regardless of the wrap, so the
    terminal never shrinks. Width was already fine because `#term` has
    `width: 100%`. */
-.claude-grid .term-wrap { overflow: auto; min-height: 0; }
+.claude-grid .term-wrap { overflow-x: auto; overflow-y: hidden; min-height: 0; }
 .claude-grid #term { display: block; width: 100%; height: 100%; }
 
 /* prevent auto-zoom on focus. FF Mobile (in any
@@ -367,8 +367,17 @@ main.container-fluid > .alert { flex: 0 0 auto; }
        fill the rest. */
     flex: 1 1 auto;
     min-height: 0;
+    /* `overflow-x: auto` lets the wrap scroll horizontally when the
+       canvas exceeds it (the `MIN_COLS = TERM_COLS` floor keeps
+       Claude's wide status line on one buffer row). `overflow-y:
+       hidden` is deliberate: xterm-viewport IS the scroll mechanism
+       for terminal content, and letting the wrap also scroll
+       vertically produces a second vertical scrollbar next to
+       xterm's. The canvas can extend below the wrap — the rows that
+       don't fit are still reachable via xterm-viewport's own
+       scrollbar, which is what the user actually wants to see. */
     overflow-x: auto;
-    overflow-y: scroll;
+    overflow-y: hidden;
     scrollbar-width: thin;
     scrollbar-color: rgba(255,255,255,0.35) transparent;
     /* Canvas is wider than the wrap at narrow viewports (the
