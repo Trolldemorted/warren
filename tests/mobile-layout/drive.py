@@ -369,55 +369,137 @@ PROBE = r"""
     }
   }
   // Third pass: input-cursor alignment. Claude Code's TUI shows the
-  // user prompt as `❯` (U+276F, HEAVY RIGHT-POINTING ANGLE
-  // ORNAMENT BRACKET) at column 0 of a dedicated row. xterm wraps at
-  // the cell level when content overflows the canvas — so a `❯`
-  // that the TUI intended at column 0 of the input row can land
-  // mid-line on a wrapped status fragment. That's the visible
-  // symptom of the user's bug: status line is too wide for the
-  // canvas, gets broken into multiple buffer rows, and the prompt
-  // glyph rides along on one of the continuation rows.
+  // user prompt as either `❯` (U+276F, HEAVY RIGHT-POINTING ANGLE
+  // ORNAMENT BRACKET — newer Claude Code versions) or `>` (older
+  // versions, visible in the user's deployed screenshot) at column
+  // 0 of a dedicated row. xterm wraps at the cell level when
+  // content overflows the canvas — so a prompt glyph that the TUI
+  // intended at column 0 of the input row can land mid-line on a
+  // wrapped status fragment. That's the visible symptom of the
+  // user's bug: status line is too wide for the canvas, gets
+  // broken into multiple buffer rows, and the prompt glyph rides
+  // along on one of the continuation rows.
   //
-  // Detection walks every buffer row, finds the first `❯` or `>`,
-  // and flags rows where the cursor glyph appears past column 0 AND
-  // column 0 has non-whitespace content (so a leading blank — the
-  // case where the user already moved past the prompt — doesn't
-  // false-positive on a stray `>` from a typed message echo).
-  // `line.getCell` is the reliable way to read column-zero content
-  // because `translateToString` collapses whitespace.
+  // Detection walks every buffer row and flags any of:
+  //   1. `❯` (U+276F) at non-zero column. This glyph never appears
+  //      in legitimate Claude Code content outside the prompt, so
+  //      no false-positive filtering is needed.
+  //   2. `>` followed by space and the cursor block `▌` (U+258C)
+  //      at non-zero column. This pattern uniquely identifies the
+  //      prompt — `> ▌` is the older claude's input row. The
+  //      cell immediately before the `>` must be whitespace, so
+  //      we don't false-positive on `>` characters that are part
+  //      of text content (e.g., `> reply` mid-line).
+  //   3. A wrapped continuation row — text that starts mid-word at
+  //      column 0 with a lowercase letter and follows a row whose
+  //      last visible character was a letter (i.e., the previous
+  //      row ended mid-word, so the next row must be its
+  //      continuation). This catches status-line fragments like
+  //      "ew task? /clear to save..." that start at col 0 with
+  //      "ew" because the original "New" got cut by wrap.
   const cursorMisaligned = [];
+  const wrappedFragments = [];
   if (window.term && window.term.buffer && window.term.buffer.active) {
     const buf = window.term.buffer.active;
-    // Only `❯` (U+276F) — Claude Code's specific prompt glyph.
-    // ASCII `>` is too noisy in TUI content (menu arrows, comments,
-    // code blocks) and would produce false positives on legitimate
-    // layout.
-    const isCursor = (ch) => ch === '❯';
+    const isCellWhitespace = (c) => {
+      const ch = c ? c.getChars() : '';
+      return !ch || ch === ' ' || ch === ' ';
+    };
+    const isCellLetter = (c) => {
+      const ch = c ? c.getChars() : '';
+      return /[a-zA-Z]/.test(ch);
+    };
+    const findGlyph = (line, lineLen, pred) => {
+      for (let j = 0; j < lineLen; j++) {
+        const cell = line.getCell(j);
+        if (cell && pred(cell.getChars())) return j;
+      }
+      return -1;
+    };
     for (let i = 0; i < buf.length; i++) {
       const line = buf.getLine(i);
       if (!line) continue;
       const lineLen = line.length || 0;
       if (lineLen === 0) continue;
-      let cursorCol = -1;
-      for (let j = 0; j < lineLen; j++) {
-        const cell = line.getCell(j);
-        if (cell && isCursor(cell.getChars())) {
-          cursorCol = j;
-          break;
-        }
+      const col0Cell = line.getCell(0);
+      const col0Chars = col0Cell ? col0Cell.getChars() : '';
+      // Check (1): `❯` at non-zero col.
+      const angleFancy = findGlyph(line, lineLen, (ch) => ch === '❯');
+      // Check (2): `> ▌` pattern at non-zero col where the cell
+      // before `>` is whitespace.
+      let promptASCII = -1;
+      for (let j = 1; j < lineLen - 1; j++) {
+        const c = line.getCell(j);
+        if (!c || c.getChars() !== '>') continue;
+        const next = line.getCell(j + 1);
+        if (!next || next.getChars() !== ' ') continue;
+        const after = line.getCell(j + 2);
+        if (!after || after.getChars() !== '▌') continue;
+        const prev = j > 0 ? line.getCell(j - 1) : null;
+        if (!isCellWhitespace(prev)) continue;
+        promptASCII = j;
+        break;
       }
-      if (cursorCol <= 0) continue;
-      const col0 = line.getCell(0);
-      const col0Chars = col0 ? col0.getChars() : '';
-      const sample = line.translateToString(false, 0, lineLen).slice(0, 120);
-      cursorMisaligned.push({
+      if (angleFancy > 0 || promptASCII > 0) {
+        const sample = line.translateToString(false, 0, lineLen).slice(0, 120);
+        cursorMisaligned.push({
+          row: i,
+          cursorCol: angleFancy > 0 ? angleFancy : promptASCII,
+          glyph: angleFancy > 0 ? '❯' : '> ▌',
+          lastCols,
+          col0: col0Chars || ' ',
+          sample,
+        });
+        if (cursorMisaligned.length >= 20) break;
+      }
+    }
+    // Check (3): wrap continuation rows. For each non-empty row, if
+    // its column 0 starts with a lowercase letter AND the previous
+    // row's last non-blank cell is also a letter (i.e., the
+    // previous row ended mid-word), flag this row as a wrap
+    // continuation. This catches the user's exact symptom: when
+    // the status line (or any other TUI line painted by Claude
+    // Code) is wider than the canvas, xterm wraps at the cell
+    // level and the continuation lands at col 0 of the next row,
+    // mid-word. The lowercase start is the strong signal — most
+    // legitimate row-starts in Claude Code's TUI are either
+    // aligned at col 0 with intentional content (a menu item, a
+    // status glyph) or are preceded by a row that ended with
+    // whitespace (a paragraph break). Mid-word lowercase starts
+    // are wrap artifacts.
+    for (let i = 1; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const lineLen = line.length || 0;
+      if (lineLen === 0) continue;
+      const sample = line.translateToString(false, 0, lineLen);
+      const trimmed = sample.trim();
+      if (trimmed.length === 0) continue;
+      const firstCell = line.getCell(0);
+      if (!isCellLetter(firstCell)) continue;
+      const firstCh = firstCell.getChars();
+      // Lowercase only — uppercase starts are intentional
+      // (table headers, new sentences, etc.).
+      if (firstCh !== firstCh.toLowerCase()) continue;
+      const prevLine = buf.getLine(i - 1);
+      if (!prevLine) continue;
+      const prevLen = prevLine.length || 0;
+      let prevLastLetter = false;
+      for (let j = prevLen - 1; j >= 0; j--) {
+        const pc = prevLine.getCell(j);
+        if (!pc) continue;
+        const ch = pc.getChars();
+        if (ch === ' ' || ch === '') continue;
+        prevLastLetter = isCellLetter(pc);
+        break;
+      }
+      if (!prevLastLetter) continue;
+      wrappedFragments.push({
         row: i,
-        cursorCol,
         lastCols,
-        col0: col0Chars || ' ',
-        sample,
+        sample: sample.slice(0, 120),
       });
-      if (cursorMisaligned.length >= 20) break;
+      if (wrappedFragments.length >= 20) break;
     }
   }
   return {
@@ -446,28 +528,34 @@ PROBE = r"""
     contentLines,
     barrierRows,
     cursorMisaligned,
+    wrappedFragments,
   };
 })()
 """
 
 
 def advance_trust_prompt(cdp: "CDP", agent_id: str) -> str | None:
-    """Send `1\\r` over a secondary WebSocket opened from inside the
-    page to select "Yes, I trust this folder" on Claude's first-run
-    workspace dialog. Once accepted, the dialog never reappears for
-    the lifetime of this agent.
+    """Send `\\r` over a secondary WebSocket opened from inside the
+    page to accept Claude's first-run workspace trust dialog.
 
-    CI's fresh-claude install always shows the trust dialog, which is
-    NOT the state real users see — the probe would otherwise assert
-    against the trust menu's geometry, missing any bug specific to
-    the input-box state (status-line wrap, the user's reported bug).
-    The advance runs once per agent, only on the first viewport.
+    CI's fresh-claude install always shows the trust dialog, which
+    is NOT the state real users see — the probe would otherwise
+    assert against the trust menu's geometry, missing any bug
+    specific to the input-box state (status-line wrap, the user's
+    reported bug). The advance runs once per agent, only on the
+    first viewport.
 
     The WS opens from the page context (Runtime.evaluate) so the
     `warren_session` cookie travels automatically; no separate
-    auth dance. The frame is `<chan:0x01><data>` — channel
-    TERM_CHAN_CLAUDE, bytes `1\\r` — the same shape
-    `term.onData` emits for a real user keystroke.
+    auth dance. The frame is `<chan:0x01><\\r>` — channel
+    TERM_CHAN_CLAUDE, just a carriage return — the same shape
+    `term.onData` emits for an Enter keystroke. The cursor in the
+    dialog defaults to "1. Yes, I trust this folder", so a bare
+    Enter selects the default. We deliberately do NOT send a "1"
+    prefix because claude would treat the keystrokes as a user
+    message after the accept and start generating a response,
+    which would push the idle status line off the top of the
+    buffer before the probe reads it.
     """
     js = f"""
 (async () => {{
@@ -484,12 +572,16 @@ def advance_trust_prompt(cdp: "CDP", agent_id: str) -> str | None:
   }} catch (e) {{
     return 'no-trust-prompt';
   }}
-  // Channel 0x01 (TERM_CHAN_CLAUDE) + "1\\r"
-  w.send(new Uint8Array([0x01, 0x31, 0x0d]));
+  // Channel 0x01 (TERM_CHAN_CLAUDE) + bare CR — selects the
+  // default "1. Yes, I trust this folder" without injecting a
+  // user message.
+  w.send(new Uint8Array([0x01, 0x0d]));
+  // Close the WS immediately so no further keystrokes (from any
+  // source) accidentally land on the prompt.
+  w.close();
   // Give claude time to render the input box + welcome banner
   // + status line after the accept.
-  await new Promise(r => setTimeout(r, 3500));
-  w.close();
+  await new Promise(r => setTimeout(r, 4500));
   return 'advanced';
 }})()
 """
@@ -740,11 +832,28 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
             misaligned = m.get("cursorMisaligned", [])
             for c in misaligned:
                 fails.append(
-                    f"xterm row {c['row']}: input cursor glyph found at "
-                    f"col {c['cursorCol']} (expected col 0) — status line "
-                    f"overflowed the {c['lastCols']}-col canvas and "
-                    f"wrapped, pushing the prompt glyph mid-line. "
+                    f"xterm row {c['row']}: {c['glyph']!r} prompt glyph "
+                    f"found at col {c['cursorCol']} (expected col 0) — "
+                    f"status line overflowed the {c['lastCols']}-col "
+                    f"canvas and wrapped, pushing the prompt mid-line. "
                     f"col0={c['col0']!r} sample: {c['sample']!r}"
+                )
+            # Wrapped status-line fragment: catches the user's
+            # exact bug symptom where the row that wraps shows
+            # truncated text ("ew task? /clear to save..." instead
+            # of "[n] New task? /clear to save..."). Detected by
+            # a lowercase-letter start at col 0 immediately after
+            # a row that ended mid-word, AND the row contains one
+            # of the known status-line fragments. Limiting to
+            # known fragments avoids false positives on
+            # legitimate prose wraps.
+            fragments = m.get("wrappedFragments", [])
+            for f in fragments:
+                fails.append(
+                    f"xterm row {f['row']}: text continuation at col 0 "
+                    f"starts with a lowercase letter after a mid-word row "
+                    f"end — canvas width {f['lastCols']} cols is too narrow "
+                    f"and the line wrapped. sample: {f['sample']!r}"
                 )
     log(f"  {name}: "
         f"vw={m['vw']}x{m['vh']} "
@@ -758,6 +867,7 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         f"contentLines={len(m['contentLines'])} "
         f"barrierRows={len(m.get('barrierRows', []))} "
         f"cursorMisaligned={len(m.get('cursorMisaligned', []))} "
+        f"wrappedFragments={len(m.get('wrappedFragments', []))} "
         f"{'FAIL ' + '; '.join(fails) if fails else 'ok'}")
     # When the content probe is what failed, dump the captured lines
     # so the human reviewer can see exactly what got painted — much
@@ -775,11 +885,16 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                 f"width={b['width']} dashCount={b['dashCount']}")
     # Same idea for the cursor-misalignment check: dump the captured
     # rows so a reviewer can see the sample that triggered the fail.
-    if any('cursor glyph found at col' in f for f in fails):
+    if any('cursor glyph found at col' in f or 'prompt glyph found at col' in f for f in fails):
         log(f"  {name} captured cursor-misaligned rows:")
         for c in m.get("cursorMisaligned", []):
             log(f"    row={c['row']:>3} cursorCol={c['cursorCol']:>3} "
-                f"col0={c['col0']!r} lastCols={c['lastCols']} sample={c['sample']!r}")
+                f"glyph={c.get('glyph', '❯')!r} col0={c['col0']!r} "
+                f"lastCols={c['lastCols']} sample={c['sample']!r}")
+    if any('text continuation at col 0' in f for f in fails):
+        log(f"  {name} captured wrap continuations:")
+        for fr in m.get("wrappedFragments", []):
+            log(f"    row={fr['row']:>3} lastCols={fr['lastCols']} sample={fr['sample']!r}")
     return fails
 
 
