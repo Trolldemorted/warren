@@ -368,6 +368,58 @@ PROBE = r"""
       }
     }
   }
+  // Third pass: input-cursor alignment. Claude Code's TUI shows the
+  // user prompt as `❯` (U+276F, HEAVY RIGHT-POINTING ANGLE
+  // ORNAMENT BRACKET) at column 0 of a dedicated row. xterm wraps at
+  // the cell level when content overflows the canvas — so a `❯`
+  // that the TUI intended at column 0 of the input row can land
+  // mid-line on a wrapped status fragment. That's the visible
+  // symptom of the user's bug: status line is too wide for the
+  // canvas, gets broken into multiple buffer rows, and the prompt
+  // glyph rides along on one of the continuation rows.
+  //
+  // Detection walks every buffer row, finds the first `❯` or `>`,
+  // and flags rows where the cursor glyph appears past column 0 AND
+  // column 0 has non-whitespace content (so a leading blank — the
+  // case where the user already moved past the prompt — doesn't
+  // false-positive on a stray `>` from a typed message echo).
+  // `line.getCell` is the reliable way to read column-zero content
+  // because `translateToString` collapses whitespace.
+  const cursorMisaligned = [];
+  if (window.term && window.term.buffer && window.term.buffer.active) {
+    const buf = window.term.buffer.active;
+    // Only `❯` (U+276F) — Claude Code's specific prompt glyph.
+    // ASCII `>` is too noisy in TUI content (menu arrows, comments,
+    // code blocks) and would produce false positives on legitimate
+    // layout.
+    const isCursor = (ch) => ch === '❯';
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const lineLen = line.length || 0;
+      if (lineLen === 0) continue;
+      let cursorCol = -1;
+      for (let j = 0; j < lineLen; j++) {
+        const cell = line.getCell(j);
+        if (cell && isCursor(cell.getChars())) {
+          cursorCol = j;
+          break;
+        }
+      }
+      if (cursorCol <= 0) continue;
+      const col0 = line.getCell(0);
+      const col0Chars = col0 ? col0.getChars() : '';
+      const sample = line.translateToString(false, 0, lineLen).slice(0, 120);
+      cursorMisaligned.push({
+        row: i,
+        cursorCol,
+        lastCols,
+        col0: col0Chars || ' ',
+        sample,
+      });
+      if (cursorMisaligned.length >= 20) break;
+    }
+  }
   return {
     vw, vh: window.innerHeight,
     docScrollW: de.scrollWidth,
@@ -393,9 +445,59 @@ PROBE = r"""
     contentLen,
     contentLines,
     barrierRows,
+    cursorMisaligned,
   };
 })()
 """
+
+
+def advance_trust_prompt(cdp: "CDP", agent_id: str) -> str | None:
+    """Send `1\\r` over a secondary WebSocket opened from inside the
+    page to select "Yes, I trust this folder" on Claude's first-run
+    workspace dialog. Once accepted, the dialog never reappears for
+    the lifetime of this agent.
+
+    CI's fresh-claude install always shows the trust dialog, which is
+    NOT the state real users see — the probe would otherwise assert
+    against the trust menu's geometry, missing any bug specific to
+    the input-box state (status-line wrap, the user's reported bug).
+    The advance runs once per agent, only on the first viewport.
+
+    The WS opens from the page context (Runtime.evaluate) so the
+    `warren_session` cookie travels automatically; no separate
+    auth dance. The frame is `<chan:0x01><data>` — channel
+    TERM_CHAN_CLAUDE, bytes `1\\r` — the same shape
+    `term.onData` emits for a real user keystroke.
+    """
+    js = f"""
+(async () => {{
+  await new Promise(r => setTimeout(r, 1500));
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let w;
+  try {{
+    w = new WebSocket(`${{proto}}//${{location.host}}/agent/{agent_id}/claude/ws`);
+    await new Promise((r, j) => {{
+      w.onopen = r;
+      w.onerror = j;
+      setTimeout(() => j(new Error('ws timeout')), 3000);
+    }});
+  }} catch (e) {{
+    return 'no-trust-prompt';
+  }}
+  // Channel 0x01 (TERM_CHAN_CLAUDE) + "1\\r"
+  w.send(new Uint8Array([0x01, 0x31, 0x0d]));
+  // Give claude time to render the input box + welcome banner
+  // + status line after the accept.
+  await new Promise(r => setTimeout(r, 3500));
+  w.close();
+  return 'advanced';
+}})()
+"""
+    try:
+        return cdp.evaluate(js, timeout_s=15.0)
+    except Exception as e:  # noqa: BLE001
+        log(f"trust advance error (proceeding anyway): {e}")
+        return None
 
 
 def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) -> list[str]:
@@ -624,6 +726,26 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                             f"{b['dashCount']} dashes over {width + 1} cols — "
                             f"expected continuous barrier"
                         )
+            # Input-cursor alignment: when the xterm canvas is too
+            # narrow for Claude Code's intended TUI width, xterm
+            # wraps at the cell level and the prompt glyph `❯` (or
+            # `>`) ends up mid-line on a wrapped status fragment
+            # instead of at column 0 of its dedicated row. That's
+            # the user's reported bug — visible as the "New task?"
+            # prefix getting cut to "ew task?" and partial words
+            # floating at the right edge. Fail every row where a
+            # cursor glyph is past column 0 AND column 0 has real
+            # content (avoids false-positives on leading-blank rows
+            # that just happen to contain a typed `>` echo).
+            misaligned = m.get("cursorMisaligned", [])
+            for c in misaligned:
+                fails.append(
+                    f"xterm row {c['row']}: input cursor glyph found at "
+                    f"col {c['cursorCol']} (expected col 0) — status line "
+                    f"overflowed the {c['lastCols']}-col canvas and "
+                    f"wrapped, pushing the prompt glyph mid-line. "
+                    f"col0={c['col0']!r} sample: {c['sample']!r}"
+                )
     log(f"  {name}: "
         f"vw={m['vw']}x{m['vh']} "
         f"mqCoarse={m['mqCoarse']} "
@@ -635,6 +757,7 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         f"contentLen={m['contentLen']} "
         f"contentLines={len(m['contentLines'])} "
         f"barrierRows={len(m.get('barrierRows', []))} "
+        f"cursorMisaligned={len(m.get('cursorMisaligned', []))} "
         f"{'FAIL ' + '; '.join(fails) if fails else 'ok'}")
     # When the content probe is what failed, dump the captured lines
     # so the human reviewer can see exactly what got painted — much
@@ -650,6 +773,13 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         for b in m.get("barrierRows", []):
             log(f"    row={b['row']:>3} cols={b['firstDash']:>3}..{b['lastDash']:<3} "
                 f"width={b['width']} dashCount={b['dashCount']}")
+    # Same idea for the cursor-misalignment check: dump the captured
+    # rows so a reviewer can see the sample that triggered the fail.
+    if any('cursor glyph found at col' in f for f in fails):
+        log(f"  {name} captured cursor-misaligned rows:")
+        for c in m.get("cursorMisaligned", []):
+            log(f"    row={c['row']:>3} cursorCol={c['cursorCol']:>3} "
+                f"col0={c['col0']!r} lastCols={c['lastCols']} sample={c['sample']!r}")
     return fails
 
 
@@ -832,6 +962,17 @@ def main() -> int:
                 # `ScreenSnapshot` arrives and writes content into
                 # the canvas.
                 time.sleep(4.0)
+
+                # First viewport only: advance past claude's
+                # first-run workspace trust dialog so subsequent
+                # probes see the input-box state (the state real
+                # users see), not the trust menu. Without this the
+                # wrap check below would only see the dialog's
+                # geometry and miss any bug specific to the input
+                # box + status line.
+                if name == VIEWPORTS[0][0]:
+                    log("advancing claude trust dialog (first viewport)")
+                    advance_trust_prompt(cdp, agent_id)
 
                 m = cdp.evaluate(PROBE, timeout_s=PROBE_TIMEOUT_S)
                 m["viewport"] = name

@@ -56,6 +56,21 @@ For each viewport in
    probe but is structurally broken — e.g., a missing cell from a
    bad reflow, or the banner wrapping because the canvas was too
    narrow so top and bottom borders no longer line up.
+6. **Input cursor stays at column 0** (when online): Claude Code's
+   TUI shows the user prompt as `❯` (U+276F) at column 0 of its
+   dedicated row. When the xterm canvas is too narrow for Claude's
+   intended TUI width, xterm wraps at the cell level and the
+   prompt glyph ends up mid-line on a wrapped status fragment —
+   visible as the "New task?" prefix getting cut to "ew task?"
+   and partial words ("r", "n") floating at the right edge.
+   Detection walks every buffer row and flags any row where a
+   cursor glyph appears past column 0 AND column 0 holds real
+   content (avoiding false-positives on leading-blank rows that
+   just happen to contain a typed `>` echo). To exercise the
+   post-accept input-box state (the state real users see), the
+   probe advances past Claude's first-run workspace trust dialog
+   on the first viewport by sending `1\r` over a secondary
+   WebSocket opened from the page context.
 
 6. **Layout collapse under banner-visible state** (every viewport):
    when the `#prompt-rejected-banner` is visible (the probe forces
