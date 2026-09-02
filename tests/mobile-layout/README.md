@@ -83,6 +83,24 @@ For each viewport in
    its `minmax(0, 1fr)` floor (~16 px) and making the term pane
    invisible. The check fires whether or not rabbit is online —
    the probe forces the banner visible itself.
+6. **No buffer overflow at any viewport**: every xterm buffer row's
+   length is ≤ canvas width. Lines longer than the canvas wrap
+   visually but the page has no horizontal scroll on the canvas
+   (`xterm-viewport` ships `overflow-y: scroll` only), so the
+   wrapped characters silently clip. The probe advances past
+   Claude's first-run trust dialog so this check runs against the
+   actual input-box state real users see.
+7. **Wrap scrollbar reachable when canvas overflows**: when the
+   xterm canvas is wider than `.term-wrap`, the wrap must actually
+   be horizontally scrollable (`wrap.scrollWidth > wrap.clientWidth
+   + 1`). The agent template sets `MIN_COLS = TERM_COLS` in
+   `refit()` so Claude's wide status line fits on one buffer row
+   instead of fragmenting mid-word; the wrap's `overflow-x: auto`
+   is what makes the rest of the line reachable. If a future
+   template regression removes either piece, the buffer-row
+   check (above) and this CSS-level check fire together and the
+   user's "no horizontal scrollbar anywhere, content silently
+   clips" complaint can't slip back in.
 
 ## Viewports
 

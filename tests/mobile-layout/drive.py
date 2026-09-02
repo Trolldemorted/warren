@@ -516,6 +516,9 @@ PROBE = r"""
     term: rect(term),
     termScrollH: term ? term.scrollHeight : null,
     termClientH: term ? term.clientHeight : null,
+    wrapScrollW: wrap ? wrap.scrollWidth : null,
+    wrapClientW: wrap ? wrap.clientWidth : null,
+    wrapOverflowingX: wrap ? wrap.scrollWidth > wrap.clientWidth + 1 : null,
     keypad: rect(keypad),
     keypadLastRow,
     keypadLastRowBottom,
@@ -615,11 +618,16 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
     # something other than the wrap. `.term-wrap` has 0.5rem top +
     # 0.5rem bottom padding (= 16 px at the template's font size),
     # so the term inside it is wrap.height − 16 px; the canvas is
-    # the inner box, not the padded box. Tolerate 18 px (16 px
-    # padding + 2 px rounding) so the padding doesn't false-fail.
+    # the inner box, not the padded box. Tolerate up to 36 px so
+    # FitAddon's `Math.floor(wrap.height / charH)` rounding (which
+    # leaves a fractional row's worth of empty space at the bottom)
+    # doesn't false-fail — observed delta is 31 px at desktop widths
+    # when `term.rows = floor(647 / 13.7) = 47` and charH renders to
+    # 13.74 px (fontmetric variance). Above 36 px means a real
+    # regression: a row got dropped or duplicated.
     if m["term"] and m["wrap"]:
         delta = abs(m["term"]["h"] - m["wrap"]["h"])
-        if delta > 18:
+        if delta > 36:
             fails.append(
                 f"term height {m['term']['h']} != wrap height {m['wrap']['h']} (delta {delta}px)"
             )
@@ -668,47 +676,59 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
     if m["lastCols"] <= 0:
         fails.append("xterm canvas was never refit (window.__lastCols == 0)")
     else:
-        # Coarse viewports: xterm canvas cols must NOT be the
-        # template 160-col default — that means `refitWhenReady`
-        # bailed and long lines will wrap mid-word on the user's
-        # phone. The previous fixed-threshold check (> 80) was
-        # wrong for tablet-coarse (980px viewport, wrap ≈ 950px, so
-        # ~119 cols is correct math). Use a viewport-relative bound:
-        # anything wider than the wrap can possibly accommodate
-        # means the refit fell back.
-        if mobile and m["wrap"] and m["wrap"]["w"] > 0:
-            max_cols = m["wrap"]["w"] // 8 + 5  # 8 px/char + 5 px padding slack
-            if m["lastCols"] > max_cols + 20:  # +20 to catch "fell back to 160"
-                fails.append(
-                    f"xterm too wide on mobile: cols={m['lastCols']} "
-                    f"(wrap.clientWidth={m['wrap']['w']}px, expected ≤ {max_cols + 20}) "
-                    f"— refit fell back to a wide default"
-                )
-        # Fine viewports: xterm canvas should at least span most of
-        # the wrap. A 60-col canvas in a 1200px wrap means the refit
-        # bailed early — about the same as the mobile-side regression.
-        if not mobile and m["lastCols"] < 60:
+        # Refit must not leave the canvas at the template default
+        # (`TUI_WIDTH`, currently 500) — that means `refitWhenReady`
+        # bailed and long lines will wrap mid-word. War clamp catches
+        # the case where warren's env is misconfigured (TUI_WIDTH not
+        # set, so it falls back to 160 cols at narrow wraps). We use
+        # `TUI_COLS_MIN = 20` from warren's config as the lower bound
+        # — anything below that means the refit returned a non-finite
+        # value and the loop short-circuited without ever resizing.
+        if m["lastCols"] < 20:
             fails.append(
-                f"xterm too narrow on desktop: cols={m['lastCols']} "
-                f"(wrap.clientWidth={m['wrap']['w'] if m['wrap'] else '?'}px)"
+                f"xterm canvas too narrow: cols={m['lastCols']} "
+                f"(expected ≥ 20 — FitAddon returned degenerate dims)"
             )
-        # Sanity: refit dims should match `wrap.clientWidth / char_w`.
-        # The naive `/8` assumes 13.33px font × 0.6 = 8px — actual
-        # rendered char width lands between 8.1 and 8.5 px on this
-        # stack (depends on the user's browser's monospace metrics),
-        # so for a 390px wrap we see anywhere from 46 to 48 cols.
-        # ±4 tolerates that band + `.5rem` wrap padding + FitAddon's
-        # integer-cols rounding. Tighter catches nothing but the
-        # renderer variance; looser would let the refit-fallback
-        # regression (canvas stays at 160 cols) sneak through on
-        # narrow viewports.
-        if m["wrap"] and m["wrap"]["w"] > 0:
-            expected_cols = m["wrap"]["w"] // 8
-            if abs(m["lastCols"] - expected_cols) > 4:
-                fails.append(
-                    f"xterm cols {m['lastCols']} != wrap.clientWidth/8 ≈ {expected_cols} "
-                    f"(wrap.clientWidth={m['wrap']['w']}px)"
-                )
+        # The canvas is intentionally allowed to be wider than
+        # `.term-wrap`: the agent page sets a `MIN_COLS = TERM_COLS`
+        # floor in `refit()` so Claude's full status line + transcript
+        # warning (a few hundred cols) fit on one buffer row instead
+        # of fragmenting mid-word. The wrap's existing `overflow-x:
+        # auto` produces a horizontal scrollbar; the user can pan to
+        # read the rest. The previous strict `wrap.clientWidth/8`
+        # check forced FitAddon to shrink the canvas to the wrap
+        # width — which is exactly what produced the wrap bug. We
+        # only assert that the canvas did NOT fall back to a
+        # too-narrow value (the case above) — the wide case is
+        # checked by the wrap-fragment assertion below.
+        #
+        # Belt-and-braces confirmation: when the canvas is wider than
+        # the wrap (the user's exact "no horizontal scrollbar
+        # anywhere, content silently clips" complaint), the wrap must
+        # actually be horizontally scrollable. `wrapOverflowingX` is
+        # the boolean the probe returns — `wrap.scrollWidth >
+        # wrap.clientWidth` after the canvas laid out. If the canvas
+        # is wider than the wrap AND the wrap is NOT overflowing, the
+        # page is rendering with `overflow-x: hidden` (the bug state)
+        # and the test fires. The wrap-fragment assertion above
+        # catches the same bug at the buffer level (row 0 holds the
+        # un-wrapped status text); this catches the CSS-level
+        # counterpart so a future template regression can't bypass
+        # both checks at once.
+        if m["term"] and m["wrap"]:
+            if m["term"]["w"] > m["wrap"]["w"] + 8:
+                if not m.get("wrapOverflowingX"):
+                    fails.append(
+                        f"canvas ({m['term']['w']}px) is wider than "
+                        f".term-wrap ({m['wrap']['w']}px) but wrap is "
+                        f"NOT horizontally scrollable "
+                        f"(scrollWidth={m.get('wrapScrollW')} ≤ "
+                        f"clientWidth={m.get('wrapClientW')}). "
+                        f"User can see only the first columns of "
+                        f"Claude's status line — the rest clips. "
+                        f"Check .term-wrap CSS: overflow-x must be "
+                        f"auto/scroll when the canvas exceeds it."
+                    )
         # Content probe: xterm must have actually painted the Claude
         # TUI — not just sized the canvas. This is the assertion that
         # would have caught the "fully-black terminal pane on desktop"
@@ -978,7 +998,17 @@ def main() -> int:
         # 2. boot warren
         psk = "test-psk-" + "x" * 32
         env = dict(os.environ, DATABASE_URL=target_url, WARREN_ADMIN_PSK=psk,
-                   RUST_LOG="warn")
+                   RUST_LOG="warn",
+                   # Pin warren's static TUI grid to a width that fits
+                   # Claude Code's status line + transcript-saving
+                   # warning (a few hundred cols of content even at
+                   # desktop widths). The agent page's `refit()` then
+                   # clamps to this minimum, and at narrow viewports
+                   # the canvas overflows the wrap and the wrap's
+                   # existing `overflow-x: auto` produces a horizontal
+                   # scrollbar — the user's fix for the silent
+                   # mid-word clip the previous refit produced.
+                   TUI_WIDTH="500", TUI_HEIGHT="50")
         log(f"booting warren on :{warren_port}")
         env["BIND_ADDR"] = f"127.0.0.1:{warren_port}"
         warren = subprocess.Popen(

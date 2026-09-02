@@ -371,7 +371,16 @@ main.container-fluid > .alert { flex: 0 0 auto; }
     overflow-y: scroll;
     scrollbar-width: thin;
     scrollbar-color: rgba(255,255,255,0.35) transparent;
-    touch-action: pan-y;
+    /* Canvas is wider than the wrap at narrow viewports (the
+       `MIN_COLS = TERM_COLS` floor in `refit()` keeps Claude's full
+       status line on one buffer row). `touch-action: pan-x pan-y`
+       lets the user pan horizontally on the wrap's padding to read
+       the rest of the line — without it, `pan-y` alone consumes the
+       swipe and the horizontal scrollbar is unreachable from touch.
+       The xterm-viewport below still has `touch-action: none` so
+       pans on the canvas itself route to xterm's scrollback; the
+       two scroll regions are disjoint (wrap-padding vs canvas). */
+    touch-action: pan-x pan-y;
   }
   .claude-grid .term-wrap::-webkit-scrollbar { width: 6px; height: 6px; }
   .claude-grid .term-wrap::-webkit-scrollbar-thumb {
@@ -824,10 +833,31 @@ function maybeSendResize() {
     body: { t: 'resize', cols, rows },
   }));
 }
+// Claude Code's TUI paints a wide status line ("⏵⏵ bypass permissions
+// on (shift+tab to cycle) · high effort · tmux focus-events off · add
+// 'set -g focus-events on' to ~/.tmux.conf and reattach for focus
+// tracking") plus a transcript-saving warning, both several hundred
+// columns wide. xterm.js wraps at the cell level, so FitAddon
+// shrinking the canvas to the wrap width fragments these lines mid-word
+// ("h" on one row, "ig" on the next; "keep" / "future" split; etc.).
+// The page had no horizontal scrollbar so the wrapped half silently
+// clipped off the right edge — the user's bug.
+//
+// Fix: don't let FitAddon shrink the canvas below the template-injected
+// `TERM_COLS` (warren's `tui_cols` config; default 160, can be raised
+// via `TUI_WIDTH` up to `TUI_COLS_MAX=500`). Where the resulting canvas
+// is wider than `.term-wrap`, the wrap's existing `overflow-x: auto`
+// produces a horizontal scrollbar and the user can pan to read the full
+// line — far better than the wrap-fragment rendering the bug used to
+// produce. The `TuiConfig` envelope to rabbit and the PTY winsize stay
+// in sync because the refit pushes a Resize envelope after the term
+// resize, so Claude's TUI re-renders at the new wider width and its
+// single logical line lands on one buffer row instead of N.
+const MIN_COLS = TERM_COLS;
 function refit() {
   const dims = fitAddon.proposeDimensions();
   if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
-  const cols = Math.max(2, Math.floor(dims.cols));
+  const cols = Math.max(MIN_COLS, Math.floor(dims.cols));
   const rows = Math.max(1, Math.floor(dims.rows));
   window.__lastCols = cols;
   window.__lastRows = rows;
