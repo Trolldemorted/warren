@@ -129,19 +129,17 @@ body.viewer-mode .mobile-keypad { display: none; }
 }
 body.viewer-mode #viewer-mode-banner { display: block; }
 
-/* TUI grid sizing: the xterm canvas starts at the template-injected
-   TUI_WIDTH/TUI_HEIGHT and then `FitAddon` (see JS below) re-fits it to
-   the actual `.term-wrap` width and pushes a `Resize` envelope to
-   rabbit so the PTY winsize tracks the canvas. `overflow: auto` stays
-   on for the case where the wrap height is shorter than the canvas
-   (landscape phone, very short windows) — the user can pan the wrap
-   to reach the cursor. #term has `height: 100%` so it takes the
-   wrap's flex-computed height rather than self-sizing to its own
-   canvas — without it FitAddon's proposeDimensions() measures a
-   #term whose height equals its own row count (50 rows × 17px ≈
-   850px) and proposes 50 rows regardless of the wrap, so the
-   terminal never shrinks. Width was already fine because `#term` has
-   `width: 100%`. */
+/* TUI grid sizing: FitAddon re-fits the xterm canvas to the wrap and
+   pushes a `Resize` envelope so the PTY winsize tracks the canvas.
+   `#term { height: 100% }` is required so FitAddon measures the wrap,
+   not the canvas's own row count — without it FitAddon proposes 50
+   rows regardless of viewport and the terminal never shrinks.
+   `.term-wrap` is the only horizontal scroll container for the pane;
+   xterm's own `.xterm-viewport` carries the vertical scrollbar for
+   scrollback access (wheel-up). xterm-viewport is a child of the
+   canvas, so its vertical scrollbar visually moves with horizontal
+   scroll — the trade-off for keeping buffer history reachable via
+   the UI. */
 .claude-grid .term-wrap { overflow-x: auto; overflow-y: hidden; min-height: 0; }
 .claude-grid #term { display: block; width: 100%; height: 100%; }
 
@@ -344,74 +342,21 @@ main.container-fluid > .alert { flex: 0 0 auto; }
     margin-top: 0;
   }
   .claude-grid .term-wrap {
-    /* Fills the remaining vertical space below the keypad (which
-       is content-sized — see below). The xterm canvas is taller
-       than any plausible mobile viewport (160×50 × ~13px line-height
-       ≈ 650 px), so the canvas overflows the wrap; `overflow-y:
-       scroll` (not `auto`) keeps a thin vertical scrollbar visible
-       at all times so the user can tell there's more content to
-       scroll through — touch devices hide `auto` scrollbars until
-       the user is actively panning, which left mobile users
-       wondering why their long claude output looked cut off. Width
-       stays `auto` so landscape phones whose canvas is wider than
-       the wrap can still pan horizontally. `touch-action: pan-y`
-       keeps native vertical pan working on the wrap while
-       `.xterm-viewport { touch-action: none }` below routes pans on
-       the xterm canvas to xterm's JS scrollback handler — the two
-       scroll targets serve different purposes (wrap = move the
-       viewport-window into the 50-row buffer; xterm-viewport =
-       scrollback within xterm) and don't race because they live in
-       disjoint touch regions. Without this, the previous 40vh cap
-       clipped the bottom of the buffer (the prompt) and the keypad
-       visually floated up to mid-screen because it stretched to
-       fill the rest. */
+    /* Fills the remaining vertical space below the keypad. The xterm
+       canvas is wider than the wrap at every viewport (MIN_COLS in
+       `refit()` keeps Claude's status line on one buffer row), so
+       `overflow-x: auto` lets the wrap pan horizontally to read the
+       rest of the line. Vertical scrolling is left to xterm-viewport
+       (its scrollbar lives inside the canvas and moves with
+       horizontal scroll — a real annoyance on narrow viewports, but
+       disabling xterm-viewport's overflow also disables wheel-up
+       scrollback access, which the user relies on to reach older
+       rows). */
     flex: 1 1 auto;
     min-height: 0;
-    /* `overflow-x: auto` lets the wrap scroll horizontally when the
-       canvas exceeds it (the `MIN_COLS = TERM_COLS` floor keeps
-       Claude's wide status line on one buffer row). `overflow-y:
-       hidden` is deliberate: xterm-viewport IS the scroll mechanism
-       for terminal content, and letting the wrap also scroll
-       vertically produces a second vertical scrollbar next to
-       xterm's. The canvas can extend below the wrap — the rows that
-       don't fit are still reachable via xterm-viewport's own
-       scrollbar, which is what the user actually wants to see. */
     overflow-x: auto;
     overflow-y: hidden;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255,255,255,0.35) transparent;
-    /* Canvas is wider than the wrap at narrow viewports (the
-       `MIN_COLS = TERM_COLS` floor in `refit()` keeps Claude's full
-       status line on one buffer row). `touch-action: pan-x pan-y`
-       lets the user pan horizontally on the wrap's padding to read
-       the rest of the line — without it, `pan-y` alone consumes the
-       swipe and the horizontal scrollbar is unreachable from touch.
-       The xterm-viewport below still has `touch-action: none` so
-       pans on the canvas itself route to xterm's scrollback; the
-       two scroll regions are disjoint (wrap-padding vs canvas). */
-    touch-action: pan-x pan-y;
   }
-  .claude-grid .term-wrap::-webkit-scrollbar { width: 6px; height: 6px; }
-  .claude-grid .term-wrap::-webkit-scrollbar-thumb {
-    background: rgba(255,255,255,0.35);
-    border-radius: 3px;
-  }
-  /* xterm.js 5.5 has no `touchScrollEnabled` flag — its touchmove
-     handler hardcodes a programmatic `scrollTop += delta` and a
-     `_bubbleScroll` that tries to drive the parent scroll context.
-     With two scrollable parents (this wrap + `.xterm-viewport`), the
-     bubble would race with native pan and produce the glitchy
-     scrollback the user reported. `touch-action: none` on the
-     xterm-viewport keeps all touch inside the canvas going to
-     xterm's JS (its own scrollback handler), while the wrap's
-     `touch-action: pan-y` above routes native vertical pan to the
-     wrap whenever the touch lands on a non-canvas pixel (e.g. the
-     dark background around the canvas). The two scroll regions
-     are disjoint, so there's no race. Trade-off: no inertial
-     momentum after release on the canvas — acceptable for a
-     terminal where users make precise scroll adjustments rather
-     than flicking. */
-  .xterm-viewport { touch-action: none; }
   .claude-grid .mobile-keypad {
     position: static;
     /* Content-sized — only as tall as the six rows + gaps + padding
@@ -907,6 +852,29 @@ if (typeof ResizeObserver !== 'undefined' && termWrap) {
   });
   ro.observe(termWrap);
 }
+// xterm.js's `.xterm-viewport` lives inside `.xterm` (which fills
+// `.term-wrap` and shifts left/right with the wrap's horizontal
+// scroll), so its vertical scrollbar would normally travel off-screen
+// as soon as the user pans right to see overflow content. Counter-
+// translate xterm-viewport by `wrap.scrollLeft` on every scroll event
+// so the scrollbar stays glued to the wrap's right edge regardless of
+// horizontal position. xterm-viewport contains no visible content
+// (it's a scroll container for the buffer; the actual canvas is the
+// sibling `.xterm-screen` which still pans normally), so the translate
+// only moves the scrollbar — not the rendered terminal. The listener
+// is passive so it doesn't block native scroll, and we also re-sync on
+// refit / scrollbar-visibility changes since the wrap's scrollLeft
+// can change without firing a scroll event (programmatic reflow).
+(function pinVerticalScrollbar() {
+  if (!termWrap || !term.element) return;
+  const vp = term.element.querySelector('.xterm-viewport');
+  if (!vp) return;
+  const sync = () => { vp.style.transform = `translateX(${termWrap.scrollLeft}px)`; };
+  termWrap.addEventListener('scroll', sync, { passive: true });
+  vp.addEventListener('scroll', sync, { passive: true });
+  new ResizeObserver(sync).observe(termWrap);
+  sync();
+})();
 // also refit on viewport resize — covers the case where the wrap
 // width is driven by the window (e.g. the user goes from a wide
 // monitor to a narrow laptop screen). ResizeObserver catches most of

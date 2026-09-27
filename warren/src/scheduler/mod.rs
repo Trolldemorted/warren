@@ -432,7 +432,7 @@ pub async fn fire_prompt(
         run.id
     );
 
-    spawn_observation(state.clone(), handle, prompt, prompt_id, run.id, now);
+    spawn_observation(state.clone(), handle, prompt, run.id, now);
 
     Ok(())
 }
@@ -638,12 +638,11 @@ fn spawn_observation(
     state: Arc<AppState>,
     handle: AgentHandle,
     prompt: scheduled_prompt::Model,
-    prompt_id: Uuid,
     run_id: Uuid,
     fired_at: chrono::DateTime<chrono::Utc>,
 ) {
     tokio::spawn(async move {
-        observe(state, handle, prompt, prompt_id, run_id, fired_at).await;
+        observe(state, handle, prompt, run_id, fired_at).await;
     });
 }
 
@@ -651,7 +650,6 @@ async fn observe(
     state: Arc<AppState>,
     handle: AgentHandle,
     prompt: scheduled_prompt::Model,
-    prompt_id: Uuid,
     run_id: Uuid,
     fired_at: chrono::DateTime<chrono::Utc>,
 ) {
@@ -662,7 +660,7 @@ async fn observe(
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {
-                Ok(EnvelopeBody::StopHook { prompt_id: pid, error, .. }) if pid == prompt_id => {
+                Ok(EnvelopeBody::StopHook { error, .. }) => {
                     let now = chrono::Utc::now();
                     let outcome = if error.is_some() { "completed_error" } else { "completed" };
                     if let Err(e) = db_ops::finalize_run(&state.db, run_id, outcome, error.as_deref()).await {
@@ -683,7 +681,7 @@ async fn observe(
                     );
                     return;
                 }
-                Ok(EnvelopeBody::NeedsInput { prompt_id: pid, reason, .. }) if pid == prompt_id => {
+                Ok(EnvelopeBody::NeedsInput { reason, .. }) => {
                     if let Err(e) = handle.interrupt().await {
                         log::error!("scheduler: interrupt on NeedsInput failed: {e:?}");
                     }
@@ -714,6 +712,7 @@ async fn observe(
                     return;
                 }
                 Ok(EnvelopeBody::State(frame)) if frame.state == AgentState::Dead => {
+                    let now = chrono::Utc::now();
                     if let Err(e) = db_ops::finalize_run(
                         &state.db,
                         run_id,
@@ -723,6 +722,13 @@ async fn observe(
                     .await
                     {
                         log::error!("scheduler: finalize Dead failed: {e:?}");
+                    }
+                    if let Err(e) = db_ops::mark_scheduled_prompt_finished(&state.db, prompt.id, now).await {
+                        log::error!("scheduler: mark finished failed: {e:?}");
+                    }
+                    let next = now + chrono::Duration::seconds(prompt.interval_seconds);
+                    if let Err(e) = db_ops::set_next_fire_at(&state.db, prompt.id, next, fired_at).await {
+                        log::error!("scheduler: set_next_fire_at failed: {e:?}");
                     }
                     log::info!(
                         "scheduler: rabbit_offline prompt={} run={}",
@@ -1006,6 +1012,167 @@ mod tests {
     #[test]
     fn missing_scrape_blocks_prompt_both_thresholds_block() {
         assert!(missing_scrape_blocks_prompt(true, true));
+    }
+
+    /// `observe()` must finalize a run on any `StopHook` arriving on
+    /// the agent's meta channel — not just one whose `prompt_id`
+    /// matches a scheduler-minted UUID. Claude assigns its own
+    /// internal `prompt_id` to the turn (`Stop` hook payload field,
+    /// parsed in `rabbit/src/observer/hooks.rs`), independent of
+    /// anything warren sends; the supervisor at
+    /// `rabbit/src/supervisor.rs:2209` drops `Command::Prompt.id`
+    /// when writing to the PTY. Before this guard was removed, every
+    /// `StopHook` failed `pid == prompt_id` and the run row stayed
+    /// at `outcome="fired"` indefinitely while `next_fire_at` stayed
+    /// `NULL`.
+    #[tokio::test]
+    async fn observe_finalizes_run_when_stophook_prompt_id_differs() {
+        let Some(test_state) = build_test_state().await else {
+            eprintln!("skipping observe test: DATABASE_URL not set or DB unreachable");
+            return;
+        };
+
+        let agent_id = Uuid::new_v4();
+        let prompt_uuid = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        agent::ActiveModel {
+            id: Set(agent_id),
+            name: Set(format!("observe-test-{agent_id}")),
+            class: Set("observe-test".into()),
+            kind: Set(None),
+            model: Set("claude".into()),
+            authtoken: Set(format!("test-token-{agent_id}")),
+            ..Default::default()
+        }
+        .insert(&test_state.db)
+        .await
+        .expect("insert agent");
+        scheduled_prompt::ActiveModel {
+            id: Set(prompt_uuid),
+            name: Set(format!("observe-test-prompt-{prompt_uuid}")),
+            scope: Set("agent".into()),
+            target_class: Set(None),
+            target_kind: Set(None),
+            agent_id: Set(Some(agent_id)),
+            prompt_text: Set("x".into()),
+            interval_seconds: Set(60),
+            enabled: Set(true),
+            ignore_inbox_state: Set(false),
+            ignore_pending_forgejo_work: Set(false),
+            weekly_safety_buffer_pct: Set(0),
+            session_safety_buffer_pct: Set(0),
+            context_clear_threshold_tokens: Set(None),
+            additional_labels: Set(Vec::new()),
+            next_fire_at: Set(Some(chrono::Utc::now())),
+            last_fired_at: Set(None),
+            last_finished_at: Set(None),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+        }
+        .insert(&test_state.db)
+        .await
+        .expect("insert prompt");
+        scheduled_prompt_run::ActiveModel {
+            id: Set(run_id),
+            scheduled_prompt_id: Set(prompt_uuid),
+            agent_id: Set(Some(agent_id)),
+            fired_at: Set(chrono::Utc::now()),
+            finished_at: Set(None),
+            outcome: Set("fired".into()),
+            prompt_id: Set(None),
+            outcome_error: Set(None),
+            usage_weekly_pct: Set(None),
+            usage_session_pct: Set(None),
+            usage_context_pct: Set(None),
+            skip_reason: Set(None),
+        }
+        .insert(&test_state.db)
+        .await
+        .expect("insert run");
+
+        let handle = test_state.live.registry.register(agent_id);
+        let handle_for_task = handle.clone();
+        let prompt_after_insert = scheduled_prompt::Entity::find_by_id(prompt_uuid)
+            .one(&test_state.db)
+            .await
+            .unwrap()
+            .unwrap();
+        let fired_at = chrono::Utc::now();
+
+        let observer_state = test_state.clone();
+        let observer = tokio::spawn(async move {
+            observe(
+                Arc::new(observer_state),
+                handle_for_task,
+                prompt_after_insert,
+                run_id,
+                fired_at,
+            )
+            .await;
+        });
+
+        // observe() subscribes on its first line; give it a moment
+        // before publishing so the broadcast reaches its receiver.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Publish a StopHook with a *different* prompt_id — the
+        // exact bug case where Claude's UUID does not equal any
+        // scheduler-minted UUID.
+        handle.publish_meta(EnvelopeBody::StopHook {
+            prompt_id: Uuid::new_v4(),
+            usage: None,
+            error: None,
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), observer)
+            .await
+            .expect("observe did not return after StopHook")
+            .expect("observe task panicked");
+
+        let run_after = scheduled_prompt_run::Entity::find_by_id(run_id)
+            .one(&test_state.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run_after.outcome, "completed",
+            "StopHook with non-matching prompt_id must still finalize the run"
+        );
+        assert!(
+            run_after.finished_at.is_some(),
+            "run.finished_at must be set after StopHook"
+        );
+
+        let prompt_after = scheduled_prompt::Entity::find_by_id(prompt_uuid)
+            .one(&test_state.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            prompt_after.last_fired_at.is_some(),
+            "scheduled_prompt.last_fired_at must be set"
+        );
+        assert!(
+            prompt_after.last_finished_at.is_some(),
+            "scheduled_prompt.last_finished_at must be set"
+        );
+        assert!(
+            prompt_after.next_fire_at.is_some(),
+            "scheduled_prompt.next_fire_at must be set so the schedule re-fires"
+        );
+
+        scheduled_prompt_run::Entity::delete_by_id(run_id)
+            .exec(&test_state.db)
+            .await
+            .expect("delete run");
+        scheduled_prompt::Entity::delete_by_id(prompt_uuid)
+            .exec(&test_state.db)
+            .await
+            .expect("delete prompt");
+        agent::Entity::delete_by_id(agent_id)
+            .exec(&test_state.db)
+            .await
+            .expect("delete agent");
     }
 
     /// Spin up a minimal `AppState` against the test database.
