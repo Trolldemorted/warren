@@ -470,6 +470,29 @@ pub struct TurnDone {
     pub error: Option<String>,
 }
 
+/// `UsageSnapshot::source` values.
+///
+/// Every `Usage` envelope on the meta bus carries a `source`, because
+/// `ctx_*` and the plan-level weekly/session limits arrive from
+/// different places and are NOT interchangeable:
+///
+/// - `TRANSCRIPT` — derived from the transcript tail by the observer.
+///   The supervisor back-fills *cached* `ctx_*` from the last
+///   `CONTEXT_CHECK` so a dashboard panel doesn't show `—` between
+///   scrapes. That makes the `ctx_*` on this envelope **stale by
+///   construction**.
+/// - `USAGE_CHECK` / `CONTEXT_CHECK` — the reply to an explicit
+///   `UsageCheck` / `ContextCheck`, i.e. the only envelopes carrying a
+///   *freshly scraped* value for their fields.
+///
+/// A consumer that makes a decision on the numbers (the scheduler's
+/// `/clear` guard) MUST filter on these. A consumer that just paints a
+/// best-effort panel may take whatever arrives. Conflating the two is
+/// how a stale context reading silently drove a clear/no-clear call.
+pub const USAGE_SOURCE_TRANSCRIPT: &str = "transcript";
+pub const USAGE_SOURCE_USAGE_CHECK: &str = "usage_check";
+pub const USAGE_SOURCE_CONTEXT_CHECK: &str = "context_check";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageSnapshot {
     pub input_tokens: u64,

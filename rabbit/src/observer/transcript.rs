@@ -1,6 +1,6 @@
 use crate::observer::hooks::ObserverHandle;
 use anyhow::Result;
-use rabbit_lib::wire::UsageSnapshot;
+use rabbit_lib::wire::{UsageSnapshot, USAGE_SOURCE_TRANSCRIPT};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -163,7 +163,7 @@ impl TranscriptTail {
                 cache_write,
                 context_pct_est,
                 parse_errors: *parse_errors,
-                source: "transcript".to_string(),
+                source: USAGE_SOURCE_TRANSCRIPT.to_string(),
                 // the transcript JSONL has no
                 // plan-level weekly / session data; the supervisor
                 // populates those fields on the next `Usage` envelope

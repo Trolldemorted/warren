@@ -17,7 +17,8 @@ use parking_lot::Mutex;
 use portable_pty::ChildKiller;
 use rabbit_lib::wire::{
     AgentState, Envelope, EnvelopeBody, LogLine, ScreenSnapshotBody, StateFrame, TermFrame,
-    TermSize, UsageSnapshot, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL,
+    TermSize, UsageSnapshot, TERM_CHAN_CLAUDE, TERM_CHAN_SHELL, USAGE_SOURCE_CONTEXT_CHECK,
+    USAGE_SOURCE_USAGE_CHECK,
 };
 use std::collections::VecDeque;
 use std::io::Write;
@@ -412,7 +413,7 @@ pub async fn run(config: Config) -> Result<()> {
                                         let scrape_incomplete =
                                             !limits.is_empty() && !limits.all_populated();
                                         let snap = UsageSnapshot {
-                                            source: "usage_check".to_string(),
+                                            source: USAGE_SOURCE_USAGE_CHECK.to_string(),
                                             weekly_pct: limits.weekly_pct,
                                             weekly_resets_at: limits.weekly_resets_at,
                                             session_pct: limits.session_pct,
@@ -549,7 +550,7 @@ pub async fn run(config: Config) -> Result<()> {
                                         // the cached snapshot that
                                         // `record_usage()` keeps fresh.
                                         let mut combined = crate::observer::latest_usage();
-                                        combined.source = "context_check".to_string();
+                                        combined.source = USAGE_SOURCE_CONTEXT_CHECK.to_string();
                                         combined.ctx_used_tokens = snap.used_tokens;
                                         combined.ctx_total_tokens = snap.total_tokens;
                                         combined.ctx_used_pct = snap.used_pct;
@@ -597,7 +598,7 @@ pub async fn run(config: Config) -> Result<()> {
                                         // pressed the button; the hint path
                                         // surfaces "no active session".
                                         let mut combined = crate::observer::latest_usage();
-                                        combined.source = "context_check".to_string();
+                                        combined.source = USAGE_SOURCE_CONTEXT_CHECK.to_string();
                                         combined.ctx_scrape_incomplete = true;
                                         combined.scrape_aborted = true;
                                         crate::dispatch::send_or_warn(

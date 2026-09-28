@@ -2,7 +2,9 @@ use crate::db_ops;
 use crate::entity::{scheduled_prompt, scheduled_prompt_run};
 use crate::AppState;
 use rabbit_lib::server::handle::AgentHandle;
-use rabbit_lib::wire::{AgentState, EnvelopeBody};
+use rabbit_lib::wire::{
+    AgentState, EnvelopeBody, UsageSnapshot, USAGE_SOURCE_CONTEXT_CHECK, USAGE_SOURCE_USAGE_CHECK,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
@@ -564,15 +566,14 @@ async fn fetch_fresh_usage(
     need_usage: bool,
     need_context: bool,
 ) -> Option<(Option<f64>, Option<f64>, Option<f64>, Option<u64>)> {
-    // send the envelopes FIRST, then subscribe. The
-    // broadcast carries every Usage/Context envelope the agent emits
-    // since the channel was created — anything stale (operator's
-    // manual /usage, prior fire's reply, a coalesced scrape) would
-    // otherwise be picked up by the merge loop below and accepted
-    // as our scrape result. Subscribing after the send ensures we
-    // only see responses to envelopes we just sent. The supervisor
-    // takes ~500ms to paint the modal before publishing, so there's
-    // no race between `send` and `subscribe`.
+    // Send the envelopes FIRST, then subscribe, so we cannot latch onto
+    // an envelope that was already in flight before we asked. That alone
+    // is not sufficient: the broadcast also carries `transcript` Usage
+    // envelopes published throughout a turn, and the supervisor
+    // back-fills cached `ctx_*` into those, so they are
+    // indistinguishable from a scrape reply by shape. The merge loop
+    // below therefore filters on `UsageSnapshot::source` as well — see
+    // `UsageAccum`.
     if need_usage {
         if let Err(e) = handle.usage_check().await {
             log::error!("scheduler: usage_check send failed: {e:?}");
@@ -597,61 +598,28 @@ async fn fetch_fresh_usage(
         return Some((None, None, None, None));
     }
     let mut rx = handle.subscribe_meta();
-    // the `/usage` envelope reply carries
-    // weekly/session pcts but NOT ctx_* fields. The `/context`
-    // envelope reply carries ctx_used_tokens/pct. We need both for
-    // the auto-clear threshold guard, so we keep reading envelopes
-    // until ctx_used_tokens lands or the timeout fires. Returning on
-    // the first envelope (which is almost always the `/usage` reply)
-    // silently disables the threshold check because ctx_used_tokens
-    // is None.
-    //
-    // the auto-clear guard must NEVER act on a stale or
-    // missing ctx_used_tokens. Bail-out conditions require the
-    // envelope field the caller actually asked for: a `/usage` need
-    // requires weekly_pct; a `/context` need requires ctx_used_tokens;
-    // both needs require both. If the timeout fires with the field
-    // still missing, return `None` so the call site blocks the run
-    // (the operator configured a guardrail — guarding on a stale
-    // value would defeat the purpose).
+    // Absorb only the replies to the two envelopes we just sent. A
+    // `source: "transcript"` envelope is published throughout a turn
+    // and the supervisor back-fills *cached* `ctx_*` into it from the
+    // previous `context_check`, so it looks exactly like a scrape
+    // reply while being last tick's numbers. Latching onto one made
+    // the clear/no-clear decision run on stale data — the scrape we
+    // fired was then never waited for. `UsageAccum` accepts each
+    // field only from the source that actually measured it.
     let result = tokio::time::timeout(timeout_d, async {
-        let mut weekly_pct: Option<f64> = None;
-        let mut session_pct: Option<f64> = None;
-        let mut ctx_used_pct: Option<f64> = None;
-        let mut ctx_used_tokens: Option<u64> = None;
+        let mut acc = UsageAccum::new(need_usage, need_context);
         loop {
             match rx.recv().await {
                 Ok(EnvelopeBody::Usage(snap)) => {
-                    // `/usage` envelopes never populate ctx_* (the
-                    // supervisor's UsageCheck reply builds the snap
-                    // with `..Default::default()`); `/context`
-                    // envelopes populate only ctx_*. Merge whichever
-                    // fields this envelope actually carries so a
-                    // late-arriving `/context` reply fills the
-                    // missing slot.
-                    if snap.weekly_pct.is_some() {
-                        weekly_pct = snap.weekly_pct;
-                    }
-                    if snap.session_pct.is_some() {
-                        session_pct = snap.session_pct;
-                    }
-                    if snap.ctx_used_pct.is_some() {
-                        ctx_used_pct = snap.ctx_used_pct;
-                    }
-                    if snap.ctx_used_tokens.is_some() {
-                        ctx_used_tokens = snap.ctx_used_tokens;
-                    }
-                    // Have we seen the envelopes the caller asked for?
-                    let usage_satisfied = !need_usage || weekly_pct.is_some();
-                    let context_satisfied = !need_context || ctx_used_tokens.is_some();
-                    if usage_satisfied && context_satisfied {
-                        return (weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens);
+                    acc.absorb(&snap);
+                    if acc.satisfied() {
+                        return acc.into_tuple();
                     }
                 }
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    return (weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens);
+                    return acc.into_tuple();
                 }
             }
         }
@@ -665,12 +633,85 @@ async fn fetch_fresh_usage(
         Err(_) => return None,
     };
     let (weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens) = tup;
-    let usage_satisfied = !need_usage || weekly_pct.is_some();
-    let context_satisfied = !need_context || ctx_used_tokens.is_some();
-    if !usage_satisfied || !context_satisfied {
+    if !usage_collected(need_usage, weekly_pct) || !context_collected(need_context, ctx_used_tokens)
+    {
         return None;
     }
     Some((weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens))
+}
+
+fn usage_collected(need_usage: bool, weekly_pct: Option<f64>) -> bool {
+    !need_usage || weekly_pct.is_some()
+}
+
+fn context_collected(need_context: bool, ctx_used_tokens: Option<u64>) -> bool {
+    !need_context || ctx_used_tokens.is_some()
+}
+
+/// Folds `Usage` envelopes into the one set of numbers this scrape asked
+/// for, refusing any field that did not come from the envelope that
+/// measured it.
+///
+/// The two scrapes are disjoint: a `usage_check` reply carries the
+/// plan-level weekly/session limits and no `ctx_*`; a `context_check`
+/// reply carries `ctx_*` (and echoes cached limits, which we ignore —
+/// we already have the authoritative ones from `usage_check`). A
+/// `transcript` envelope carries neither freshly: its limits are
+/// parsed from the transcript and its `ctx_*` are back-filled from the
+/// previous scrape.
+struct UsageAccum {
+    need_usage: bool,
+    need_context: bool,
+    weekly_pct: Option<f64>,
+    session_pct: Option<f64>,
+    ctx_used_pct: Option<f64>,
+    ctx_used_tokens: Option<u64>,
+}
+
+impl UsageAccum {
+    fn new(need_usage: bool, need_context: bool) -> Self {
+        Self {
+            need_usage,
+            need_context,
+            weekly_pct: None,
+            session_pct: None,
+            ctx_used_pct: None,
+            ctx_used_tokens: None,
+        }
+    }
+
+    fn absorb(&mut self, snap: &UsageSnapshot) {
+        if snap.source == USAGE_SOURCE_USAGE_CHECK {
+            if snap.weekly_pct.is_some() {
+                self.weekly_pct = snap.weekly_pct;
+            }
+            if snap.session_pct.is_some() {
+                self.session_pct = snap.session_pct;
+            }
+        }
+        if snap.source == USAGE_SOURCE_CONTEXT_CHECK {
+            if snap.ctx_used_tokens.is_some() {
+                self.ctx_used_tokens = snap.ctx_used_tokens;
+            }
+            if snap.ctx_used_pct.is_some() {
+                self.ctx_used_pct = snap.ctx_used_pct;
+            }
+        }
+    }
+
+    fn satisfied(&self) -> bool {
+        usage_collected(self.need_usage, self.weekly_pct)
+            && context_collected(self.need_context, self.ctx_used_tokens)
+    }
+
+    fn into_tuple(self) -> (Option<f64>, Option<f64>, Option<f64>, Option<u64>) {
+        (
+            self.weekly_pct,
+            self.session_pct,
+            self.ctx_used_pct,
+            self.ctx_used_tokens,
+        )
+    }
 }
 
 fn spawn_observation(
@@ -1037,6 +1078,166 @@ mod tests {
     #[test]
     fn missing_scrape_blocks_prompt_session_only_blocks() {
         assert!(missing_scrape_blocks_prompt(true, false));
+    }
+
+    /// The bug this pins: a `transcript` Usage envelope arrives carrying
+    /// *cached* `ctx_*` back-filled by the supervisor from the previous
+    /// `context_check`. It has the same shape as a scrape reply, so the
+    /// merge used to latch it, declare itself satisfied, and run the
+    /// clear/no-clear decision on last tick's numbers — the fresh
+    /// `/context` we had just fired was never waited for.
+    #[test]
+    fn stale_transcript_ctx_is_not_accepted_as_the_scrape_result() {
+        let mut acc = UsageAccum::new(false, true);
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_TRANSCRIPT.to_string(),
+            ctx_used_tokens: Some(12_000),
+            ctx_used_pct: Some(0.60),
+            ..Default::default()
+        });
+        assert!(
+            !acc.satisfied(),
+            "a transcript envelope must never satisfy a /context need"
+        );
+        assert_eq!(
+            acc.ctx_used_tokens, None,
+            "cached ctx_used_tokens leaked into the clear/no-clear decision"
+        );
+    }
+
+    /// `/context` specifically: a `/usage` reply carries no `ctx_*` at
+    /// all, so it must never stand in for the context scrape. If this
+    /// were allowed through, the clear/no-clear decision would run with
+    /// `ctx_used_tokens = None` (silently "no clear needed") the moment
+    /// the usage scrape landed — which is the exact failure being fixed.
+    #[test]
+    fn usage_reply_never_substitutes_for_the_context_scrape() {
+        let mut acc = UsageAccum::new(true, true);
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_USAGE_CHECK.to_string(),
+            weekly_pct: Some(42.0),
+            ctx_used_tokens: None,
+            ..Default::default()
+        });
+        assert!(
+            !acc.satisfied(),
+            "a /usage reply must not satisfy a pending /context need"
+        );
+        assert!(!context_collected(true, acc.ctx_used_tokens));
+    }
+
+    /// With only a context threshold set, nothing but the `/context`
+    /// reply can unblock the run. Combined with the call site's
+    /// `missing_scrape_blocks_prompt` check, a missing or stale
+    /// `/context` means the prompt is SKIPPED, never fired undecided.
+    #[test]
+    fn context_only_schedule_blocks_until_its_own_reply_lands() {
+        let mut acc = UsageAccum::new(false, true);
+        for src in [
+            rabbit_lib::wire::USAGE_SOURCE_TRANSCRIPT,
+            rabbit_lib::wire::USAGE_SOURCE_USAGE_CHECK,
+        ] {
+            acc.absorb(&UsageSnapshot {
+                source: src.to_string(),
+                weekly_pct: Some(42.0),
+                ctx_used_tokens: Some(150_000),
+                ..Default::default()
+            });
+            assert!(
+                !acc.satisfied(),
+                "`{src}` must not satisfy a context-only schedule"
+            );
+        }
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_CONTEXT_CHECK.to_string(),
+            ctx_used_tokens: Some(150_000),
+            ..Default::default()
+        });
+        assert!(acc.satisfied());
+        assert_eq!(acc.ctx_used_tokens, Some(150_000));
+    }
+
+    /// The real reply must still satisfy the need.
+    #[test]
+    fn context_check_reply_satisfies_the_context_need() {
+        let mut acc = UsageAccum::new(false, true);
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_CONTEXT_CHECK.to_string(),
+            ctx_used_tokens: Some(12_000),
+            ctx_used_pct: Some(0.60),
+            ..Default::default()
+        });
+        assert!(acc.satisfied());
+        assert_eq!(acc.ctx_used_tokens, Some(12_000));
+    }
+
+    /// A stale envelope must not pre-empt the real one, and the real one
+    /// must win even when the stale one arrives first.
+    #[test]
+    fn fresh_reply_wins_when_a_stale_envelope_arrives_first() {
+        let mut acc = UsageAccum::new(true, true);
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_TRANSCRIPT.to_string(),
+            weekly_pct: Some(11.0),
+            ctx_used_tokens: Some(1),
+            ..Default::default()
+        });
+        assert!(!acc.satisfied());
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_USAGE_CHECK.to_string(),
+            weekly_pct: Some(42.0),
+            session_pct: Some(7.0),
+            ..Default::default()
+        });
+        assert!(
+            !acc.satisfied(),
+            "usage alone must not satisfy a /context need"
+        );
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_CONTEXT_CHECK.to_string(),
+            ctx_used_tokens: Some(99_000),
+            ctx_used_pct: Some(0.91),
+            ..Default::default()
+        });
+        assert!(acc.satisfied());
+        let (w, s, p, t) = acc.into_tuple();
+        assert_eq!(w, Some(42.0), "must take limits from the usage_check reply");
+        assert_eq!(s, Some(7.0));
+        assert_eq!(
+            t,
+            Some(99_000),
+            "must take ctx from the context_check reply"
+        );
+        assert_eq!(p, Some(0.91));
+    }
+
+    /// The `context_check` reply echoes cached weekly/session limits (it
+    /// is built from `latest_usage()`). Those must not overwrite the
+    /// authoritative ones from `usage_check`.
+    #[test]
+    fn context_check_reply_cannot_overwrite_fresh_limits() {
+        let mut acc = UsageAccum::new(true, false);
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_USAGE_CHECK.to_string(),
+            weekly_pct: Some(42.0),
+            ..Default::default()
+        });
+        acc.absorb(&UsageSnapshot {
+            source: rabbit_lib::wire::USAGE_SOURCE_CONTEXT_CHECK.to_string(),
+            weekly_pct: Some(1.0),
+            ..Default::default()
+        });
+        assert_eq!(acc.weekly_pct, Some(42.0));
+    }
+
+    /// No thresholds configured → no scrape, no envelope, and the caller
+    /// must not be blocked.
+    #[test]
+    fn no_thresholds_needs_nothing() {
+        let acc = UsageAccum::new(false, false);
+        assert!(acc.satisfied(), "no thresholds means nothing to wait for");
+        assert!(usage_collected(false, None));
+        assert!(context_collected(false, None));
     }
 
     #[test]
