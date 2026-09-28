@@ -366,15 +366,54 @@ pub async fn fire_prompt(
     // the actual model context size. Best-effort: a clear failure is
     // logged but the tick still fires — the operator configured this
     // as a guardrail, not a hard gate.
+    //
+    // claude only treats `/clear` as a slash command when it is the
+    // sole content of an input submission. If the follow-up prompt
+    // bytes (step 4 below) race into the same input line, claude
+    // sees the trailing `\r` from `/clear\r` as just a newline
+    // before the prompt and `/clear` itself never executes. We
+    // subscribe to the meta bus BEFORE issuing the clear so we don't
+    // miss the `Cleared` envelope that rabbit's `dispatch_to_pty`
+    // fans out after `/clear\r` is queued, then block until that
+    // envelope arrives (or the deadline fires). This makes the
+    // `/clear` a dedicated submission — the prompt lands only after
+    // claude has had a turn to ingest `/clear` on its own.
+    const AUTO_CLEAR_DEDICATED_DEADLINE: Duration = Duration::from_secs(2);
     if let Some(threshold) = prompt.context_clear_threshold_tokens {
         if threshold > 0 {
             if let Some(used) = ctx_used_tokens {
                 if used >= threshold as u64 {
+                    let mut cleared_rx = handle.subscribe_meta();
                     if let Err(e) = handle.clear(false).await {
                         log::warn!(
                             "scheduler: auto-clear failed for prompt={} agent={}: {e:?}",
                             prompt.id,
                             agent_id
+                        );
+                    }
+                    let cleared_seen = tokio::time::timeout(AUTO_CLEAR_DEDICATED_DEADLINE, async {
+                        loop {
+                            match cleared_rx.recv().await {
+                                Ok(EnvelopeBody::Cleared { .. }) => return true,
+                                Ok(_) => continue,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue;
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return false;
+                                }
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap_or(false);
+                    if !cleared_seen {
+                        log::warn!(
+                            "scheduler: auto-clear Cleared envelope not seen within {:?} \
+                             for prompt={} agent={}; submitting prompt without dedicated-submission guarantee",
+                            AUTO_CLEAR_DEDICATED_DEADLINE,
+                            prompt.id,
+                            agent_id,
                         );
                     }
                 }
