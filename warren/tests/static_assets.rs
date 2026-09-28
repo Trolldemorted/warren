@@ -29,7 +29,6 @@ fn vendored_xterm_assets_present() {
     let assets = [
         "static/vendor/xterm/xterm.js",
         "static/vendor/xterm/xterm.css",
-        "static/vendor/xterm/xterm-addon-fit.js",
         "static/vendor/xterm/NOTICE",
     ];
     for rel in assets {

@@ -129,11 +129,9 @@ body.viewer-mode .mobile-keypad { display: none; }
 }
 body.viewer-mode #viewer-mode-banner { display: block; }
 
-/* TUI grid sizing: FitAddon re-fits the xterm canvas to the wrap and
-   pushes a `Resize` envelope so the PTY winsize tracks the canvas.
-   `#term { height: 100% }` is required so FitAddon measures the wrap,
-   not the canvas's own row count — without it FitAddon proposes 50
-   rows regardless of viewport and the terminal never shrinks.
+/* TUI grid sizing: claude's grid is static (warren's TUI_WIDTH/TUI_HEIGHT,
+   set at PTY spawn and never changed), so the canvas is always that size
+   and the pane scrolls to fit the viewport. Nothing measures the wrap.
    `.term-wrap` is the only horizontal scroll container for the pane;
    xterm's own `.xterm-viewport` carries the vertical scrollbar for
    scrollback access (wheel-up). xterm-viewport is a child of the
@@ -343,8 +341,7 @@ main.container-fluid > .alert { flex: 0 0 auto; }
   }
   .claude-grid .term-wrap {
     /* Fills the remaining vertical space below the keypad. The xterm
-       canvas is wider than the wrap at every viewport (MIN_COLS in
-       `refit()` keeps Claude's status line on one buffer row), so
+       canvas is always claude's full static width, so
        `overflow-x: auto` lets the wrap pan horizontally to read the
        rest of the line. Vertical scrolling is left to xterm-viewport
        (its scrollbar lives inside the canvas and moves with
@@ -564,7 +561,6 @@ main.container-fluid > .alert { flex: 0 0 auto; }
   </aside>
 </div>
 <script src="/static/vendor/xterm/xterm.js"></script>
-<script src="/static/vendor/xterm/xterm-addon-fit.js"></script>
 <script>
 const agentId = "{{ agent.id }}";
 const grid = document.getElementById('claude-grid');
@@ -740,150 +736,29 @@ function scrollXtermToBottom() {
 }
 scrollXtermToBottom();
 
-// FitAddon sizes the xterm canvas to whatever the .term-wrap actually
-// measures on screen, so the 160-col PTY grid warren starts the session
-// with collapses to whatever fits the visible wrap on a narrow desktop
-// window (the user reported lines like `(esc to interrupt · 7s · timeout
-// 10m)` rendering cut off at the right edge — that was the canvas
-// overflow past the wrap). The same `cols/rows` are pushed to rabbit via
-// the existing `Resize` envelope (server→rabbit `ioctl(TIOCSWINSZ)` +
-// SIGWINCH), so Claude repaints at the new winsize and the next
-// `ScreenSnapshot` reflects the new cols. The PTY's winsize is the
-// single source of truth — no separate browser-side "fake" cols — so
-// snapshot apply stays correct. Re-fit on a `ResizeObserver` callback
-// (wrap width changes when the user resizes the window or toggles the
-// dev-tools panel). 50ms debounce so we don't flood the WS during a
-// drag-resize.
-const fitAddon = new FitAddon.FitAddon();
-term.loadAddon(fitAddon);
-let pendingResize = null;
-let resizeDebounce = null;
-// WebSocket + connection state. Hoisted above `refitWhenReady(20)` so
-// `maybeSendResize()` (called from `refit()` during the early refit
-// loop) does not trip a TDZ throw on `ws` — that throw aborts the
-// script before `connectWs()` ever runs, which is why no WS appears
-// in the browser's devtools. The handlers further down (setConnected,
-// connectWs, onmessage/onclose) only execute on later events, so the
-// forward references to `setConnected`/etc. from those bodies are
-// fine: function declarations are hoisted but their bodies wait.
+// Claude's grid is STATIC. warren's `TUI_WIDTH` / `TUI_HEIGHT` decide it
+// once, at PTY spawn, and rabbit never changes it. The browser renders that
+// exact grid and scrolls it — `.term-wrap` has `overflow-x: auto` for the
+// width and xterm's own `.xterm-viewport` handles the rows. Nothing here
+// measures the wrap, and nothing sends a `Resize` envelope.
+//
+// This is deliberate, not a simplification. A single PTY has exactly one
+// winsize: if browsers could drive it, two viewers at different window sizes
+// would fight over it, each refit firing a `Resize` that re-renders claude
+// for *every* viewer and leaves both looking at a grid sized for whoever
+// resized last. Static means claude renders once and N viewers each scroll
+// their own copy independently.
+//
+// The cost is on small viewports (mobile): a 160x50 grid needs panning.
+// The alternative — fitting the grid to the wrap — fragments Claude's wide
+// status line mid-word, which was the original bug this replaced.
+window.__lastCols = TERM_COLS;
+window.__lastRows = TERM_ROWS;
+
+// WebSocket + connection state.
 let ws = null;
 let wsBackoff = 500;
 let connected = false;
-// Exposed for the layout integration test
-// (`tests/mobile-layout/drive.py`) so the CDP probe can verify xterm
-// was actually resized to the wrap width — without this the test would
-// have to reverse-engineer cols from canvas dimensions, which is
-// fragile. Updated on every successful refit; stays 0 until the first
-// valid `proposeDimensions()` returns.
-window.__lastCols = 0;
-window.__lastRows = 0;
-function maybeSendResize() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  if (!pendingResize) return;
-  const { cols, rows } = pendingResize;
-  pendingResize = null;
-  ws.send(JSON.stringify({
-    v: PROTOCOL_VERSION, seq: 0,
-    body: { t: 'resize', cols, rows },
-  }));
-}
-// Claude Code's TUI paints a wide status line ("⏵⏵ bypass permissions
-// on (shift+tab to cycle) · high effort · tmux focus-events off · add
-// 'set -g focus-events on' to ~/.tmux.conf and reattach for focus
-// tracking") plus a transcript-saving warning, both several hundred
-// columns wide. xterm.js wraps at the cell level, so FitAddon
-// shrinking the canvas to the wrap width fragments these lines mid-word
-// ("h" on one row, "ig" on the next; "keep" / "future" split; etc.).
-// The page had no horizontal scrollbar so the wrapped half silently
-// clipped off the right edge — the user's bug.
-//
-// Fix: don't let FitAddon shrink the canvas below the template-injected
-// `TERM_COLS` (warren's `tui_cols` config; default 160, can be raised
-// via `TUI_WIDTH` up to `TUI_COLS_MAX=500`). Where the resulting canvas
-// is wider than `.term-wrap`, the wrap's existing `overflow-x: auto`
-// produces a horizontal scrollbar and the user can pan to read the full
-// line — far better than the wrap-fragment rendering the bug used to
-// produce. The `TuiConfig` envelope to rabbit and the PTY winsize stay
-// in sync because the refit pushes a Resize envelope after the term
-// resize, so Claude's TUI re-renders at the new wider width and its
-// single logical line lands on one buffer row instead of N.
-const MIN_COLS = TERM_COLS;
-function refit() {
-  const dims = fitAddon.proposeDimensions();
-  if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
-  const cols = Math.max(MIN_COLS, Math.floor(dims.cols));
-  const rows = Math.max(1, Math.floor(dims.rows));
-  window.__lastCols = cols;
-  window.__lastRows = rows;
-  if (cols === term.cols && rows === term.rows) return;
-  term.resize(cols, rows);
-  pendingResize = { cols, rows };
-  maybeSendResize();
-  scrollXtermToBottom();
-}
-// Retry refit until the wrap has its final layout. The single-shot
-// `requestAnimationFrame(refit)` we used previously fired once, but if
-// the wrap was transiently 0×0 (font not laid out, media query still
-// settling, page mid-paint) `fitAddon.proposeDimensions()` returned
-// non-finite dims, `refit()` bailed, and xterm stayed at the template
-// default 160×50. The WS could then deliver a `ScreenSnapshot` before
-// the `ResizeObserver` debounce fired, writing content at 160 cols
-// into a canvas that should have been ~30 cols on a phone — content
-// wrapped character-by-character on the user's mobile. Retrying for up
-// to 20 frames (~320ms) catches any transient-zero state without
-// burning CPU on a permanently broken layout. The `ResizeObserver`
-// and `window.resize` handlers still cover user-driven size changes.
-function refitWhenReady(retries) {
-  if (window.__lastCols > 0) return;  // first successful refit already ran
-  const dims = fitAddon.proposeDimensions();
-  if (dims && Number.isFinite(dims.cols) && Number.isFinite(dims.rows) &&
-      dims.cols >= 2 && dims.rows >= 1) {
-    refit();
-    return;
-  }
-  if (retries > 0) requestAnimationFrame(() => refitWhenReady(retries - 1));
-}
-refitWhenReady(20);
-const termWrap = document.querySelector('.claude-grid .term-wrap');
-if (typeof ResizeObserver !== 'undefined' && termWrap) {
-  const ro = new ResizeObserver(() => {
-    clearTimeout(resizeDebounce);
-    resizeDebounce = setTimeout(refit, 50);
-  });
-  ro.observe(termWrap);
-}
-// xterm.js's `.xterm-viewport` lives inside `.xterm` (which fills
-// `.term-wrap` and shifts left/right with the wrap's horizontal
-// scroll), so its vertical scrollbar would normally travel off-screen
-// as soon as the user pans right to see overflow content. Counter-
-// translate xterm-viewport by `wrap.scrollLeft` on every scroll event
-// so the scrollbar stays glued to the wrap's right edge regardless of
-// horizontal position. xterm-viewport contains no visible content
-// (it's a scroll container for the buffer; the actual canvas is the
-// sibling `.xterm-screen` which still pans normally), so the translate
-// only moves the scrollbar — not the rendered terminal. The listener
-// is passive so it doesn't block native scroll, and we also re-sync on
-// refit / scrollbar-visibility changes since the wrap's scrollLeft
-// can change without firing a scroll event (programmatic reflow).
-(function pinVerticalScrollbar() {
-  if (!termWrap || !term.element) return;
-  const vp = term.element.querySelector('.xterm-viewport');
-  if (!vp) return;
-  const sync = () => { vp.style.transform = `translateX(${termWrap.scrollLeft}px)`; };
-  termWrap.addEventListener('scroll', sync, { passive: true });
-  vp.addEventListener('scroll', sync, { passive: true });
-  new ResizeObserver(sync).observe(termWrap);
-  sync();
-})();
-// also refit on viewport resize — covers the case where the wrap
-// width is driven by the window (e.g. the user goes from a wide
-// monitor to a narrow laptop screen). ResizeObserver catches most of
-// this via wrap width, but a window-resize belt-and-braces keeps it
-// snappy when no observer fires (e.g. the user toggles dev-tools).
-window.addEventListener('resize', () => {
-  clearTimeout(resizeDebounce);
-  resizeDebounce = setTimeout(refit, 50);
-});
 
 // kill the soft keyboard. xterm.js focuses its helper
 // textarea on click — that focus is what summons the Android/iOS
@@ -965,7 +840,6 @@ function writeBinaryFrame(seq, data) {
     pendingFrames.shift();
   }
   term.write(bytesToUtf8(data));
-  framesSinceReset++;
 }
 
 // LatinIME backspace fix. Some Android soft keyboards (LatinIME on
@@ -1152,70 +1026,6 @@ function setBadge(state) {
 // and ships them to rabbit, which feeds the pty master. All admin tabs
 // can type concurrently — the PTY writer actor and kernel FIFO serialize
 // bytes so multi-tab typing just interleaves at the PTY.
-// Detect `/clear\r` typed at the prompt so this tab can reset its
-// xterm locally. The action-button path (warren's Clear button)
-// fans a `Cleared { hard: true }` out from the rabbit supervisor;
-// the typed path goes through raw-bytes via `term.onData` and never
-// reaches that envelope machinery, so claude's TUI is the only thing
-// that gets a chance to clear the screen — and it doesn't reliably
-// emit a screen-clearing sequence on `/clear`, leaving stale
-// transcript cells in the grid until new output overwrites them
-// (the user's "old output stays stuck at the bottom" complaint).
-//
-// Broader case: when the user submits a non-empty prompt while
-// claude is mid-turn, claude surfaces the queued message alongside
-// the next tool result rather than as a fresh turn — and that
-// re-render leaves stale cells from the previous paint. We track
-// recent TUI activity via `framesSinceReset` (incremented in
-// `writeBinaryFrame`) and reset xterm on submit so the re-render
-// paints on a clean grid. The previous approach mirrored
-// `lastAgentState` from the `state` envelope, but the envelope
-// could lag the user's first keystroke and miss the running window.
-// Counting frames locally is synchronous with the user's input and
-// doesn't depend on meta-bus delivery order.
-//
-// Idle submissions with no prior frames don't reset — there's
-// nothing to clear, and the user is already looking at a clean
-// prompt area. Explicit `/clear` (trimmed) always resets, even
-// from idle.
-//
-// Other tabs would still rely on claude's repaint, which is the
-// pre-fix behavior. The reset is tab-local.
-let typedBuffer = '';
-// Counts binary frames Claude has painted since the last reset.
-// Replaces the prior `lastAgentState` mirror (which lagged: the
-// `state` envelope could arrive after the user already typed) and
-// drives the mid-turn reset: a non-empty submit while the TUI has
-// been actively repainting resets xterm so the next paint lands on
-// a clean grid instead of inheriting stale cells. Reset on every
-// `cleared` / `screen_snapshot` apply so the post-reset repaint
-// starts a fresh window.
-let framesSinceReset = 0;
-function pushTypedChar(ch) {
-  if (ch === '\r') {
-    // Claude treats only `\r` as submit. `\n`, `\x1b`, `\t` cancel
-    // or move within the input — not submissions — so drop them as
-    // reset triggers: a stray Esc-prefixed chord shouldn't wipe the
-    // canvas mid-turn.
-    const trimmed = typedBuffer.trim();
-    if (trimmed === '/clear') {
-      term.reset();
-      scrollXtermToBottom();
-    } else if (typedBuffer.length > 0 && framesSinceReset > 0) {
-      term.reset();
-      scrollXtermToBottom();
-    }
-    typedBuffer = '';
-    framesSinceReset = 0;
-  } else if (ch === '\x7f' || ch === '\b') {
-    typedBuffer = typedBuffer.slice(0, -1);
-  } else if (ch >= ' ' && ch <= '~') {
-    typedBuffer += ch;
-    if (typedBuffer.length > 32) typedBuffer = typedBuffer.slice(-32);
-  } else {
-    typedBuffer = '';
-  }
-}
 
 term.onData(data => {
   if (!connected || !ws) return;
@@ -1223,10 +1033,6 @@ term.onData(data => {
   // The server drops them, but skipping the send saves a round trip and
   // means a misconfigured proxy can't log viewer keystrokes.
   if (viewerMode) return;
-  // Per-char scan BEFORE forwarding so the local reset fires in the
-  // same JS tick as the keystroke. The bytes still go to the server
-  // unchanged — claude processes the slash command on its own.
-  for (let i = 0; i < data.length; i++) pushTypedChar(data[i]);
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
@@ -1284,10 +1090,6 @@ let ctrlArmed = false;
 let altArmed = false;
 function sendBytes(bytes) {
   if (!connected || !ws || viewerMode || !bytes || !bytes.length) return;
-  // Route the keypad bytes through `pushTypedChar` so `typedBuffer`
-  // sees mobile input — without this, `/clear` typed on the on-screen
-  // keypad reaches claude's PTY but never triggers the local reset.
-  for (let i = 0; i < bytes.length; i++) pushTypedChar(bytes[i] & 0xff);
   const buf = new Uint8Array(1 + bytes.length);
   buf[0] = MOBILE_CHAN;
   for (let i = 0; i < bytes.length; i++) buf[i + 1] = bytes[i] & 0xff;
@@ -1503,7 +1305,6 @@ function applyMeta(env) {
     case 'cleared':
       if (env.hard) {
         term.reset();
-        framesSinceReset = 0;
       }
       break;
     case 'prompt_rejected':
@@ -1600,7 +1401,6 @@ function applyMeta(env) {
       // every subsequent binary frame writes through to xterm directly.
       pendingFrames = null;
       term.reset();
-      framesSinceReset = 0;
 // `avt::Buffer::text()` returns the
       // *entire* line history (scrollback + visible rows + a trailing
       // empty line), not just the visible portion. Verified empirically
@@ -1609,14 +1409,25 @@ function applyMeta(env) {
       // scroll the visible content up by `text.length - rows` rows, so
       // the user's input ends up far below where the snapshot intended
       // (and lines that exist in both scrollback and the visible area
-      // render twice). `env.rows` is the visible-row count; slice to
-      // the last `rows` entries to get the viewport-only text. The
-      // trailing `'\r\n'` is also dropped — without it, the cursor
+      // render twice). The trailing `'\r\n'` is also dropped — without it, the cursor
       // sits at the end of the last written line, and CSI H below
       // repositions absolutely. With it, the cursor would move one
       // line past the bottom (even with no scrollback), forcing
       // another scroll-up and landing the cursor on a blank row.
-      const visibleRows = Math.max(1, Number(env.rows) || term.rows);
+      //
+      // Two-sided clamp. `env.rows` is the VT's row count, which only
+      // matches `term.rows` once the `Resize` envelope has round-tripped
+      // to the PTY. Addressing a row past the bottom of xterm is exactly
+      // what scrolls the emulator, so the paint is bounded by
+      // `term.rows` from above too; the snapshot then shows the bottom
+      // of the VT instead of overflowing the canvas. `topSkipped` is how
+      // many leading VT rows that truncation drops — `cursor_row` indexes
+      // the full grid, so it has to shift by the same amount or it lands
+      // on the wrong line.
+      const termRows = Math.max(1, Number(term.rows) || 1);
+      const vtRows = Math.max(1, Number(env.rows) || termRows);
+      const visibleRows = Math.min(vtRows, termRows);
+      const topSkipped = vtRows - visibleRows;
       // Prefer the v2 wire shape: one Vec entry per physical row, no
       // merge. avt's `text()` collapses consecutive `wrapped=true`
       // rows into one Vec slot, which loses the wrap-continuation tail
@@ -1634,16 +1445,21 @@ function applyMeta(env) {
       const visible = usePhysical
         ? env.physical_rows.slice(-visibleRows)
         : env.text.slice(-visibleRows);
+      // A row wider than the canvas wraps, and a wrap on the LAST row
+      // scrolls the emulator — so truncate per row even though the row
+      // count above is already bounded.
+      const maxCols = Math.max(1, Number(term.cols) || 1);
       if (usePhysical) {
         for (let i = 0; i < visible.length; i++) {
-          term.write(`\x1b[${i + 1};1H${visible[i]}`);
+          term.write(`\x1b[${i + 1};1H${String(visible[i]).slice(0, maxCols)}`);
         }
       } else {
-        term.write(visible.join('\r\n'));
+        term.write(visible.map(v => String(v).slice(0, maxCols)).join('\r\n'));
       }
-      const effLen = Math.max(1, visible.length);
-      const r = Math.min((env.cursor_row || 0), Math.max(0, effLen - 1)) + 1;
-      const c = (env.cursor_col || 0) + 1;
+      const effLen = Math.max(1, Math.min(visible.length, termRows));
+      const maxRow = Math.max(0, effLen - 1);
+      const r = Math.max(0, Math.min((env.cursor_row || 0) - topSkipped, maxRow)) + 1;
+      const c = Math.max(0, Math.min(env.cursor_col || 0, maxCols - 1)) + 1;
       term.write(`\x1b[${r};${c}H`);
       // Flush the surviving live frames IN ORDER. We rely on each
       // `pendingFrame.data` already being a Uint8Array subview of the
@@ -1679,10 +1495,6 @@ function connectWs() {
 
   ws.onopen = () => {
     wsBackoff = 500;
-    // Flush any deferred fit-driven `Resize` envelope that fired before
-    // the WS was open — common when refit runs in the first rAF tick
-    // and the WS handshake completes milliseconds later.
-    maybeSendResize();
     // Don't flip `connected` to true on the WS handshake alone. The
     // server now holds the WS open indefinitely when no rabbit has
     // registered yet (so the browser doesn't reconnect-loop), but
@@ -1777,7 +1589,6 @@ document.querySelectorAll('button.action').forEach(btn => {
       // cross-tab consistency.
       term.reset();
       scrollXtermToBottom();
-      framesSinceReset = 0;
     }
 // the `/usage` scrape takes ~2s on the rabbit
     // side; debounce the button so an operator mashing it doesn't
@@ -1859,13 +1670,11 @@ function showActionToast(msg, kind = 'info') {
 
 //
 //
-// The TUI grid starts at template-render time from warren's
-// TUI_WIDTH/TUI_HEIGHT env vars, then the browser re-fits it to the
-// visible `.term-wrap` width via `FitAddon` and pushes the new
-// cols/rows to rabbit as a `Resize` envelope — rabbit resizes the PTY
-// (ioctl(TIOCSWINSZ) + SIGWINCH) and Claude repaints. So the canvas
-// always matches the PTY winsize, and `ScreenSnapshot.apply` stays
-// correct. The PTY winsize is still the single source of truth; no
+// The TUI grid is warren's TUI_WIDTH/TUI_HEIGHT, applied once at PTY
+// spawn and never changed; the canvas is constructed at that size and
+// the pane scrolls. So the canvas always matches the PTY winsize, and
+// `ScreenSnapshot.apply` stays correct. The PTY winsize is still the
+// single source of truth; no
 // per-tab virtual cols.
 
 connectWs();

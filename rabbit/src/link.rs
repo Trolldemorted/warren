@@ -335,19 +335,20 @@ impl Link {
                                         if let Ok(env) = serde_json::from_str::<Envelope>(&t) {
             // warren advertises
                                             // the grid right after the hello via this
-                                            // envelope. We capture it into the slot
-                                            // and forward everything else (Ack /
-                                            // state / usage / etc.) through the
-                                            // normal event channel. TuiConfig is a
-                                            // server→rabbit frame, so we never send
-                                            // it outbound — it's purely a sink.
+                                            // envelope. Capture it into the slot, then
+                                            // fall through so the supervisor also sees
+                                            // it — claude's grid is static, so a PTY
+                                            // that spawned before this frame arrived
+                                            // has to be corrected to the advertised
+                                            // size, and every later respawn must reuse
+                                            // it. Ack is consumed here (it only
+                                            // trims the replay ring).
                                             if let EnvelopeBody::TuiConfig { cols, rows } = env.body {
                                                 *self.term_size.lock().expect("term_size poisoned") =
                                                     Some(TermSize { cols, rows });
                                                 log::info!(
                                                     "warren advertised tui grid: {cols}×{rows}"
                                                 );
-                                                continue;
                                             }
                                             if let EnvelopeBody::Ack { ack_seq } = env.body {
                                                 let freed = self.meta_ring.trim_through(ack_seq);

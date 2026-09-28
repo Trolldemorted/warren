@@ -12,10 +12,12 @@ fails.
 The probe catches two specific regressions from the mobile-layout
 "running gag":
 
-  1. xterm FitAddon feedback loop — term.height drift away from
-     wrap.clientHeight.
-  2. Mobile keypad last row clipped on small coarse-pointer
+  1. Mobile keypad last row clipped on small coarse-pointer
      viewports.
+  2. The canvas escaping the pane — claude's grid is static, so the
+     canvas is intentionally wider and/or taller than `.term-wrap`
+     and the wrap scrolls. What must not happen is the *document*
+     overflowing horizontally.
 
 The probe also asserts `matchMedia('(pointer: coarse)')` matches the
 expected pointer for the viewport so a silently ineffective CDP
@@ -235,12 +237,11 @@ PROBE = r"""
       keypadLastRow = text;
     }
   }
-  // The xterm canvas cols/rows as last seen by `refit()` in the
-  // template (or at `term.open()` for the shell template, which
-  // doesn't use FitAddon). Reads `window.__lastCols`/`__lastRows`,
-  // which stay 0 until the first successful refit — that's exactly
-  // the regression we want to catch (the page shipped at 160×50
-  // because the wrap was transiently 0×0 and refit bailed).
+  // The xterm canvas cols/rows, which are claude's static grid
+  // (warren's TUI_WIDTH/TUI_HEIGHT) on both templates — nothing
+  // measures the wrap, so there is no refit and no resize envelope.
+  // A 0 here means the template never set the probe values, i.e. the
+  // canvas construction was broken.
   const lastCols = window.__lastCols || 0;
   const lastRows = window.__lastRows || 0;
   // The .claude-grid gets the .disconnected class server-side if
@@ -734,23 +735,13 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
         fails.append(
             f"horizontal overflow: scrollWidth={m['docScrollW']} > clientWidth={m['docClientW']}"
         )
-    # The FitAddon feedback-loop regression: term grew/shrank to
-    # something other than the wrap. `.term-wrap` has 0.5rem top +
-    # 0.5rem bottom padding (= 16 px at the template's font size),
-    # so the term inside it is wrap.height − 16 px; the canvas is
-    # the inner box, not the padded box. Tolerate up to 36 px so
-    # FitAddon's `Math.floor(wrap.height / charH)` rounding (which
-    # leaves a fractional row's worth of empty space at the bottom)
-    # doesn't false-fail — observed delta is 31 px at desktop widths
-    # when `term.rows = floor(647 / 13.7) = 47` and charH renders to
-    # 13.74 px (fontmetric variance). Above 36 px means a real
-    # regression: a row got dropped or duplicated.
-    if m["term"] and m["wrap"]:
-        delta = abs(m["term"]["h"] - m["wrap"]["h"])
-        if delta > 36:
-            fails.append(
-                f"term height {m['term']['h']} != wrap height {m['wrap']['h']} (delta {delta}px)"
-            )
+    # NOTE: there is deliberately no term-height == wrap-height
+    # assertion here. That one encoded the FitAddon world, where the
+    # canvas was fitted to the wrap. claude's grid is static now, so
+    # the canvas is TERM_ROWS x charH and is routinely taller than
+    # the wrap on a short viewport — `.term-wrap` scrolls. The
+    # equivalent invariant is the horizontal-overflow check above:
+    # the canvas may exceed the wrap, the *document* must not.
     # Coarse viewports with a visible keypad: last row must fit inside
     # the viewport — the original "last row clipped" report. The
     # probe only collects `keypadLastRowBottom` when the keypad is
@@ -786,33 +777,24 @@ def assert_viewport(name: str, m: dict, mobile: bool, measurements: list[dict]) 
                 f"term's row and collapsing the term to minmax(0,1fr) "
                 f"floor). wrap={m['wrap']}"
             )
-    # xterm canvas was actually refit to the wrap. `window.__lastCols`
-    # stays 0 if `refitWhenReady` exhausted its retries without ever
-    # getting valid dims from `fitAddon.proposeDimensions()` — that's
-    # the "desktop page sometimes broken at load" regression, where
-    # xterm ships at the 160×50 template default. We don't check the
-    # *value* of lastCols when 0; we just refuse to silently green a
-    # build that never sized its canvas.
+    # The canvas must be claude's configured grid. claude's grid is
+    # static: a single PTY has one winsize, so a browser that resized
+    # it would fight every other viewer for it. The canvas is built at
+    # TERM_COLS x TERM_ROWS and the pane scrolls.
     if m["lastCols"] <= 0:
-        fails.append("xterm canvas was never refit (window.__lastCols == 0)")
+        fails.append("xterm canvas was never sized (window.__lastCols == 0)")
     else:
-        # Refit must not leave the canvas at the template default
-        # (`TUI_WIDTH`, currently 500) — that means `refitWhenReady`
-        # bailed and long lines will wrap mid-word. War clamp catches
-        # the case where warren's env is misconfigured (TUI_WIDTH not
-        # set, so it falls back to 160 cols at narrow wraps). We use
-        # `TUI_COLS_MIN = 20` from warren's config as the lower bound
-        # — anything below that means the refit returned a non-finite
-        # value and the loop short-circuited without ever resizing.
+        # A grid narrower than warren's own `TUI_COLS_MIN` (20) means
+        # the config is misconfigured — there is no fit to bail out of.
         if m["lastCols"] < 20:
             fails.append(
                 f"xterm canvas too narrow: cols={m['lastCols']} "
-                f"(expected ≥ 20 — FitAddon returned degenerate dims)"
+                f"(expected ≥ 20 — TUI_WIDTH misconfigured)"
             )
         # The canvas is intentionally allowed to be wider than
-        # `.term-wrap`: the agent page sets a `MIN_COLS = TERM_COLS`
-        # floor in `refit()` so Claude's full status line + transcript
-        # warning (a few hundred cols) fit on one buffer row instead
+        # `.term-wrap`: it IS claude's full static grid, so Claude's
+        # status line + transcript warning (a few hundred cols) fit on
+        # one buffer row instead
         # of fragmenting mid-word. The wrap's existing `overflow-x:
         # auto` produces a horizontal scrollbar; the user can pan to
         # read the rest. The previous strict `wrap.clientWidth/8`
@@ -1239,11 +1221,10 @@ def main() -> int:
                 url = f"{base}/agent/{agent_id}/claude"
                 cdp.navigate(url)
                 # wait for the page to settle — xterm or the offline
-                # overlay. 4s gives `refitWhenReady`'s 20-frame
-                # retry loop (~320ms typical, up to ~640ms in
-                # slow-paint cases) time to finish before the WS
-                # `ScreenSnapshot` arrives and writes content into
-                # the canvas.
+                # overlay. The canvas is sized at template-render
+                # time, so there is no refit to wait for; this only
+                # has to outlast the WS handshake and the
+                # `ScreenSnapshot` that paints into the canvas.
                 time.sleep(4.0)
 
                 # First viewport only: advance past claude's

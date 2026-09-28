@@ -111,6 +111,14 @@ impl Pty {
         Ok(())
     }
 
+    /// Current kernel winsize. Callers that need to restore a size they did not
+    /// choose themselves (e.g. the repaint jiggle) must read it here rather than
+    /// cache a spawn-time value, or they will silently undo a later resize.
+    pub fn size(&self) -> Result<(u16, u16)> {
+        let s = self.master.get_size().context("getting pty size")?;
+        Ok((s.cols, s.rows))
+    }
+
     /// Nudge the kernel winsize so a SIGWINCH reaches the child. The kernel
     /// only emits SIGWINCH when the winsize actually changes, so calling
     /// `resize` with the same dimensions twice is a no-op. To force the

@@ -49,9 +49,9 @@ fn assert_terminal_template_contract(name: &str, body: &str) {
         body.contains(r#"<div id="term">"#),
         "[{name}] missing `<div id=\"term\">` — xterm.js has nowhere to mount"
     );
-    // The vendored xterm bundle. Four separate artifacts because the
-    // template loads the CSS + UMD bundle + fit addon via three
-    // different tags. Drop any of them and the canvas goes blank.
+    // The vendored xterm bundle: the CSS + UMD bundle, via two tags.
+    // Drop either and the canvas goes blank. (The fit addon is NOT
+    // loaded — claude's grid is static, so nothing measures the wrap.)
     assert!(
         body.contains(r#"href="/static/vendor/xterm/xterm.css""#),
         "[{name}] missing xterm.css link tag"
@@ -60,15 +60,11 @@ fn assert_terminal_template_contract(name: &str, body: &str) {
         body.contains(r#"src="/static/vendor/xterm/xterm.js""#),
         "[{name}] missing xterm.js script tag"
     );
-    assert!(
-        body.contains(r#"src="/static/vendor/xterm/xterm-addon-fit.js""#),
-        "[{name}] missing xterm-addon-fit.js script tag"
-    );
     // JS constants + constructor — guards against accidental
     // removal of the entire inline `<script>` block.
     assert!(
         body.contains("TERM_COLS"),
-        "[{name}] missing TERM_COLS — FitAddon has no size to apply"
+        "[{name}] missing TERM_COLS — the canvas is built from it"
     );
     assert!(
         body.contains("new Terminal("),
@@ -102,8 +98,8 @@ fn templates_expose_term_for_layout_test() {
     // detect "xterm was sized but never painted anything". Forgetting
     // the `window.term = term` line on the claude template would
     // silently downgrade the suite to dimension-only. The shell
-    // template doesn't expose it (no FitAddon, no probe reads
-    // through `window.term`), so don't pin that side here.
+    // template doesn't expose it (the probe never reads it there),
+    // so don't pin that side here.
     let body = read_template("agent_claude.html");
     assert!(
         body.contains("window.term = term"),
@@ -113,54 +109,47 @@ fn templates_expose_term_for_layout_test() {
     );
 }
 
-/// Catch the "lexical TDZ throw aborts the script before `connectWs()`
-/// runs" regression on the claude page. `refitWhenReady(20)` is invoked
-/// at top level and calls `refit()` → `maybeSendResize()` on the first
-/// valid frame. `maybeSendResize()` reads the module-scoped `ws`/`connected`
-/// bindings. If the `let ws = null;` / `let connected = false;`
-/// declarations sit BELOW the `refitWhenReady(20)` call site, the
-/// script throws `ReferenceError: can't access lexical declaration
-/// 'ws' before initialization` from inside the rAF tick, the whole
-/// `<script>` aborts, and `connectWs()` is never reached — the browser
-/// then opens zero WebSockets and the terminal pane stays fully
-/// black. This test pins the ordering so that exact failure mode can't
-/// silently regress.
+/// Pin the static-grid policy on the claude page.
 ///
-/// The shell template doesn't have this TDZ hazard (no `refitWhenReady`
-/// loop, no `maybeSendResize`), so it's deliberately not pinned here.
+/// A single PTY has exactly one winsize. If the browser could drive it,
+/// two viewers at different window sizes would fight over that winsize:
+/// each refit sends a `Resize` that re-renders claude for *every* viewer
+/// and leaves both looking at a grid sized for whoever resized last. So
+/// claude's grid is warren's `TUI_WIDTH`/`TUI_HEIGHT`, fixed at PTY
+/// spawn, and the browser scrolls it instead of resizing it.
+///
+/// This regressed the other way once: the FitAddon measured the wrap and
+/// pushed cols/rows down to rabbit. That code is gone, and putting it
+/// back would silently reintroduce the multi-viewer fight — which no
+/// other test can catch, because every rendering assertion still passes
+/// against a correct-but-browser-sized grid.
 #[test]
-fn agent_claude_template_declares_ws_state_before_refit_when_ready() {
+fn agent_claude_template_never_drives_the_tui_grid() {
     let body = read_template("agent_claude.html");
-    // Match the call site (`refitWhenReady(20);` with the trailing
-    // semicolon) rather than the bare identifier — the explanatory
-    // comment above the `let ws = null;` block also mentions
-    // `refitWhenReady(20)`, which would otherwise match first and
-    // invert the ordering check.
-    let refit_pos = body
-        .find("refitWhenReady(20);")
-        .expect("agent_claude.html no longer calls `refitWhenReady(20)`");
-    for decl in [
-        "let ws = null;",
-        "let wsBackoff = 500;",
-        "let connected = false;",
+    for banned in [
+        "FitAddon",
+        "term.resize(",
+        "proposeDimensions(",
+        "t: 'resize'",
     ] {
-        let count = body.matches(decl).count();
-        assert_eq!(
-            count, 1,
-            "agent_claude.html must declare `{decl}` exactly once (found {count}). \
-             Multiple declarations cause the second `let` to throw a SyntaxError, \
-             and zero means `ws`/`wsBackoff`/`connected` are accessed before \
-             initialization."
-        );
-        let pos = body.find(decl).unwrap();
         assert!(
-            pos < refit_pos,
-            "agent_claude.html declares `{decl}` at byte offset {pos}, which is \
-             AFTER `refitWhenReady(20)` at byte offset {refit_pos}. \
-             `refitWhenReady` -> `refit` -> `maybeSendResize` reads `ws`/`connected` \
-             in the first rAF tick; if those `let` bindings are still in their \
-             temporal dead zone the script throws and aborts before `connectWs()` \
-             is ever called, leaving the browser with zero WebSockets."
+            !body.contains(banned),
+            "agent_claude.html contains `{banned}` — claude's grid is static \
+             (warren's TUI_WIDTH/TUI_HEIGHT, set at PTY spawn). A browser that \
+             resizes it fights every other viewer over the single PTY winsize."
+        );
+    }
+    for required in [
+        "const TERM_COLS = {{ tui_cols }};",
+        "const TERM_ROWS = {{ tui_rows }};",
+        "cols: TERM_COLS, rows: TERM_ROWS",
+        "window.__lastCols = TERM_COLS;",
+        "window.__lastRows = TERM_ROWS;",
+    ] {
+        assert!(
+            body.contains(required),
+            "agent_claude.html must contain `{required}` — the canvas IS \
+             claude's grid, built from warren's config."
         );
     }
 }

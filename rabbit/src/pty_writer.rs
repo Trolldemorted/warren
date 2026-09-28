@@ -107,10 +107,12 @@ pub enum WriteCmd {
     /// within a few millis instead of waiting out the full
     /// `inter_item_delay`.
     Cancel,
-    /// PTY resize. Currently a no-op on the writer actor; resize
-    /// still goes through the blocking PTY thread's `pty_rx`
-    /// channel for the kernel `TIOCSWINSZ`. Kept as a `WriteCmd`
-    /// variant for symmetry.
+    /// PTY resize. The actor invokes the `ResizeCallback` registered at spawn
+    /// time, which applies the kernel `TIOCSWINSZ` and the in-process VT resize
+    /// as one unit. This is the ONLY path a browser resize may take: the
+    /// blocking PTY thread drains `pty_rx` only between `reader.read()` calls,
+    /// so a resize queued there would be stranded for as long as the child sits
+    /// idle at its prompt.
     Resize { cols: u16, rows: u16 },
 }
 
@@ -670,9 +672,8 @@ mod tests {
 
     /// #4: a `Resize` command
     /// submitted mid-sequence is processed AFTER the in-flight
-    /// sequence completes. The actor's `WriteCmd::Resize` arm is
-    /// a no-op (the actual resize still goes through the
-    /// blocking PTY thread's pty_tx), but its FIFO position
+    /// sequence completes, so the resize cannot land while the
+    /// sequence is still driving the cursor. Its FIFO position
     /// must NOT slice through the sequence. We assert by
     /// ordering: a trailing Bytes arrives AFTER the sequence,
     /// and the actor's drain log proves the Resize was processed

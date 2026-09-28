@@ -453,6 +453,8 @@ components:
             - needs_input_canceled
             - warren_restart
             - rabbit_offline
+            - meta_channel_closed
+            - observation_deadline
             - failed
             - skipped_no_matching_agent
             - skipped_no_idle_agent

@@ -102,6 +102,12 @@ pub async fn run(config: Config) -> Result<()> {
     // refreshed once warren ships the `TuiConfig` envelope, but the
     // shell only ever spawns here — so the initial read is enough.
     let initial_tui = warren_link.term_size();
+    // Last grid size the browser asked for. A crash-respawn re-enters
+    // `spawn_run_one`, which would otherwise reuse the spawn-time size and snap
+    // the PTY back to it while the (never-reloaded) page stays fitted to
+    // whatever it last measured. No fresh `Resize` follows, because `refit()`
+    // early-returns when the browser's own dims haven't changed.
+    let last_tui = Arc::new(Mutex::new(initial_tui));
     {
         tokio::spawn(async move {
             if let Err(e) = warren_link.run().await {
@@ -242,7 +248,10 @@ pub async fn run(config: Config) -> Result<()> {
                 replay_buf.clone(),
                 cmd_tx.clone(),
                 shutdown.clone(),
-                initial_tui,
+                {
+                    let t = *last_tui.lock();
+                    t
+                },
             ) {
                 Ok(sess) => {
                     let OutcomeChannels {
@@ -656,6 +665,7 @@ pub async fn run(config: Config) -> Result<()> {
                                         &cmd_tx,
                                         initial_tui.cols,
                                         initial_tui.rows,
+                                        &last_tui,
                                     )
                                     .await;
                                 }
@@ -1139,10 +1149,7 @@ fn spawn_run_one(
     let resize_vt = vt_arc.clone();
     let resize_callback: Option<crate::pty_writer::ResizeCallback> =
         Some(Arc::new(parking_lot::Mutex::new(Box::new(move |c, r| {
-            if let Err(e) = resize_pty.lock().resize(c, r) {
-                log::warn!("resize callback: pty.resize failed: {e:?}");
-            }
-            resize_vt.lock().resize(c, r);
+            apply_pty_resize(&resize_pty, &resize_vt, c, r);
         }))));
     let writer_handle = crate::pty_writer::spawn_pty_writer(writer_box, resize_callback);
     // Clone for the driver task (consumed by the WriteBack
@@ -1236,13 +1243,15 @@ fn spawn_run_one(
                         }
                     }
                     PtyCmd::Resize { cols, rows } => {
-                        // Resize is driven by the writer actor; this arm is a no-op
-                        // backstop.
-                        let _ = (cols, rows);
-                        log::debug!("PtyCmd::Resize is now a no-op; writer actor handles resizes");
+                        apply_pty_resize(&pty_arc, &vt_arc, cols, rows);
                     }
                     PtyCmd::Repaint { cols, rows } => {
-                        if let Err(e) = pty_arc.lock().jiggle(cols, rows) {
+                        // Jiggle to whatever size the PTY is *currently*, not the
+                        // spawn-time size the caller cached: `jiggle` restores the
+                        // dims it is handed, so restoring stale ones would silently
+                        // undo a browser resize that has since landed.
+                        let target = pty_arc.lock().size().unwrap_or((cols, rows));
+                        if let Err(e) = pty_arc.lock().jiggle(target.0, target.1) {
                             log::warn!("repaint jiggle failed: {e:?}");
                         }
                     }
@@ -2190,6 +2199,27 @@ async fn scrape_one_window(
     }
 }
 
+/// Resize the kernel PTY and the in-process VT as one unit.
+///
+/// Both halves must move together: `ScreenSnapshot` reports `vt`'s dimensions, and
+/// the browser paints that grid. A kernel-side resize without the VT resize (or the
+/// reverse) leaves the snapshot describing a screen the PTY is not driving, which
+/// is how "new lines land in the wrong place" happens.
+///
+/// Lock order is `pty` then `vt` at every call site; keep it that way.
+fn apply_pty_resize(
+    pty: &parking_lot::Mutex<crate::pty::Pty>,
+    vt: &parking_lot::Mutex<crate::vt::TermTracker>,
+    cols: u16,
+    rows: u16,
+) {
+    if let Err(e) = pty.lock().resize(cols, rows) {
+        // A failed TIOCSWINSZ on an exited child is operationally a no-op.
+        log::warn!("pty resize {cols}x{rows} failed: {e:?}");
+    }
+    vt.lock().resize(cols, rows);
+}
+
 async fn dispatch_to_pty(
     env: &Envelope,
     writer: Option<&crate::pty_writer::WriterHandle>,
@@ -2197,6 +2227,7 @@ async fn dispatch_to_pty(
     cmd_tx: &mpsc::Sender<LinkCmd>,
     cols: u16,
     rows: u16,
+    last_tui: &Arc<Mutex<TermSize>>,
 ) {
     // byte-producing commands
     // (Prompt / Slash / Interrupt / Clear) compose their bytes
@@ -2258,15 +2289,36 @@ async fn dispatch_to_pty(
             let _ = input::slash(&mut shim, "clear");
             std::mem::take(&mut out)
         }
-        EnvelopeBody::Resize { cols: rc, rows: rr } => {
-            crate::dispatch::try_send_or_warn(
-                "PtyCmd::Resize",
-                pty_tx,
-                PtyCmd::Resize {
-                    cols: *rc,
-                    rows: *rr,
-                },
-            );
+        // Both frames carry the same intent — claude's grid is whatever warren
+        // says it is. `TuiConfig` is warren's authoritative advertisement and
+        // arrives on every (re)connect; `Resize` is the explicit override. The
+        // browser never sends `Resize` (its grid is static, it scrolls instead),
+        // so in practice this arm exists for `TuiConfig` to correct a PTY that
+        // spawned before the advertisement landed.
+        EnvelopeBody::TuiConfig { cols: rc, rows: rr }
+        | EnvelopeBody::Resize { cols: rc, rows: rr } => {
+            *last_tui.lock() = TermSize {
+                cols: *rc,
+                rows: *rr,
+            };
+            // Primary path is the writer actor, not `pty_tx`: the blocking PTY
+            // thread only drains `pty_rx` between `reader.read()` calls, so an idle
+            // claude prompt (read blocked indefinitely) would strand a resize there
+            // forever. The actor also keeps the resize behind any in-flight
+            // `WriteCmd::Sequence` (e.g. the `/usage` scrape) instead of letting a
+            // TUI re-layout fight the scrape's cursor navigation.
+            if let Some(w) = writer {
+                w.resize(*rc, *rr).await;
+            } else {
+                crate::dispatch::try_send_or_warn(
+                    "PtyCmd::Resize",
+                    pty_tx,
+                    PtyCmd::Resize {
+                        cols: *rc,
+                        rows: *rr,
+                    },
+                );
+            }
             return;
         }
         EnvelopeBody::Repaint => {
@@ -2902,6 +2954,7 @@ mod tests {
         // symmetry. A dropped sender here is fine — the call never
         // touches it.
         let (cmd_tx, _cmd_rx) = mpsc::channel::<LinkCmd>(8);
+        let last_tui = Arc::new(Mutex::new(TermSize { cols: 80, rows: 24 }));
         let _keep_pty_alive = pty; // kept alive across the test
 
         let envelope = Envelope {
@@ -2915,7 +2968,16 @@ mod tests {
         // touching pty_tx (which is empty anyway — proving the path
         // bypassed the channel).
         let started = std::time::Instant::now();
-        super::dispatch_to_pty(&envelope, Some(&writer), &pty_tx, &cmd_tx, 80, 24).await;
+        super::dispatch_to_pty(
+            &envelope,
+            Some(&writer),
+            &pty_tx,
+            &cmd_tx,
+            80,
+            24,
+            &last_tui,
+        )
+        .await;
         let elapsed = started.elapsed();
 
         assert!(
@@ -2961,6 +3023,7 @@ mod tests {
         };
         let (pty_tx, _pty_rx) = mpsc::channel::<PtyCmd>(8);
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<LinkCmd>(8);
+        let last_tui = Arc::new(Mutex::new(TermSize { cols: 80, rows: 24 }));
         let _keep_pty_alive = pty;
 
         let envelope = Envelope {
@@ -2969,7 +3032,16 @@ mod tests {
             body: EnvelopeBody::Clear { hard: false },
         };
 
-        super::dispatch_to_pty(&envelope, Some(&writer), &pty_tx, &cmd_tx, 80, 24).await;
+        super::dispatch_to_pty(
+            &envelope,
+            Some(&writer),
+            &pty_tx,
+            &cmd_tx,
+            80,
+            24,
+            &last_tui,
+        )
+        .await;
 
         // The fix puts a Cleared { hard: true } on the meta plane
         // after the bytes go out. Pull it off cmd_rx and assert the
@@ -4093,5 +4165,253 @@ Context\n\
             "late waiter must observe the cached result"
         );
         assert!(!r.1, "late waiter must see aborted=false");
+    }
+
+    /// Regression for "new lines are not inserted at the correct location".
+    ///
+    /// The browser's FitAddon refits xterm and sends a `Resize` envelope. That
+    /// envelope used to be dropped on the floor: `dispatch_to_pty` pushed it onto
+    /// `pty_tx`, whose receiving arm was a no-op stub, while the `WriterHandle`
+    /// that would actually have resized anything had no production caller at all.
+    /// The PTY and the server-side VT therefore stayed frozen at their spawn size
+    /// for the life of the process, and Claude kept painting a 50-row screen with
+    /// absolute cursor addressing into a much shorter xterm — every write past the
+    /// last row scrolled the emulator, so content drifted and duplicated.
+    ///
+    /// This asserts the whole chain end to end: envelope -> writer actor -> kernel
+    /// winsize -> VT dimensions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn resize_dispatch_resizes_pty_and_vt_via_writer_actor() {
+        use crate::pty::Pty;
+        use crate::vt::TermTracker;
+        use rabbit_lib::wire::{Envelope, EnvelopeBody, PROTOCOL_VERSION};
+
+        let pty = Arc::new(Mutex::new(
+            Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 4096).expect("spawn cat"),
+        ));
+        let vt = Arc::new(Mutex::new(TermTracker::new(80, 24, 5_000)));
+
+        // Register the callback exactly as `spawn_run_one` does.
+        let cb_pty = pty.clone();
+        let cb_vt = vt.clone();
+        let callback: crate::pty_writer::ResizeCallback =
+            Arc::new(Mutex::new(Box::new(move |c, r| {
+                apply_pty_resize(&cb_pty, &cb_vt, c, r)
+            })));
+        let w = pty
+            .lock()
+            .master
+            .take_writer()
+            .map_err(|e| anyhow::anyhow!("take_writer: {e}"))
+            .expect("take_writer");
+        let writer = crate::pty_writer::spawn_pty_writer(w, Some(callback));
+
+        let (pty_tx, mut pty_rx) = mpsc::channel::<PtyCmd>(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<LinkCmd>(8);
+        let last_tui = Arc::new(Mutex::new(TermSize { cols: 80, rows: 24 }));
+
+        let envelope = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 1,
+            body: EnvelopeBody::Resize {
+                cols: 120,
+                rows: 40,
+            },
+        };
+        super::dispatch_to_pty(
+            &envelope,
+            Some(&writer),
+            &pty_tx,
+            &cmd_tx,
+            80,
+            24,
+            &last_tui,
+        )
+        .await;
+
+        // `WriterHandle::resize` awaits the send, not the callback, so poll rather
+        // than sleep for the actor to have run it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let (got_cols, got_rows) = loop {
+            let (c, r) = pty.lock().size().expect("get_size");
+            if c == 120 && r == 40 {
+                break (c, r);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "EnvelopeBody::Resize never reached the kernel winsize: got {c}x{r}, want 120x40"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!((got_cols, got_rows), (120, 40));
+
+        let snap = vt.lock().snapshot();
+        assert_eq!(
+            (snap.cols, snap.rows),
+            (120, 40),
+            "ScreenSnapshot would report a grid the PTY is not driving"
+        );
+
+        assert!(
+            pty_rx.try_recv().is_err(),
+            "resize must not be queued on pty_tx while a writer handle exists"
+        );
+        assert_eq!(
+            *last_tui.lock(),
+            TermSize {
+                cols: 120,
+                rows: 40
+            },
+            "the spawn-size slot must remember the last browser resize"
+        );
+
+        let _ = pty.lock().terminate();
+    }
+
+    /// warren's `TuiConfig` is the authoritative grid and arrives on every
+    /// (re)connect. A PTY that spawned before it landed must be corrected,
+    /// and the cached size is what later respawns reuse — so both halves have
+    /// to move. This is the path that makes claude's grid static *and* correct:
+    /// the browser never resizes, so this frame is the only thing that can
+    /// reconcile a PTY with warren's configured `TUI_WIDTH`/`TUI_HEIGHT`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn tui_config_resizes_pty_and_updates_the_spawn_slot() {
+        use crate::pty::Pty;
+        use crate::vt::TermTracker;
+        use rabbit_lib::wire::{Envelope, EnvelopeBody, PROTOCOL_VERSION};
+
+        let pty = Arc::new(Mutex::new(
+            Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 4096).expect("spawn cat"),
+        ));
+        let vt = Arc::new(Mutex::new(TermTracker::new(80, 24, 5_000)));
+
+        let cb_pty = pty.clone();
+        let cb_vt = vt.clone();
+        let callback: crate::pty_writer::ResizeCallback =
+            Arc::new(Mutex::new(Box::new(move |c, r| {
+                apply_pty_resize(&cb_pty, &cb_vt, c, r)
+            })));
+        let w = pty
+            .lock()
+            .master
+            .take_writer()
+            .map_err(|e| anyhow::anyhow!("take_writer: {e}"))
+            .expect("take_writer");
+        let writer = crate::pty_writer::spawn_pty_writer(w, Some(callback));
+
+        let (pty_tx, _pty_rx) = mpsc::channel::<PtyCmd>(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<LinkCmd>(8);
+        // Seeded to the pre-connection fallback, exactly like `run` does.
+        let last_tui = Arc::new(Mutex::new(TermSize {
+            cols: 160,
+            rows: 50,
+        }));
+
+        let envelope = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 1,
+            body: EnvelopeBody::TuiConfig {
+                cols: 200,
+                rows: 60,
+            },
+        };
+        super::dispatch_to_pty(
+            &envelope,
+            Some(&writer),
+            &pty_tx,
+            &cmd_tx,
+            160,
+            50,
+            &last_tui,
+        )
+        .await;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (c, r) = pty.lock().size().expect("get_size");
+            if c == 200 && r == 60 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "TuiConfig never reached the kernel winsize: got {c}x{r}, want 200x60"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let snap = vt.lock().snapshot();
+        assert_eq!(
+            (snap.cols, snap.rows),
+            (200, 60),
+            "ScreenSnapshot would report a grid the PTY is not driving"
+        );
+        assert_eq!(
+            *last_tui.lock(),
+            TermSize {
+                cols: 200,
+                rows: 60
+            },
+            "a later respawn must reuse the advertised grid, not the fallback"
+        );
+
+        let _ = pty.lock().terminate();
+    }
+
+    /// The no-writer fallback must stay alive: dropping it would silently break
+    /// any caller that has no `WriterHandle`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn resize_dispatch_without_writer_falls_back_to_pty_cmd() {
+        use rabbit_lib::wire::{Envelope, EnvelopeBody, PROTOCOL_VERSION};
+
+        let (pty_tx, mut pty_rx) = mpsc::channel::<PtyCmd>(8);
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<LinkCmd>(8);
+        let last_tui = Arc::new(Mutex::new(TermSize { cols: 80, rows: 24 }));
+
+        let envelope = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 1,
+            body: EnvelopeBody::Resize {
+                cols: 120,
+                rows: 40,
+            },
+        };
+        super::dispatch_to_pty(&envelope, None, &pty_tx, &cmd_tx, 80, 24, &last_tui).await;
+
+        match pty_rx
+            .try_recv()
+            .expect("fallback must enqueue PtyCmd::Resize")
+        {
+            PtyCmd::Resize { cols, rows } => assert_eq!((cols, rows), (120, 40)),
+            other => panic!("expected PtyCmd::Resize, got {other:?}"),
+        }
+    }
+
+    /// The kernel winsize and the VT must always move together — a snapshot that
+    /// describes a screen the PTY is not driving is exactly the failure mode.
+    #[test]
+    fn apply_pty_resize_updates_kernel_winsize_and_vt_together() {
+        use crate::pty::Pty;
+        use crate::vt::TermTracker;
+
+        let pty = Arc::new(Mutex::new(
+            Pty::spawn(
+                "/bin/sh",
+                &["-c".to_string(), "sleep 5".to_string()],
+                ".",
+                80,
+                24,
+                4096,
+            )
+            .expect("spawn sh"),
+        ));
+        let vt = Arc::new(Mutex::new(TermTracker::new(80, 24, 5_000)));
+
+        apply_pty_resize(&pty, &vt, 132, 50);
+
+        assert_eq!(pty.lock().size().expect("get_size"), (132, 50));
+        let snap = vt.lock().snapshot();
+        assert_eq!((snap.cols, snap.rows), (132, 50));
+
+        let _ = pty.lock().terminate();
     }
 }
