@@ -965,6 +965,7 @@ function writeBinaryFrame(seq, data) {
     pendingFrames.shift();
   }
   term.write(bytesToUtf8(data));
+  framesSinceReset++;
 }
 
 // LatinIME backspace fix. Some Android soft keyboards (LatinIME on
@@ -1162,47 +1163,56 @@ function setBadge(state) {
 // (the user's "old output stays stuck at the bottom" complaint).
 //
 // Broader case: when the user submits a non-empty prompt while
-// claude is in the `running` state (mid-turn message injection),
-// claude surfaces the queued message alongside the next tool result
-// rather than as a fresh turn — and that re-render leaves stale
-// cells from the previous paint. Reset xterm locally on submission
-// so the re-render paints on a clean grid. Idle-prompt submissions
-// (state != running) don't trigger: there's nothing to clear, and
-// the user is already looking at a clean prompt area.
+// claude is mid-turn, claude surfaces the queued message alongside
+// the next tool result rather than as a fresh turn — and that
+// re-render leaves stale cells from the previous paint. We track
+// recent TUI activity via `framesSinceReset` (incremented in
+// `writeBinaryFrame`) and reset xterm on submit so the re-render
+// paints on a clean grid. The previous approach mirrored
+// `lastAgentState` from the `state` envelope, but the envelope
+// could lag the user's first keystroke and miss the running window.
+// Counting frames locally is synchronous with the user's input and
+// doesn't depend on meta-bus delivery order.
+//
+// Idle submissions with no prior frames don't reset — there's
+// nothing to clear, and the user is already looking at a clean
+// prompt area. Explicit `/clear` (trimmed) always resets, even
+// from idle.
 //
 // Other tabs would still rely on claude's repaint, which is the
 // pre-fix behavior. The reset is tab-local.
 let typedBuffer = '';
-// Most-recently observed agent state, mirrored from the `state`
-// envelope. Defaults to `idle` so the very first prompt after
-// page-load (before any state envelope has arrived) is treated as
-// an idle submission — no reset, no surprise flicker.
-let lastAgentState = 'idle';
+// Counts binary frames Claude has painted since the last reset.
+// Replaces the prior `lastAgentState` mirror (which lagged: the
+// `state` envelope could arrive after the user already typed) and
+// drives the mid-turn reset: a non-empty submit while the TUI has
+// been actively repainting resets xterm so the next paint lands on
+// a clean grid instead of inheriting stale cells. Reset on every
+// `cleared` / `screen_snapshot` apply so the post-reset repaint
+// starts a fresh window.
+let framesSinceReset = 0;
 function pushTypedChar(ch) {
-  if (ch === '\r' || ch === '\n' || ch === '\x1b' || ch === '\t') {
-    // Line terminator / structural char — check, then clear.
-    if (typedBuffer === '/clear') {
+  if (ch === '\r') {
+    // Claude treats only `\r` as submit. `\n`, `\x1b`, `\t` cancel
+    // or move within the input — not submissions — so drop them as
+    // reset triggers: a stray Esc-prefixed chord shouldn't wipe the
+    // canvas mid-turn.
+    const trimmed = typedBuffer.trim();
+    if (trimmed === '/clear') {
       term.reset();
       scrollXtermToBottom();
-    } else if (typedBuffer.length > 0 && lastAgentState === 'running') {
-      // Mid-turn prompt: claude is going to re-render to surface the
-      // queued message. Reset xterm so the re-render paints on a clean
-      // grid instead of inheriting stale cells from the previous paint.
+    } else if (typedBuffer.length > 0 && framesSinceReset > 0) {
       term.reset();
       scrollXtermToBottom();
     }
     typedBuffer = '';
+    framesSinceReset = 0;
   } else if (ch === '\x7f' || ch === '\b') {
-    // Backspace — pop one printable char.
     typedBuffer = typedBuffer.slice(0, -1);
   } else if (ch >= ' ' && ch <= '~') {
     typedBuffer += ch;
-    // Bounded: /clear is 6 chars; cap at 32 so the buffer stays
-    // tiny without losing detection on slow-typed invocations.
     if (typedBuffer.length > 32) typedBuffer = typedBuffer.slice(-32);
   } else {
-    // Other control char (Ctrl-X, etc.) — clear so a stray Ctrl chord
-    // can't smuggle /clear across a non-line-terminator boundary.
     typedBuffer = '';
   }
 }
@@ -1274,6 +1284,10 @@ let ctrlArmed = false;
 let altArmed = false;
 function sendBytes(bytes) {
   if (!connected || !ws || viewerMode || !bytes || !bytes.length) return;
+  // Route the keypad bytes through `pushTypedChar` so `typedBuffer`
+  // sees mobile input — without this, `/clear` typed on the on-screen
+  // keypad reaches claude's PTY but never triggers the local reset.
+  for (let i = 0; i < bytes.length; i++) pushTypedChar(bytes[i] & 0xff);
   const buf = new Uint8Array(1 + bytes.length);
   buf[0] = MOBILE_CHAN;
   for (let i = 0; i < bytes.length; i++) buf[i + 1] = bytes[i] & 0xff;
@@ -1356,11 +1370,6 @@ function applyMeta(env) {
   switch (t) {
     case 'state':
       setBadge(env.state);
-      // Mirror the agent state into a JS-local var so the typed-input
-      // path can detect mid-turn submissions (state == running at
-      // submit time → reset xterm before claude's re-render paints).
-      // See `lastAgentState` declared above `pushTypedChar`.
-      if (env.state) lastAgentState = env.state;
       if (env.session_id) stateSession.textContent = env.session_id;
 // when the agent leaves Running (turn ends or
       // the session dies), the gate lifts — hide any stale rejection
@@ -1376,11 +1385,6 @@ function applyMeta(env) {
       stateSession.textContent = env.session_id || '—';
       stateVersion.textContent = env.claude_version || '—';
       setBadge(env.state);
-      // `hello` carries the rabbit's first observed state on (re)connect,
-      // so seed `lastAgentState` from it — otherwise the typed-input
-      // path can race the very first state envelope and miss the
-      // `running` window.
-      if (env.state) lastAgentState = env.state;
       break;
     case 'usage':
       if (env.input_tokens != null)  usageIn.textContent = env.input_tokens;
@@ -1497,7 +1501,10 @@ function applyMeta(env) {
       }
       break;
     case 'cleared':
-      if (env.hard) term.reset();
+      if (env.hard) {
+        term.reset();
+        framesSinceReset = 0;
+      }
       break;
     case 'prompt_rejected':
 // surface the bounce with a dedicated banner
@@ -1593,6 +1600,7 @@ function applyMeta(env) {
       // every subsequent binary frame writes through to xterm directly.
       pendingFrames = null;
       term.reset();
+      framesSinceReset = 0;
 // `avt::Buffer::text()` returns the
       // *entire* line history (scrollback + visible rows + a trailing
       // empty line), not just the visible portion. Verified empirically
@@ -1762,6 +1770,15 @@ function bytesToUtf8(bytes) {
 document.querySelectorAll('button.action').forEach(btn => {
   btn.addEventListener('click', async () => {
     const action = btn.dataset.action;
+    if (action === 'clear') {
+      // Instant local reset so the user sees a clean canvas before
+      // the server's `Cleared` envelope arrives on the meta bus.
+      // The server fan-out remains the durable guarantee for
+      // cross-tab consistency.
+      term.reset();
+      scrollXtermToBottom();
+      framesSinceReset = 0;
+    }
 // the `/usage` scrape takes ~2s on the rabbit
     // side; debounce the button so an operator mashing it doesn't
     // queue four scrapes back-to-back. 2.5s leaves a small margin
