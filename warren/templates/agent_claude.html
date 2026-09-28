@@ -1151,12 +1151,72 @@ function setBadge(state) {
 // and ships them to rabbit, which feeds the pty master. All admin tabs
 // can type concurrently — the PTY writer actor and kernel FIFO serialize
 // bytes so multi-tab typing just interleaves at the PTY.
+// Detect `/clear\r` typed at the prompt so this tab can reset its
+// xterm locally. The action-button path (warren's Clear button)
+// fans a `Cleared { hard: true }` out from the rabbit supervisor;
+// the typed path goes through raw-bytes via `term.onData` and never
+// reaches that envelope machinery, so claude's TUI is the only thing
+// that gets a chance to clear the screen — and it doesn't reliably
+// emit a screen-clearing sequence on `/clear`, leaving stale
+// transcript cells in the grid until new output overwrites them
+// (the user's "old output stays stuck at the bottom" complaint).
+//
+// Broader case: when the user submits a non-empty prompt while
+// claude is in the `running` state (mid-turn message injection),
+// claude surfaces the queued message alongside the next tool result
+// rather than as a fresh turn — and that re-render leaves stale
+// cells from the previous paint. Reset xterm locally on submission
+// so the re-render paints on a clean grid. Idle-prompt submissions
+// (state != running) don't trigger: there's nothing to clear, and
+// the user is already looking at a clean prompt area.
+//
+// Other tabs would still rely on claude's repaint, which is the
+// pre-fix behavior. The reset is tab-local.
+let typedBuffer = '';
+// Most-recently observed agent state, mirrored from the `state`
+// envelope. Defaults to `idle` so the very first prompt after
+// page-load (before any state envelope has arrived) is treated as
+// an idle submission — no reset, no surprise flicker.
+let lastAgentState = 'idle';
+function pushTypedChar(ch) {
+  if (ch === '\r' || ch === '\n' || ch === '\x1b' || ch === '\t') {
+    // Line terminator / structural char — check, then clear.
+    if (typedBuffer === '/clear') {
+      term.reset();
+      scrollXtermToBottom();
+    } else if (typedBuffer.length > 0 && lastAgentState === 'running') {
+      // Mid-turn prompt: claude is going to re-render to surface the
+      // queued message. Reset xterm so the re-render paints on a clean
+      // grid instead of inheriting stale cells from the previous paint.
+      term.reset();
+      scrollXtermToBottom();
+    }
+    typedBuffer = '';
+  } else if (ch === '\x7f' || ch === '\b') {
+    // Backspace — pop one printable char.
+    typedBuffer = typedBuffer.slice(0, -1);
+  } else if (ch >= ' ' && ch <= '~') {
+    typedBuffer += ch;
+    // Bounded: /clear is 6 chars; cap at 32 so the buffer stays
+    // tiny without losing detection on slow-typed invocations.
+    if (typedBuffer.length > 32) typedBuffer = typedBuffer.slice(-32);
+  } else {
+    // Other control char (Ctrl-X, etc.) — clear so a stray Ctrl chord
+    // can't smuggle /clear across a non-line-terminator boundary.
+    typedBuffer = '';
+  }
+}
+
 term.onData(data => {
   if (!connected || !ws) return;
 // don't even *send* typed bytes to the WS.
   // The server drops them, but skipping the send saves a round trip and
   // means a misconfigured proxy can't log viewer keystrokes.
   if (viewerMode) return;
+  // Per-char scan BEFORE forwarding so the local reset fires in the
+  // same JS tick as the keystroke. The bytes still go to the server
+  // unchanged — claude processes the slash command on its own.
+  for (let i = 0; i < data.length; i++) pushTypedChar(data[i]);
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
@@ -1296,6 +1356,11 @@ function applyMeta(env) {
   switch (t) {
     case 'state':
       setBadge(env.state);
+      // Mirror the agent state into a JS-local var so the typed-input
+      // path can detect mid-turn submissions (state == running at
+      // submit time → reset xterm before claude's re-render paints).
+      // See `lastAgentState` declared above `pushTypedChar`.
+      if (env.state) lastAgentState = env.state;
       if (env.session_id) stateSession.textContent = env.session_id;
 // when the agent leaves Running (turn ends or
       // the session dies), the gate lifts — hide any stale rejection
@@ -1311,6 +1376,11 @@ function applyMeta(env) {
       stateSession.textContent = env.session_id || '—';
       stateVersion.textContent = env.claude_version || '—';
       setBadge(env.state);
+      // `hello` carries the rabbit's first observed state on (re)connect,
+      // so seed `lastAgentState` from it — otherwise the typed-input
+      // path can race the very first state envelope and miss the
+      // `running` window.
+      if (env.state) lastAgentState = env.state;
       break;
     case 'usage':
       if (env.input_tokens != null)  usageIn.textContent = env.input_tokens;

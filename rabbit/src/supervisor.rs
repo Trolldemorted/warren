@@ -653,6 +653,7 @@ pub async fn run(config: Config) -> Result<()> {
                                         &env,
                                         active_writer.as_ref(),
                                         tx,
+                                        &cmd_tx,
                                         initial_tui.cols,
                                         initial_tui.rows,
                                     )
@@ -2193,6 +2194,7 @@ async fn dispatch_to_pty(
     env: &Envelope,
     writer: Option<&crate::pty_writer::WriterHandle>,
     pty_tx: &mpsc::Sender<PtyCmd>,
+    cmd_tx: &mpsc::Sender<LinkCmd>,
     cols: u16,
     rows: u16,
 ) {
@@ -2293,6 +2295,25 @@ async fn dispatch_to_pty(
             // task is alive once pty_tx has been wired.
             crate::dispatch::send_or_warn("PtyCmd::Write", pty_tx, PtyCmd::Write(bytes)).await;
         }
+    }
+    // After /clear\r lands at claude, fan out a `Cleared { hard: true }`
+    // so the browser resets xterm. Claude's TUI does not reliably
+    // issue a screen-clearing sequence on /clear — the in-memory
+    // conversation context is wiped, but the terminal grid keeps the
+    // old transcript cells in place until something overwrites them.
+    // term.reset() on the receiving end wipes both the visible rows
+    // and the scrollback so a fresh prompt lands cleanly. Emitting
+    // after the bytes are queued keeps the meta envelope in flight
+    // close to the `/clear\r` echo so a fast claude repaint (which
+    // races the binary frames) is still cleared by the time the
+    // user sees the screen.
+    if matches!(&env.body, EnvelopeBody::Clear { .. }) {
+        crate::dispatch::send_or_warn(
+            "LinkCmd::SendMeta(Cleared)",
+            cmd_tx,
+            LinkCmd::SendMeta(Box::new(EnvelopeBody::Cleared { hard: true })),
+        )
+        .await;
     }
 }
 
@@ -2876,6 +2897,11 @@ mod tests {
         // `dispatch_to_pty` still takes a `pty_tx` for Resize/Repaint;
         // we don't exercise those here so the channel can stay empty.
         let (pty_tx, _pty_rx) = mpsc::channel::<PtyCmd>(8);
+        // `cmd_tx` is unused by the Interrupt arm (only Clear fires
+        // the meta fan-out), but dispatch_to_pty takes it for
+        // symmetry. A dropped sender here is fine — the call never
+        // touches it.
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<LinkCmd>(8);
         let _keep_pty_alive = pty; // kept alive across the test
 
         let envelope = Envelope {
@@ -2889,7 +2915,7 @@ mod tests {
         // touching pty_tx (which is empty anyway — proving the path
         // bypassed the channel).
         let started = std::time::Instant::now();
-        super::dispatch_to_pty(&envelope, Some(&writer), &pty_tx, 80, 24).await;
+        super::dispatch_to_pty(&envelope, Some(&writer), &pty_tx, &cmd_tx, 80, 24).await;
         let elapsed = started.elapsed();
 
         assert!(
@@ -2905,6 +2931,66 @@ mod tests {
         // harness reaping the process via SIGTERM when the parent
         // exits — `/bin/cat` doesn't outlive the test in our tokio
         // test harness.)
+    }
+
+    /// Regression for the "claude page output is unreliable" bug:
+    /// the Clear button typed `/clear\r` into Claude, but Claude's
+    /// TUI does not reliably issue a screen-clearing sequence on
+    /// `/clear` — the conversation context is reset, yet the terminal
+    /// grid keeps the old transcript cells in place until something
+    /// overwrites them. The fix: after dispatching `/clear\r` to the
+    /// PTY, fan out a `Cleared { hard: true }` over `cmd_tx` so the
+    /// browser can `term.reset()` its xterm and the user sees a
+    /// freshly-painted prompt instead of stale cells hanging at the
+    /// bottom.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn clear_dispatch_emits_cleared_envelope_for_browser_reset() {
+        use crate::pty::Pty;
+        use rabbit_lib::wire::{Envelope, EnvelopeBody, PROTOCOL_VERSION};
+
+        let mut pty = Pty::spawn("/bin/cat", &[], "/tmp", 80, 24, 4096).expect("spawn cat");
+        assert!(pty.alive(), "cat must be alive and waiting for input");
+
+        let writer = {
+            let w = pty
+                .master
+                .take_writer()
+                .map_err(|e| anyhow::anyhow!("take_writer: {e}"))
+                .expect("take_writer");
+            crate::pty_writer::spawn_pty_writer(w, None)
+        };
+        let (pty_tx, _pty_rx) = mpsc::channel::<PtyCmd>(8);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<LinkCmd>(8);
+        let _keep_pty_alive = pty;
+
+        let envelope = Envelope {
+            v: PROTOCOL_VERSION,
+            seq: 1,
+            body: EnvelopeBody::Clear { hard: false },
+        };
+
+        super::dispatch_to_pty(&envelope, Some(&writer), &pty_tx, &cmd_tx, 80, 24).await;
+
+        // The fix puts a Cleared { hard: true } on the meta plane
+        // after the bytes go out. Pull it off cmd_rx and assert the
+        // shape — anything else (extra / missing envelopes) is a
+        // regression in either direction.
+        let msg = cmd_rx
+            .try_recv()
+            .expect("Clear arm must enqueue a Cleared envelope");
+        match msg {
+            LinkCmd::SendMeta(body) => match *body {
+                EnvelopeBody::Cleared { hard } => {
+                    assert!(hard, "browser reset must request a hard clear");
+                }
+                other => panic!("expected EnvelopeBody::Cleared, got {other:?}"),
+            },
+            other => panic!("expected LinkCmd::SendMeta, got {other:?}"),
+        }
+        assert!(
+            cmd_rx.is_empty(),
+            "Clear arm must enqueue exactly one meta envelope"
+        );
     }
 
     /// Regression: a stream of single-byte terminal writes — exactly
