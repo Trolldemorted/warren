@@ -109,6 +109,55 @@ fn templates_expose_term_for_layout_test() {
     );
 }
 
+/// The snapshot apply must not wipe the buffer.
+///
+/// `Terminal.reset()` is a full RIS: it clears the scrollback as well as
+/// the screen. The server flushes the replay ring before requesting a
+/// `ScreenSnapshot`, so by the time the snapshot lands the canvas holds
+/// this session's output *and its scrollback*. Resetting left the buffer
+/// exactly `rows` tall, so `scrollHeight == clientHeight` and the pane
+/// had no scroll range — a fresh navigation could not scroll up at all.
+///
+/// The apply repaints row-by-row with absolute addressing plus `\x1b[2K`
+/// (erase line) instead, which corrects the visible grid while leaving
+/// everything above row 1 intact.
+#[test]
+fn screen_snapshot_apply_preserves_scrollback() {
+    let body = read_template("agent_claude.html");
+    let start = body
+        .find("case 'screen_snapshot':")
+        .expect("agent_claude.html no longer handles screen_snapshot");
+    let end = body[start..]
+        .find("function connectWs()")
+        .map(|i| start + i)
+        .unwrap_or(body.len());
+    // Strip comments: several notes in this file mention the reset this
+    // arm used to do, and a prose mention is not a call.
+    let arm = body[start..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !arm.contains("term.reset()"),
+        "the screen_snapshot arm must not call term.reset() — it wipes the \
+         scrollback the replay buffer just rebuilt, leaving the pane with no \
+         scroll range at all"
+    );
+    assert!(
+        arm.contains("\\x1b[2K"),
+        "snapshot rows must be erased before repaint (\\x1b[2K), otherwise a \
+         blank snapshot row leaves the replayed cell in place"
+    );
+    // Guard: warn when the snapshot lands on an already-populated canvas.
+    assert!(
+        arm.contains("lastWrittenSeq > 0") && arm.contains("console.warn"),
+        "the snapshot apply must warn when it repaints over frames that were \
+         already written, so an unexpected screen repaint is correlatable"
+    );
+}
+
 /// Pin the static-grid policy on the claude page.
 ///
 /// A single PTY has exactly one winsize. If the browser could drive it,

@@ -806,7 +806,10 @@ let pendingFrames = []; // null after first snapshot apply
 // Highest seq xterm has actually written on the Claude channel since
 // this page loaded. Survives WS reconnects — `connectWs` does not
 // reset it — so a stale `ScreenSnapshot` whose `after_seq` is below
-// this watermark can be dropped without `term.reset()`. The server
+// this watermark can be dropped without repainting. It also tells the
+// snapshot apply whether the replay buffer already put this session's
+// output on the canvas (see the guard in the `screen_snapshot` case).
+// The server
 // only requests one snapshot per session (gated by
 // `try_mark_first_browser_snapshot` in rabbit-lib), but the rabbit
 // → warren link's bounded meta ring can still replay unacked frames
@@ -1329,7 +1332,7 @@ function applyMeta(env) {
       //   1. trim any buffered live binary frames whose seq ≤
       //      `env.after_seq` (rabbit already folded those bytes into
       //      the snapshot grid, so re-applying them would paint
-      //      stale rows on top of the freshly reset xterm);
+      //      stale rows on top of the snapshot's authoritative grid);
       //   2. apply the snapshot, then re-write the still-relevant
       //      live frames in seq order so the user sees the snapshot's
       //      authoritative state with no flicker or "discarded
@@ -1346,9 +1349,9 @@ function applyMeta(env) {
       // every byte xterm has drawn. A late snapshot whose
       // `after_seq < lastWrittenSeq` reflects older PTY state — it
       // carries no information the user doesn't already see, and
-      // re-applying would `term.reset()` and paint over in-progress
-      // bytes that haven't been typed into a `pendingFrame` (they
-      // went straight to xterm). Drop it silently; the next genuine
+      // re-applying would repaint over in-progress bytes that
+      // haven't been typed into a `pendingFrame` (they went straight
+      // to xterm). Drop it silently; the next genuine
       // snapshot — when rabbit's modal `/usage`/`/context` cleanup
       // publishes one with `after_seq ≥ lastWrittenSeq` — still
       // applies normally. Skipping this guard produced the
@@ -1367,7 +1370,7 @@ function applyMeta(env) {
 // the late-join snapshot has
         // no paintable content (e.g. claude is mid-turn and the
         // scrollback is still being populated, or the visible rows
-        // are all whitespace). Skipping the term.reset() preserves
+        // are all whitespace). Skipping the apply preserves
         // whatever xterm already drew — but the binary-frame gate
         // must still be dropped here, otherwise every subsequent
         // frame keeps piling into `pendingFrames` (capped at
@@ -1400,7 +1403,21 @@ function applyMeta(env) {
       // server-side — fired right after the replay-buffer flush), so
       // every subsequent binary frame writes through to xterm directly.
       pendingFrames = null;
-      term.reset();
+      // Guard: a snapshot that lands on top of bytes we already have is
+      // painting over a live screen. `lastWrittenSeq > 0` means the
+      // replay buffer delivered this session's output first, so that
+      // output — and the scrollback it built — is on the canvas. The
+      // reset this used to do was a full RIS: it wiped the buffer, so
+      // the buffer ended up exactly `rows` tall, `scrollHeight` equalled
+      // `clientHeight`, and the pane had no scroll range at all. A fresh
+      // navigation could not scroll up at all. Warn so an operator who
+      // sees the screen repaint unexpectedly can correlate it.
+      if (lastWrittenSeq > 0) {
+        console.warn(
+          'warren: ScreenSnapshot applied over ' + lastWrittenSeq +
+          ' already-written frame(s); repainting rows in place to preserve scrollback'
+        );
+      }
 // `avt::Buffer::text()` returns the
       // *entire* line history (scrollback + visible rows + a trailing
       // empty line), not just the visible portion. Verified empirically
@@ -1449,12 +1466,16 @@ function applyMeta(env) {
       // scrolls the emulator — so truncate per row even though the row
       // count above is already bounded.
       const maxCols = Math.max(1, Number(term.cols) || 1);
-      if (usePhysical) {
-        for (let i = 0; i < visible.length; i++) {
-          term.write(`\x1b[${i + 1};1H${String(visible[i]).slice(0, maxCols)}`);
-        }
-      } else {
-        term.write(visible.map(v => String(v).slice(0, maxCols)).join('\r\n'));
+      // Repaint in place, one row at a time: absolute address + EL-2
+      // (erase entire line) + the row's text. `\x1b[2K` is what lets a
+      // blank snapshot row clear whatever the replay left there, without
+      // touching anything above row 1. Writing an empty string at a row
+      // address would only move the cursor, leaving stale cells behind.
+      // The legacy `text` path gets the same treatment — it was writing
+      // a joined blob from row 1 with no erase at all, so it relied on
+      // the reset this used to do and was just as destructive.
+      for (let i = 0; i < visible.length; i++) {
+        term.write(`\x1b[${i + 1};1H\x1b[2K${String(visible[i]).slice(0, maxCols)}`);
       }
       const effLen = Math.max(1, Math.min(visible.length, termRows));
       const maxRow = Math.max(0, effLen - 1);
@@ -1468,11 +1489,12 @@ function applyMeta(env) {
       for (const f of keep) {
         term.write(bytesToUtf8(f.data));
       }
-      // term.reset() and the CSI writes above leave xterm's internal
-      // viewport at scrollTop=0 (top of the new buffer). Auto-scroll
-      // back to the bottom so the prompt lands in the wrap's visible
-      // area — without this the user sees the top of the snapshot and
-      // has to pan to find the prompt.
+      // The absolute row addressing above leaves xterm's internal
+      // viewport wherever the replay left it. Pin to the bottom so the
+      // prompt lands in the wrap's visible area — without this the user
+      // sees the top of the screen and has to pan to find the prompt.
+      // This is a pin, not a clamp: the scrollback above stays
+      // reachable, which is the whole point of not resetting.
       scrollXtermToBottom();
       break;
   }
