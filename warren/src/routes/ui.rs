@@ -484,6 +484,17 @@ async fn agents_page(
                 // with a short TTL if it ever becomes a hot path.
                 let claimable_labels =
                     crate::forgejo::resolve_claimable_labels(&[], &a.claimable_labels, &a.class);
+                // Which label actually reaches Forgejo for this agent, and
+                // which fallback produced it. The `[]`-override call means a
+                // blank `claimable_labels` silently falls through to the
+                // class, which then matches nothing.
+                log::debug!(
+                    "forgejo: agents page agent {} ({}) claimable_labels={:?} -> resolved={:?}",
+                    a.id,
+                    a.name,
+                    a.claimable_labels,
+                    claimable_labels
+                );
                 let ((unclaimed_issues_items, unclaimed_prs_items), unclaimed_errors) =
                     crate::forgejo::unclaimed_work_items_for_agent(
                         &state.db,

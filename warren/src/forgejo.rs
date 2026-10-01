@@ -233,6 +233,15 @@ pub async fn fetch_unblocked_unassigned_with_label(
         .await
         .map_err(|e| AppError::from(e).with_url(&issues_url))?;
 
+    // Per-stage accounting. Each drop below is silent by default, so a
+    // count that looks wrong on the agents page gives no way to tell which
+    // filter took the issues. The summary line at the end is the one to
+    // grep when a count looks wrong.
+    let fetched = issues.len();
+    let mut dropped_assigned: Vec<i64> = Vec::new();
+    let mut dropped_blocked: Vec<i64> = Vec::new();
+    let mut kept: Vec<i64> = Vec::new();
+
     let mut issue_items = Vec::new();
     let mut pr_items = Vec::new();
     for issue in issues {
@@ -243,6 +252,9 @@ pub async fn fetch_unblocked_unassigned_with_label(
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
         {
+            if let Some(n) = issue.number {
+                dropped_assigned.push(n);
+            }
             continue;
         }
         let number = match issue.number {
@@ -267,8 +279,29 @@ pub async fn fetch_unblocked_unassigned_with_label(
             }
         };
         if deps_have_open(&deps) {
+            // Name the blockers. "it has dependencies" is not a diagnosis,
+            // especially when the blocker is stale or self-referential and
+            // will never close.
+            let blockers: Vec<String> = deps
+                .iter()
+                .filter(|d| matches!(d.state, Some(StateType::Open)))
+                .map(|d| {
+                    format!(
+                        "#{} ({})",
+                        d.number.unwrap_or(0),
+                        d.title.clone().unwrap_or_default()
+                    )
+                })
+                .collect();
+            log::debug!(
+                "forgejo: cfg {} issue #{number} dropped: open blocker(s) {}",
+                config_id,
+                blockers.join(", ")
+            );
+            dropped_blocked.push(number);
             continue;
         }
+        kept.push(number);
         let is_pr = issue.pull_request.is_some();
         let item = issue_to_item(config_id, host, owner, repo, issue);
         if is_pr {
@@ -276,6 +309,34 @@ pub async fn fetch_unblocked_unassigned_with_label(
         } else {
             issue_items.push(item);
         }
+    }
+    log::debug!(
+        "forgejo: cfg {config_id} unclaimed {owner}/{repo} labels={:?} fetched={fetched} \
+         kept={} dropped_assigned={} dropped_blocked={} -> issues={} prs={}",
+        labels,
+        kept.len(),
+        dropped_assigned.len(),
+        dropped_blocked.len(),
+        issue_items.len(),
+        pr_items.len()
+    );
+    log::debug!(
+        "forgejo: cfg {config_id} kept issue numbers: {:?}",
+        kept.iter().take(25).collect::<Vec<_>>()
+    );
+    // Surfaced at warn so it shows without `RUST_LOG=debug`: Forgejo matched
+    // issues for this label and every one of them was filtered out. That is
+    // the "the label is right but the count is zero" case, and at info level
+    // it used to be completely invisible.
+    if fetched > 0 && issue_items.is_empty() && pr_items.is_empty() {
+        log::warn!(
+            "forgejo: cfg {config_id} {owner}/{repo} labels={:?} matched {fetched} open \
+             issue(s) but kept none (assigned={}, blocked_by_open_dep={}) — \
+             the label matches, a filter is dropping them",
+            labels,
+            dropped_assigned.len(),
+            dropped_blocked.len()
+        );
     }
     Ok((issue_items, pr_items))
 }
@@ -423,6 +484,14 @@ pub async fn unclaimed_work_items_for_agent(
         return Ok(((Vec::new(), Vec::new()), Vec::new()));
     }
     let configs = crate::db_ops::list_forgejo_configs_for_agent(db, agent_id).await?;
+    // Log what we are actually asking Forgejo for. A label the operator set
+    // on the agent that never reaches this line is indistinguishable from a
+    // label Forgejo does not match — they look identical on the page.
+    log::debug!(
+        "forgejo: agent {agent_id} unclaimed: {} config(s), labels={:?}",
+        configs.len(),
+        additional_labels
+    );
     let mut issues = Vec::new();
     let mut pull_requests = Vec::new();
     let mut errors = Vec::new();
@@ -462,6 +531,12 @@ pub async fn unclaimed_work_items_for_agent(
     }
     issues.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     pull_requests.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+    log::debug!(
+        "forgejo: agent {agent_id} unclaimed total: issues={} prs={} errors={}",
+        issues.len(),
+        pull_requests.len(),
+        errors.len()
+    );
     Ok(((issues, pull_requests), errors))
 }
 

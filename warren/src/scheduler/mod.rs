@@ -263,6 +263,19 @@ pub async fn fire_prompt(
                     .unwrap_or(((Vec::new(), Vec::new()), Vec::new()));
             let issues = a_iss.len() + u_iss.len();
             let prs = a_prs.len() + u_prs.len();
+            log::debug!(
+                "scheduler: prompt={} agent={} forgejo gate labels={:?} \
+                 assigned={}/{} unclaimed={}/{} -> issues={} prs={}",
+                prompt.id,
+                agent_id,
+                labels,
+                a_iss.len(),
+                a_prs.len(),
+                u_iss.len(),
+                u_prs.len(),
+                issues,
+                prs
+            );
             if issues + prs == 0 {
                 skip(
                     &state,
