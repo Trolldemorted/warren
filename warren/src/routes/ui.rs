@@ -108,8 +108,10 @@ async fn root() -> Redirect {
 }
 
 async fn login_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if is_admin(&headers, &state).await {
-        return Redirect::to("/admin/agents").into_response();
+    match is_admin(&headers, &state).await {
+        Ok(true) => return Redirect::to("/admin/agents").into_response(),
+        Ok(false) => {}
+        Err(e) => return err_page(e),
     }
     let t = LoginTemplate {
         title: None,
@@ -127,7 +129,12 @@ async fn login_form(State(state): State<AppState>, Form(form): Form<LoginForm>) 
             resp.headers_mut().insert(header::SET_COOKIE, cookie);
             resp
         }
-        Err(_) => {
+        // Only a wrong password is "invalid password". A dead database
+        // also lands in the Err arm, and rendering that as a credential
+        // failure — with a 401 that clears the session cookie — told the
+        // operator their password was wrong when the datastore was
+        // simply unreachable. Anything else keeps its real status.
+        Err(AppError::Unauthorized) => {
             let t = LoginTemplate {
                 title: None,
                 nav: None,
@@ -147,6 +154,7 @@ async fn login_form(State(state): State<AppState>, Form(form): Form<LoginForm>) 
             )
                 .into_response()
         }
+        Err(e) => err_page(e),
     }
 }
 
@@ -180,20 +188,37 @@ fn clear_cookie_value() -> HeaderValue {
     .expect("static cookie value")
 }
 
-async fn is_admin(headers: &HeaderMap, state: &AppState) -> bool {
-    if let Some(token) = auth::read_session_cookie(headers) {
-        return auth::validate_admin_session_valid_only(&state.db, &token)
-            .await
-            .unwrap_or(false);
+// Propagates the database error instead of collapsing it into "not
+// logged in". A failed session lookup means two very different things:
+// an invalid or expired token (`Ok(false)`) belongs in a redirect to
+// /login, while an unreachable database must surface as a 503. The
+// previous `unwrap_or(false)` erased that difference, so a DB outage
+// bounced every admin page to /login with a perfectly valid cookie.
+async fn is_admin(headers: &HeaderMap, state: &AppState) -> AppResult<bool> {
+    match auth::read_session_cookie(headers) {
+        Some(token) => auth::validate_admin_session_valid_only(&state.db, &token).await,
+        None => Ok(false),
     }
-    false
 }
 
 async fn require_admin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
-    if is_admin(headers, state).await {
+    if is_admin(headers, state).await? {
         Ok(())
     } else {
         Err(AppError::Unauthorized)
+    }
+}
+
+/// Turn a `require_admin` result into a response, or `None` to carry on.
+///
+/// `Unauthorized` really is "no session" and earns the redirect. Every
+/// other error is the service failing, not the caller being unidentified
+/// — returning it stops the outage from looking like a login problem.
+fn admin_gate(result: AppResult<()>) -> Option<Response> {
+    match result {
+        Ok(()) => None,
+        Err(AppError::Unauthorized) => Some(redirect_to_login()),
+        Err(e) => Some(err_page(e)),
     }
 }
 
@@ -375,8 +400,8 @@ async fn agents_page(
     headers: HeaderMap,
     Query(q): Query<AgentsPageQuery>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let reload = matches!(q.reload.as_deref(), Some("1") | Some("true"));
     match crate::db_ops::list_agents(&state.db).await {
@@ -508,8 +533,8 @@ async fn agents_page(
 }
 
 async fn agent_new_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let t = AgentFormTemplate {
         title: Some("New agent"),
@@ -528,8 +553,8 @@ async fn agent_create(
     headers: HeaderMap,
     Form(raw): Form<HashMap<String, String>>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let form = match parse_agent_form(raw) {
         Ok(f) => f,
@@ -570,8 +595,8 @@ async fn agent_edit_page(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::get_agent(&state.db, id).await {
         Ok(Some(agent)) => {
@@ -602,8 +627,8 @@ async fn agent_update(
     axum::extract::Path(id): axum::extract::Path<Uuid>,
     Form(raw): Form<HashMap<String, String>>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let form = match parse_agent_form(raw) {
         Ok(f) => f,
@@ -686,8 +711,8 @@ async fn agent_delete(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::delete_agent(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/agents").into_response(),
@@ -719,6 +744,12 @@ fn err_page(e: AppError) -> Response {
         AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".into()),
         AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".into()),
         AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
+        // Name the real cause. A DB outage reached here before only as
+        // "internal error", which is indistinguishable from a bug in warren.
+        AppError::Db(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "database unavailable".into(),
+        ),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into()),
     };
     (status, msg).into_response()
@@ -737,8 +768,8 @@ struct InjectForm {
 }
 
 async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let reqs = match crate::db_ops::list_all_requests(&state.db, None, 200, 0).await {
         Ok(r) => r,
@@ -792,8 +823,8 @@ async fn comms_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
 }
 
 async fn inject_page_req(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let (target_classes, target_kinds) =
         match crate::db_ops::distinct_agent_classes(&state.db).await {
@@ -817,8 +848,8 @@ async fn inject_create_req(
     headers: HeaderMap,
     Form(form): Form<InjectForm>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let new = RequestNew {
         target_class: form.target_class,
@@ -845,8 +876,8 @@ async fn message_approve_request(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::set_request_status(
         &state.db,
@@ -866,8 +897,8 @@ async fn message_reject_request(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::set_request_status(
         &state.db,
@@ -887,8 +918,8 @@ async fn message_approve_response(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::accept_request_response(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/comms").into_response(),
@@ -901,8 +932,8 @@ async fn message_reject_response(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::reject_request_response(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/comms").into_response(),
@@ -932,8 +963,8 @@ async fn message_edit_page(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let req = match crate::db_ops::get_request(&state.db, id).await {
         Ok(Some(r)) => r,
@@ -985,8 +1016,8 @@ async fn message_edit_save(
     axum::extract::Path(id): axum::extract::Path<Uuid>,
     Form(form): Form<InjectForm>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let target_type = form.target_type.filter(|s| !s.is_empty());
     let response = form.response.filter(|s| !s.is_empty());
@@ -1018,8 +1049,8 @@ async fn message_delete_request(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::delete_request(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/comms").into_response(),
@@ -1038,8 +1069,8 @@ async fn message_set_status(
     axum::extract::Path(id): axum::extract::Path<Uuid>,
     Form(form): Form<SetStatusForm>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let label = form.status;
     let new_status = match parse_request_status_label(&label) {
@@ -1067,8 +1098,8 @@ fn parse_request_status_label(label: &str) -> Option<i16> {
 }
 
 async fn migrations_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let migrations = match crate::db_ops::list_migrations(&state.db).await {
         Ok(m) => m,
@@ -1104,8 +1135,8 @@ struct ChannelForm {
 }
 
 async fn channels_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::list_channels(&state.db).await {
         Ok(channels) => {
@@ -1122,8 +1153,8 @@ async fn channels_page(State(state): State<AppState>, headers: HeaderMap) -> Res
 }
 
 async fn channel_new_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let (classes, kinds) = match load_class_kinds(&state.db).await {
         Ok(p) => p,
@@ -1152,8 +1183,8 @@ async fn channel_create(
     headers: HeaderMap,
     Form(form): Form<ChannelForm>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let (classes, kinds) = match load_class_kinds(&state.db).await {
         Ok(p) => p,
@@ -1183,8 +1214,8 @@ async fn channel_edit_page(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let (classes, kinds) = match load_class_kinds(&state.db).await {
         Ok(p) => p,
@@ -1221,8 +1252,8 @@ async fn channel_update(
     axum::extract::Path(id): axum::extract::Path<Uuid>,
     Form(form): Form<ChannelForm>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let (classes, kinds) = match load_class_kinds(&state.db).await {
         Ok(p) => p,
@@ -1312,8 +1343,8 @@ async fn channel_delete(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::delete_channel(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/channels").into_response(),
@@ -1326,8 +1357,8 @@ async fn agent_claude_page(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::get_agent(&state.db, id).await {
         Ok(Some(agent)) => {
@@ -1353,8 +1384,8 @@ async fn agent_shell_page(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::get_agent(&state.db, id).await {
         Ok(Some(agent)) => {
@@ -1691,8 +1722,8 @@ struct EditScheduledPromptFormParsed {
 }
 
 async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let prompts = match crate::db_ops::list_scheduled_prompts(&state.db).await {
         Ok(v) => v,
@@ -1748,8 +1779,8 @@ async fn scheduled_prompts_page(State(state): State<AppState>, headers: HeaderMa
 }
 
 async fn scheduled_prompt_new_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let (classes, kinds, agents) = match load_class_kinds_agents(&state.db).await {
         Ok(v) => v,
@@ -1785,8 +1816,8 @@ async fn scheduled_prompt_create(
     headers: HeaderMap,
     Form(form): Form<NewScheduledPromptForm>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let parsed = match parse_new_scheduled_prompt_form(form) {
         Ok(p) => p,
@@ -1819,8 +1850,8 @@ async fn scheduled_prompt_edit_page(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let (_, _, agents) = match load_class_kinds_agents(&state.db).await {
         Ok(v) => v,
@@ -1870,8 +1901,8 @@ async fn scheduled_prompt_update(
     axum::extract::Path(id): axum::extract::Path<Uuid>,
     Form(form): Form<EditScheduledPromptForm>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let parsed = match parse_edit_scheduled_prompt_form(form) {
         Ok(p) => p,
@@ -1901,8 +1932,8 @@ async fn scheduled_prompt_delete(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     match crate::db_ops::delete_scheduled_prompt(&state.db, id).await {
         Ok(_) => Redirect::to("/admin/scheduled-prompts").into_response(),
@@ -1915,8 +1946,8 @@ async fn scheduled_prompt_run_now(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<Uuid>,
 ) -> Response {
-    if require_admin(&state, &headers).await.is_err() {
-        return redirect_to_login();
+    if let Some(resp) = admin_gate(require_admin(&state, &headers).await) {
+        return resp;
     }
     let prompt = match crate::db_ops::get_scheduled_prompt(&state.db, id).await {
         Ok(Some(p)) => p,
@@ -1931,4 +1962,42 @@ async fn scheduled_prompt_run_now(
         log::error!("scheduler: run-now failed: {e:?}");
     }
     Redirect::to("/admin/scheduled-prompts").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A database outage must not look like a session problem.
+    ///
+    /// `is_admin` used to `unwrap_or(false)`, collapsing "could not reach
+    /// the database" into "not logged in", so every admin page redirected
+    /// to /login during an outage. The login handler then reported the
+    /// same outage as "invalid password". These are the two gates that
+    /// made an infrastructure failure read as a credential failure.
+    #[test]
+    fn admin_gate_sends_unauthorized_to_login_but_an_outage_to_503() {
+        let unauthorized = admin_gate(Err(AppError::Unauthorized)).expect("must gate");
+        assert_eq!(
+            unauthorized.status(),
+            StatusCode::SEE_OTHER,
+            "an invalid/expired session belongs at /login"
+        );
+
+        let outage = admin_gate(Err(AppError::Db(sea_orm::DbErr::Custom(
+            "connection refused".into(),
+        ))))
+        .expect("must gate");
+        assert_eq!(
+            outage.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an unreachable database is not an auth failure — a redirect \
+             here is what made the outage look like a login problem"
+        );
+
+        assert!(
+            admin_gate(Ok(())).is_none(),
+            "an authenticated request must pass through untouched"
+        );
+    }
 }

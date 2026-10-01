@@ -139,11 +139,17 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::Db(e) => {
+                // 503, not 500: the request is fine, the datastore is not
+                // reachable. A 500 here reads as "warren is broken" and
+                // buries the one actionable fact.
                 log::error!("database error: {e}");
                 log::debug!("database error detail: {e:?}");
                 (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "internal error", "code": "internal"})),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "database unavailable",
+                        "code": "db_unavailable",
+                    })),
                 )
                     .into_response()
             }
