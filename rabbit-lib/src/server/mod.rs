@@ -57,6 +57,12 @@ pub struct AgentEventRecord {
 /// `&str` (parsed internally) or a typed value, and every error variant
 /// is structured. FFI consumers (PyO3 / napi-rs / cgo) can pattern-match
 /// the variant without unwrapping a stringly-typed `anyhow::Error`.
+// `double_must_use`: `async_trait` puts a bare `#[must_use]` on every
+// generated method, and the return type is already `#[must_use]` as a
+// boxed Future. The attribute is macro-generated, so it cannot be given
+// a message or removed at the method; the trait is the only place to
+// scope the allow. Clippy 1.99 made this a warn-by-default lint.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait SessionStore: Send + Sync + 'static {
     /// Returns the next free `seq` for `agent_id`'s event log. The
@@ -163,6 +169,12 @@ impl From<serde_json::Error> for StoreError {
 /// a `HeaderMap` handy. The default impls of the string overloads
 /// build a `HeaderMap` and delegate to the typed methods, so existing
 /// embedders don't have to implement them.
+// `double_must_use`: `async_trait` puts a bare `#[must_use]` on every
+// generated method, and the return type is already `#[must_use]` as a
+// boxed Future. The attribute is macro-generated, so it cannot be given
+// a message or removed at the method; the trait is the only place to
+// scope the allow. Clippy 1.99 made this a warn-by-default lint.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AuthBackend: Send + Sync + 'static {
     /// Validate the `Authorization: Bearer …` header against the
