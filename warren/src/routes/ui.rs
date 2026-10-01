@@ -364,17 +364,21 @@ impl AgentForgejoConfigNewForm {
             owner: self.owner.trim().to_string(),
             repo: self.repo.trim().to_string(),
             forgejo_username: self.forgejo_username.trim().to_string(),
-            access_token: self.access_token,
+            access_token: self.access_token.trim().to_string(),
         }
     }
 }
 
 impl AgentForgejoConfigPatchForm {
     fn into_patch(self) -> AgentForgejoConfigPatch {
-        let access_token = if self.access_token.is_empty() {
+        // Blank (or whitespace-only) means "keep the stored token" — that is
+        // what the form's "(keep)" placeholder promises. Trimming before the
+        // check is what makes a field holding only a stray space count as
+        // blank instead of silently overwriting a working token with "".
+        let access_token = if self.access_token.trim().is_empty() {
             None
         } else {
-            Some(self.access_token.clone())
+            Some(self.access_token.trim().to_string())
         };
         AgentForgejoConfigPatch {
             base_url: Some(self.base_url.trim().to_string()),
