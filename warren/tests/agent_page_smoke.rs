@@ -109,6 +109,46 @@ fn templates_expose_term_for_layout_test() {
     );
 }
 
+/// The agent edit form must always offer the "add a config" row.
+///
+/// The blank add-row used to sit behind `{% if !forgejo_configs.is_empty() %}`,
+/// which meant an agent with zero Forgejo configs had no inputs at all —
+/// you could only add a *second* config once a first one existed, so the
+/// first one was impossible to create from the UI. The API worked, which
+/// is why it went unnoticed.
+///
+/// The handler skips an untouched row (`AgentForgejoConfigNewForm::is_empty`),
+/// so always rendering the row is safe.
+#[test]
+fn agent_form_always_renders_the_add_forgejo_config_row() {
+    let body = read_template("agent_form.html");
+
+    // The add row must not be inside any conditional.
+    let add_row = body
+        .find("new[0][base_url]")
+        .expect("agent_form.html has no blank add-config row");
+    let add_table = body[..add_row]
+        .rfind("<table")
+        .expect("add row is not in a table");
+    let before = &body[add_table..add_row];
+    assert!(
+        !before.contains("forgejo_configs.is_empty()"),
+        "the add-a-config row must render unconditionally — gating it on \
+         existing configs made the first config impossible to add"
+    );
+
+    // And the existing-configs table should still be hidden when empty,
+    // rather than rendering a header with no rows.
+    assert!(
+        body.contains("{% if !forgejo_configs.is_empty() %}"),
+        "the existing-configs table should be gated on having configs"
+    );
+    assert!(
+        body.contains("cfg[{{ c.id }}][base_url]"),
+        "existing configs must keep their editable rows"
+    );
+}
+
 /// Both Copy buttons must survive an extension that blocks the clipboard.
 ///
 /// `navigator.clipboard.writeText` and `document.execCommand('copy')` are

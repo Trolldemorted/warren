@@ -57,6 +57,7 @@
   to multiple repos on the same owner, declare each repo explicitly.
   Leave the access token blank to keep the existing value.
 </p>
+{% if !forgejo_configs.is_empty() %}
 <table class="table table-sm align-middle">
   <thead>
     <tr>
@@ -76,8 +77,8 @@
     {% endfor %}
   </tbody>
 </table>
-{% if !forgejo_configs.is_empty() %}
-<h3 class="h6 mt-4">Add a config</h3>
+{% endif %}
+<h3 class="h6 mt-4">{% if forgejo_configs.is_empty() %}Add a config{% else %}Add another config{% endif %}</h3>
 <table class="table table-sm align-middle">
   <tbody>
     <tr>
@@ -89,7 +90,6 @@
     </tr>
   </tbody>
 </table>
-{% endif %}
 {% endif %}
   <button type="submit" class="btn btn-primary">Save</button>
   <a href="/admin/agents" class="btn btn-link">Cancel</a>
