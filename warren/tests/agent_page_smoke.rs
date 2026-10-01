@@ -109,6 +109,124 @@ fn templates_expose_term_for_layout_test() {
     );
 }
 
+/// Both Copy buttons must survive an extension that blocks the clipboard.
+///
+/// `navigator.clipboard.writeText` and `document.execCommand('copy')` are
+/// the only two ways a page can write the clipboard, and they are exactly
+/// what uBlock Origin's ClickFix filter blocks once it decides a page
+/// looks like a paste-into-your-terminal attack — which a terminal
+/// emulator matches on sight, since shell commands are what it hunts for.
+/// Both buttons used to run that pair inline and report a bare "copy
+/// failed", which is a dead end for the operator.
+///
+/// The last resort has to avoid the clipboard API entirely: a dialog with
+/// the text already selected, so the operator's own Ctrl+C does the work.
+#[test]
+fn copy_buttons_fall_back_when_the_clipboard_api_is_blocked() {
+    let body = read_template("agent_claude.html");
+    let code: String = body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for required in [
+        "copyTextToClipboard",
+        "copy-fallback-text",
+        "copy-fallback",
+        "clipboard blocked by an extension",
+    ] {
+        assert!(
+            code.contains(required),
+            "agent_claude.html must contain `{required}` — when an extension \
+             blocks both clipboard APIs, the copy must degrade to a dialog \
+             with the text pre-selected rather than reporting a bare failure"
+        );
+    }
+    // The pre-selected textarea is what makes the fallback usable: the
+    // operator should only have to press Ctrl+C.
+    assert!(
+        code.contains("field.select()"),
+        "the copy fallback must pre-select the text so the operator can \
+         just press Ctrl+C"
+    );
+    // One shared implementation, so the two buttons cannot drift apart.
+    let call_sites = code.matches("await copyTextToClipboard(text);").count();
+    assert_eq!(
+        call_sites, 2,
+        "copyAll and copySelection must both route through \
+         copyTextToClipboard (found {call_sites} call sites)"
+    );
+}
+
+/// The snapshot apply must never cost the operator a keystroke.
+///
+/// A `ScreenSnapshot` captures PTY state at a point in time, so its input
+/// row does not contain keystrokes still in flight. Repainting that row
+/// over a prompt the operator is composing makes their text disappear —
+/// the "command I just typed disappeared" bug that kept the server from
+/// sending snapshots on reconnect.
+///
+/// The two halves of the apply have different risk and are gated
+/// separately: the scrollback is written ABOVE the visible area and can
+/// never touch the input line, so it is unconditional; only the grid
+/// repaint is deferred, and only while the operator is actively typing.
+#[test]
+fn snapshot_repaint_is_deferred_while_the_operator_is_typing() {
+    let body = read_template("agent_claude.html");
+    let start = body
+        .find("case 'screen_snapshot':")
+        .expect("agent_claude.html no longer handles screen_snapshot");
+    let end = body[start..]
+        .find("function connectWs()")
+        .map(|i| start + i)
+        .unwrap_or(body.len());
+    let arm: String = body[start..end]
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        arm.contains("lastInputAtMs") && arm.contains("TYPING_SETTLE_MS"),
+        "the snapshot apply must consider when the operator last sent input"
+    );
+    // History is seeded unconditionally — it scrolls above the visible
+    // area, so it cannot clobber the input line. If this ends up behind
+    // the typing gate, a reload during typing would lose history too.
+    let hist = arm.find("historySeeded").expect("no history seeding");
+    let gate = arm
+        .find("TYPING_SETTLE_MS) < ")
+        .or_else(|| arm.find("TYPING_SETTLE_MS"))
+        .expect("no typing gate");
+    assert!(
+        hist < gate,
+        "scrollback seeding must happen before the typing gate — it writes \
+         above the visible area and is always safe"
+    );
+    // Both input paths must report, or the gate never trips on mobile.
+    let body_code: String = body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        body_code.matches("markInputSent();").count(),
+        2,
+        "both the term.onData path and the on-screen keypad must mark input"
+    );
+    // Deferring must not skip the live-frame flush: those frames are not
+    // covered by the snapshot and dropping them loses real output.
+    let flush = arm
+        .find("for (const f of keep)")
+        .expect("keep-frame flush missing");
+    assert!(
+        !arm[..flush].contains("break;") || flush > gate,
+        "the deferral must not break out of the switch before flushing \
+         `keep` frames and pinning the scroll position"
+    );
+}
+
 /// The snapshot apply must not wipe the buffer.
 ///
 /// `Terminal.reset()` is a full RIS: it clears the scrollback as well as

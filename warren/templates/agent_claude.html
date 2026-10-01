@@ -139,6 +139,15 @@ body.viewer-mode #viewer-mode-banner { display: block; }
    scroll — the trade-off for keeping buffer history reachable via
    the UI. */
 .claude-grid .term-wrap { overflow-x: auto; overflow-y: hidden; min-height: 0; }
+/* JS-revealed counterpart to the stylesheet's `:target` rule. */
+#copy-fallback.open { display: block; }
+#copy-fallback-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
 .claude-grid #term { display: block; width: 100%; height: 100%; }
 
 /* prevent auto-zoom on focus. FF Mobile (in any
@@ -505,6 +514,35 @@ main.container-fluid > .alert { flex: 0 0 auto; }
     </div>
   </div>
   <div id="prompt-rejected-banner" role="status" aria-live="polite"></div>
+<!-- Copy fallback. uBlock Origin's ClickFix filter flags pages whose text
+     looks like "copy this command and paste it into a terminal"; a terminal
+     emulator is the worst case for that heuristic, because shell commands
+     are exactly what it hunts for. When it trips it blocks both
+     `navigator.clipboard.writeText` and `document.execCommand('copy')` —
+     the only two paths the Copy buttons have — so they die silently. No
+     programmatic write survives that, so the last resort is the one thing
+     an extension cannot block: show the text, already selected, and let
+     the operator press Ctrl+C. `.open` is set by JS; the base stylesheet
+     only reveals `.modal` via `:target`. -->
+<div id="copy-fallback" class="modal" role="dialog" aria-labelledby="copy-fallback-title">
+  <a class="modal-bg" href="#" data-copy-fallback-close aria-label="Close"></a>
+  <div class="modal-dialog" role="document">
+    <div class="modal-header">
+      <h5 class="modal-title" id="copy-fallback-title">Copy manually</h5>
+      <a class="modal-close" href="#" data-copy-fallback-close aria-label="Close">&times;</a>
+    </div>
+    <div class="modal-body">
+      <p>Something on this page blocked the clipboard write &mdash; uBlock
+         Origin's ClickFix filter is the usual culprit, and it treats a page
+         full of shell commands as a paste-into-your-terminal attack. The
+         text is below, already selected: press <kbd>Ctrl</kbd>+<kbd>C</kbd>
+         (or <kbd>&#8984;</kbd>+<kbd>C</kbd>) to copy it.</p>
+      <textarea id="copy-fallback-text" class="form-control" rows="16" readonly
+                spellcheck="false"></textarea>
+      <a href="#" class="btn btn-link" data-copy-fallback-close>Close</a>
+    </div>
+  </div>
+</div>
 <div id="viewer-mode-banner" role="status" aria-live="polite">
   read-only viewer mode — input disabled
 </div>
@@ -821,6 +859,21 @@ let pendingFrames = []; // null after first snapshot apply
 // `after_seq` = latest PTY seq at snapshot time, i.e. > 0 in
 // practice, ≥ 0 in degenerate cases) passes through.
 let lastWrittenSeq = 0;
+// Wall-clock ms of the last keystroke this page forwarded to the PTY
+// (both the `term.onData` path and the on-screen keypad). The snapshot
+// apply uses it to decide whether it is safe to repaint the visible
+// grid: a snapshot's input row reflects PTY state at capture time, so
+// keystrokes still in flight are not in it, and repainting over the
+// line the operator is composing makes their text vanish.
+// Keystroke-to-echo settle window. A snapshot captured inside it may
+// predate the operator's last keystroke, so its input row is stale.
+const TYPING_SETTLE_MS = 1500;
+let lastInputAtMs = 0;
+function markInputSent() { lastInputAtMs = Date.now(); }
+// Seeding scrollback is only correct once per page: a second snapshot
+// on the same page (WS reconnect) would otherwise duplicate every
+// history line already in xterm's buffer.
+let historySeeded = false;
 
 function writeBinaryFrame(seq, data) {
   if (seq > lastWrittenSeq) lastWrittenSeq = seq;
@@ -943,21 +996,7 @@ async function copyAll() {
     showActionToast('nothing to copy');
     return;
   }
-  try {
-    await navigator.clipboard.writeText(text);
-    showActionToast(`copied ${text.length.toLocaleString()} chars`);
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try { ok = document.execCommand('copy'); } catch {}
-    document.body.removeChild(ta);
-    showActionToast(ok ? `copied ${text.length.toLocaleString()} chars` : 'copy failed');
-  }
+  await copyTextToClipboard(text);
 }
 
 document.getElementById('copy-btn').addEventListener('click', copyAll);
@@ -978,22 +1017,65 @@ async function copySelection() {
     showActionToast('no selection — Shift+drag to select');
     return;
   }
+  await copyTextToClipboard(text);
+}
+
+// The single clipboard path both Copy buttons use.
+//
+// `navigator.clipboard.writeText` and `document.execCommand('copy')` are
+// the only two ways a page can write the clipboard, and they are exactly
+// the two an extension blocks. uBlock Origin's ClickFix filter trips on
+// pages whose text looks like "copy this command and paste it into a
+// terminal" — which a terminal emulator matches on sight, since shell
+// commands are what it hunts for. When that fires both calls throw or
+// return false and the button used to report a bare "copy failed", which
+// gives the operator nothing to act on.
+//
+// So: on total failure, hand the text over in a dialog with it already
+// selected. A user-initiated Ctrl+C is a real clipboard write and is not
+// something the extension intercepts, so this path works where the other
+// two do not.
+async function copyTextToClipboard(text) {
+  const n = text.length.toLocaleString();
   try {
     await navigator.clipboard.writeText(text);
-    showActionToast(`copied ${text.length.toLocaleString()} chars`);
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    let ok = false;
-    try { ok = document.execCommand('copy'); } catch {}
-    document.body.removeChild(ta);
-    showActionToast(ok ? `copied ${text.length.toLocaleString()} chars` : 'copy failed');
+    showActionToast(`copied ${n} chars`);
+    return;
+  } catch {}
+  const scratch = document.createElement('textarea');
+  scratch.value = text;
+  scratch.style.position = 'fixed';
+  scratch.style.opacity = '0';
+  document.body.appendChild(scratch);
+  scratch.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  document.body.removeChild(scratch);
+  if (ok) {
+    showActionToast(`copied ${n} chars`);
+    return;
+  }
+  const modal = document.getElementById('copy-fallback');
+  const field = document.getElementById('copy-fallback-text');
+  if (modal && field) {
+    field.value = text;
+    modal.classList.add('open');
+    field.focus();
+    field.select();
+    showActionToast('clipboard blocked by an extension — copy from the dialog');
+  } else {
+    showActionToast('copy failed — an extension is probably blocking the clipboard');
   }
 }
+
+document.querySelectorAll('[data-copy-fallback-close]').forEach(el => {
+  el.addEventListener('click', e => {
+    e.preventDefault();
+    const modal = document.getElementById('copy-fallback');
+    if (modal) modal.classList.remove('open');
+  });
+});
+
 copySelectionBtn.addEventListener('click', copySelection);
 term.onSelectionChange(() => {
   copySelectionBtn.disabled = !term.hasSelection();
@@ -1039,6 +1121,7 @@ term.onData(data => {
   const buf = new Uint8Array(1 + data.length);
   buf[0] = 0x01;
   for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i) & 0xff;
+  markInputSent();
   ws.send(buf);
 });
 
@@ -1096,6 +1179,7 @@ function sendBytes(bytes) {
   const buf = new Uint8Array(1 + bytes.length);
   buf[0] = MOBILE_CHAN;
   for (let i = 0; i < bytes.length; i++) buf[i + 1] = bytes[i] & 0xff;
+  markInputSent();
   ws.send(buf);
 }
 function syncModUi() {
@@ -1474,14 +1558,52 @@ function applyMeta(env) {
       // The legacy `text` path gets the same treatment — it was writing
       // a joined blob from row 1 with no erase at all, so it relied on
       // the reset this used to do and was just as destructive.
-      for (let i = 0; i < visible.length; i++) {
-        term.write(`\x1b[${i + 1};1H\x1b[2K${String(visible[i]).slice(0, maxCols)}`);
+      //
+      // Scrollback first, unconditionally. `env.text` is avt's
+      // Buffer::text() — the terminal's ENTIRE line history, not just
+      // the visible grid — so everything above the last `visibleRows`
+      // entries is real history the server already holds. Writing it
+      // scrolls xterm's buffer, so it lands ABOVE the visible area and
+      // can never touch the line the operator is typing on. This is
+      // what makes a reload show the session again instead of a
+      // 128-chunk slice of recent repaints (the byte-replay ring is
+      // bounded by chunk count, so its coverage shrinks as claude's
+      // repaint rate rises).
+      //
+      // The screen repaint below is the part that carries the typing
+      // risk, and it is gated separately. A snapshot's input row is the
+      // PTY state at capture time, so keystrokes still in flight are
+      // missing from it; repainting over the line being composed makes
+      // the text vanish. When the operator typed within the settle
+      // window we skip the repaint and let claude's own echo own that
+      // row — it repaints the input line on every keystroke, so it
+      // corrects itself. Skipping costs a cosmetically-perfect grid,
+      // which the history write has already approximated.
+      if (!historySeeded && Array.isArray(env.text) && env.text.length > visibleRows) {
+        const history = env.text.slice(0, env.text.length - visibleRows);
+        term.write(history.map(l => String(l).slice(0, maxCols)).join('\r\n') + '\r\n');
+        historySeeded = true;
       }
-      const effLen = Math.max(1, Math.min(visible.length, termRows));
-      const maxRow = Math.max(0, effLen - 1);
-      const r = Math.max(0, Math.min((env.cursor_row || 0) - topSkipped, maxRow)) + 1;
-      const c = Math.max(0, Math.min(env.cursor_col || 0, maxCols - 1)) + 1;
-      term.write(`\x1b[${r};${c}H`);
+      // Only the repaint + cursor are gated. The `keep` flush and the
+      // scroll pin below must still run — those carry live frames the
+      // snapshot did not cover, and dropping them on this path would
+      // lose real output.
+      if ((Date.now() - lastInputAtMs) < TYPING_SETTLE_MS) {
+        console.warn(
+          'warren: ScreenSnapshot grid repaint skipped — operator typed ' +
+          Math.round(TYPING_SETTLE_MS - (Date.now() - lastInputAtMs)) +
+          'ms ago; leaving the input line to claude\'s own repaint'
+        );
+      } else {
+        for (let i = 0; i < visible.length; i++) {
+          term.write(`\x1b[${i + 1};1H\x1b[2K${String(visible[i]).slice(0, maxCols)}`);
+        }
+        const effLen = Math.max(1, Math.min(visible.length, termRows));
+        const maxRow = Math.max(0, effLen - 1);
+        const r = Math.max(0, Math.min((env.cursor_row || 0) - topSkipped, maxRow)) + 1;
+        const c = Math.max(0, Math.min(env.cursor_col || 0, maxCols - 1)) + 1;
+        term.write(`\x1b[${r};${c}H`);
+      }
       // Flush the surviving live frames IN ORDER. We rely on each
       // `pendingFrame.data` already being a Uint8Array subview of the
       // original binary message — its buffer is alive for the lifetime

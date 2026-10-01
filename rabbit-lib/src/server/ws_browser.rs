@@ -95,27 +95,30 @@ pub async fn handle(
     // was a heuristic to coerce claude into redrawing for late joiners; the
     // server-side VT snapshot is exact, so the jiggle is gone.
     //
-    // Only the *first* browser WS for this handle gets the snapshot.
-    // Every later reconnect (silent proxy idle flush, dev-tools reload,
-    // mobile tab restore) skips it — otherwise the `ScreenSnapshot`
-    // would replay through the meta ring, the browser would `term.reset()`,
-    // and in-progress typed bytes (kept in `pendingFrames` but trimmed to
-    // `keep=[]` because `pendingFrames` went `null` on the very first
-    // apply) would silently vanish. The bug is the "spurious claude banner"
-    // / "command I just typed disappeared" symptom on desktop and mobile.
+    // Every browser WS gets a snapshot, not just the first.
+    //
+    // It used to be first-connect-only because re-applying one on
+    // reconnect was destructive: the browser called `term.reset()` and
+    // trimmed `pendingFrames` to `keep=[]`, so in-progress typed bytes
+    // vanished ("command I just typed disappeared"). Both halves of
+    // that are gone — the apply is now in-place and non-destructive,
+    // and the browser additionally skips the grid repaint entirely when
+    // the operator typed within the settle window, leaving that row to
+    // claude's own echo. The `keep` flush and the stale-`after_seq`
+    // guard are unchanged, so live frames the snapshot does not cover
+    // are still replayed.
+    //
+    // Sending it every time is what makes a reload useful. The replay
+    // ring alone is bounded by chunk count (`TERM_RING_MAX_CHUNKS`),
+    // so its coverage shrinks as claude's repaint rate rises — each
+    // reload showed less than the last. The snapshot carries the VT's
+    // real line history, which does not have that property.
     let snapshot_after = handle.clone();
-    if handle.try_mark_first_browser_snapshot() {
-        tokio::spawn(async move {
-            if let Err(e) = snapshot_after.snapshot_request(TERM_CHAN_CLAUDE).await {
-                log::debug!("snapshot request failed for agent {}: {e:?}", agent_id);
-            }
-        });
-    } else {
-        log::debug!(
-            "skipping redundant snapshot request on reconnect for agent {}",
-            agent_id
-        );
-    }
+    tokio::spawn(async move {
+        if let Err(e) = snapshot_after.snapshot_request(TERM_CHAN_CLAUDE).await {
+            log::debug!("snapshot request failed for agent {}: {e:?}", agent_id);
+        }
+    });
 
     // Heartbeat: the WS has no application-level keepalive by default,
     // so any reverse proxy in front of warren (the user is on
