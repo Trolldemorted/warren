@@ -910,6 +910,35 @@ pub async fn create_scheduled_prompt(
     Ok(am.insert(db).await?)
 }
 
+/// Whether a stored `next_fire_at` is inconsistent with the interval it is
+/// supposed to be firing on.
+///
+/// For any healthy schedule the anchor is at most `now + interval`: the
+/// scheduler writes exactly that after a fire, and time only moves the
+/// anchor closer. So an anchor further out than one interval can only mean
+/// the interval was shortened underneath it, or the column was NULLed by a
+/// claim and never restored.
+///
+/// Checking this makes the edit path self-correcting instead of dependent on
+/// which field the operator happened to touch: pressing Save with nothing
+/// changed still repairs an anchor left stale by an earlier edit, while a
+/// genuinely no-op save on a healthy schedule leaves the countdown alone.
+pub fn anchor_is_stale(
+    next_fire_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    interval_seconds: i64,
+) -> bool {
+    let Some(t) = next_fire_at else {
+        // NULL: `next_fire_at <= now` never matches, so the prompt would
+        // never fire again.
+        return true;
+    };
+    let horizon = now
+        + chrono::Duration::try_seconds(interval_seconds)
+            .unwrap_or_else(|| chrono::Duration::seconds(0));
+    t > horizon
+}
+
 /// Whether an edit must re-anchor `next_fire_at` to `now + interval`.
 ///
 /// Two triggers, both of which previously left a stale anchor behind:
@@ -1008,14 +1037,23 @@ pub async fn update_scheduled_prompt(
         .unwrap_or(false);
     let new_enabled = patch.enabled.unwrap_or(was_enabled);
     let new_interval = patch.interval_seconds.unwrap_or(current_interval);
-    if reschedule_anchor(was_enabled, new_enabled, patch.enabled, interval_changed) {
+    let stale = anchor_is_stale(current_next_fire_at, now, new_interval);
+    if stale || reschedule_anchor(was_enabled, new_enabled, patch.enabled, interval_changed) {
         let next = now
             + chrono::Duration::try_seconds(new_interval)
                 .unwrap_or_else(|| chrono::Duration::seconds(0));
         am.next_fire_at = Set(Some(next));
         log::info!(
             "scheduled_prompt {id}: re-anchored next_fire_at to {next} \
-             (interval {current_interval}s -> {new_interval}s, enabled {was_enabled} -> true)"
+             (interval {current_interval}s -> {new_interval}s, enabled {was_enabled} -> true, \
+             reason: {})",
+            if stale {
+                "stored anchor inconsistent with interval"
+            } else if patch.enabled == Some(true) && !was_enabled {
+                "re-enabled"
+            } else {
+                "interval changed"
+            }
         );
     } else if !new_enabled {
         // Disabled: keep whatever anchor is stored. It is inert while
@@ -1390,7 +1428,8 @@ pub async fn delete_forgejo_config(db: &Db, id: Uuid) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::reschedule_anchor;
+    use super::{anchor_is_stale, reschedule_anchor};
+    use chrono::{Duration, Utc};
 
     /// Editing the cadence must re-anchor, or 1h -> 60s keeps waiting out
     /// the rest of the hour.
@@ -1429,5 +1468,36 @@ mod tests {
     #[test]
     fn saving_an_enabled_prompt_unchanged_keeps_its_schedule() {
         assert!(!reschedule_anchor(true, true, Some(true), false));
+    }
+    /// An anchor further out than one interval can only mean the interval
+    /// was shortened underneath it — that is the "edited 1h -> 60s but it
+    /// still waits 10 minutes" report.
+    #[test]
+    fn anchor_beyond_one_interval_is_stale() {
+        let now = Utc::now();
+        assert!(anchor_is_stale(Some(now + Duration::seconds(600)), now, 60));
+    }
+
+    /// NULL is stale in the worst way: `next_fire_at <= now` never matches,
+    /// so the prompt would never fire again.
+    #[test]
+    fn null_anchor_is_stale() {
+        assert!(anchor_is_stale(None, Utc::now(), 60));
+    }
+
+    /// A healthy anchor is within one interval and must survive a save
+    /// untouched, or every edit would postpone the next fire.
+    #[test]
+    fn healthy_anchor_is_not_stale() {
+        let now = Utc::now();
+        assert!(!anchor_is_stale(Some(now + Duration::seconds(30)), now, 60));
+    }
+
+    /// Exactly one interval out is the boundary the scheduler itself
+    /// writes after a fire, so it must not count as stale.
+    #[test]
+    fn anchor_exactly_one_interval_out_is_not_stale() {
+        let now = Utc::now();
+        assert!(!anchor_is_stale(Some(now + Duration::seconds(60)), now, 60));
     }
 }
