@@ -910,16 +910,49 @@ pub async fn create_scheduled_prompt(
     Ok(am.insert(db).await?)
 }
 
+/// Whether an edit must re-anchor `next_fire_at` to `now + interval`.
+///
+/// Two triggers, both of which previously left a stale anchor behind:
+///
+/// 1. **The interval changed.** `next_fire_at` holds an absolute instant
+///    computed from the old cadence, so editing 1h -> 60s kept waiting out
+///    the remaining hour.
+/// 2. **The prompt came back from disabled.** `claim_due_scheduled_prompts`
+///    NULLs `next_fire_at` when it claims a prompt, and the claim query
+///    filters on `next_fire_at <= now`, which NULL never satisfies. A prompt
+///    disabled mid-observation and re-enabled later therefore sat at NULL
+///    and never fired again — silently, with nothing logged.
+///
+/// A prompt that ends up disabled is never re-anchored: `now + interval`
+/// would let it fire the instant it is switched back on with no chance to
+/// edit it, and its stored anchor is inert while `enabled = false` anyway.
+/// That includes editing the interval of an already-disabled prompt.
+pub fn reschedule_anchor(
+    was_enabled: bool,
+    new_enabled: bool,
+    patch_enabled: Option<bool>,
+    interval_changed: bool,
+) -> bool {
+    if !new_enabled {
+        return false;
+    }
+    let re_enabled = patch_enabled == Some(true) && !was_enabled;
+    re_enabled || interval_changed
+}
+
 pub async fn update_scheduled_prompt(
     db: &Db,
     id: Uuid,
     patch: &ScheduledPromptPatch,
 ) -> AppResult<scheduled_prompt::Model> {
-    let mut am = scheduled_prompt::Entity::find_by_id(id)
+    let current = scheduled_prompt::Entity::find_by_id(id)
         .one(db)
         .await?
-        .ok_or(AppError::NotFound)?
-        .into_active_model();
+        .ok_or(AppError::NotFound)?;
+    let was_enabled = current.enabled;
+    let current_interval = current.interval_seconds;
+    let current_next_fire_at = current.next_fire_at;
+    let mut am = current.into_active_model();
     // Scope and address fields are intentionally NOT patchable — the
     // pool/agent address is set at creation. Mutating it would silently
     // orphan the previous agent's run-history rows. The UI/API forms
@@ -955,6 +988,42 @@ pub async fn update_scheduled_prompt(
         am.ignore_pending_forgejo_work = Set(f);
     }
     am.updated_at = Set(chrono::Utc::now());
+    // Re-anchor `next_fire_at` whenever the cadence changes or the prompt
+    // comes back from disabled.
+    //
+    // Editing the interval used to leave the old anchor in place, so
+    // dropping 1h -> 60s still waited out the remaining hour.
+    //
+    // Re-enabling matters just as much: `claim_due_scheduled_prompts` NULLs
+    // `next_fire_at` when it claims a prompt, and the claim query filters on
+    // `next_fire_at <= now`, which NULL never satisfies. A prompt disabled
+    // mid-observation and re-enabled later therefore sat at NULL and never
+    // fired again, with nothing logged. `was_enabled` also covers a prompt
+    // disabled while it was mid-observation *and* re-enabled before the
+    // observation finalized, where the value is still NULL.
+    let now = chrono::Utc::now();
+    let interval_changed = patch
+        .interval_seconds
+        .map(|i| i != current_interval)
+        .unwrap_or(false);
+    let new_enabled = patch.enabled.unwrap_or(was_enabled);
+    let new_interval = patch.interval_seconds.unwrap_or(current_interval);
+    if reschedule_anchor(was_enabled, new_enabled, patch.enabled, interval_changed) {
+        let next = now
+            + chrono::Duration::try_seconds(new_interval)
+                .unwrap_or_else(|| chrono::Duration::seconds(0));
+        am.next_fire_at = Set(Some(next));
+        log::info!(
+            "scheduled_prompt {id}: re-anchored next_fire_at to {next} \
+             (interval {current_interval}s -> {new_interval}s, enabled {was_enabled} -> true)"
+        );
+    } else if !new_enabled {
+        // Disabled: keep whatever anchor is stored. It is inert while
+        // disabled (the claim query filters on `enabled = true`), and the
+        // re-enable branch above recomputes it from scratch, so a stale or
+        // NULL value can never be inherited across the toggle.
+        am.next_fire_at = Set(current_next_fire_at);
+    }
     am.update(db).await?;
     get_scheduled_prompt(db, id)
         .await?
@@ -1317,4 +1386,48 @@ pub async fn delete_forgejo_config(db: &Db, id: Uuid) -> AppResult<()> {
         return Err(AppError::NotFound);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reschedule_anchor;
+
+    /// Editing the cadence must re-anchor, or 1h -> 60s keeps waiting out
+    /// the rest of the hour.
+    #[test]
+    fn interval_change_reanchors() {
+        assert!(reschedule_anchor(true, true, None, true));
+    }
+
+    /// Re-enabling must re-anchor. If the prompt was disabled
+    /// mid-observation, `claim_due_scheduled_prompts` had already NULLed
+    /// `next_fire_at`, and the claim query's `next_fire_at <= now` never
+    /// matches NULL — so without this the prompt is silently dead forever.
+    #[test]
+    fn re_enable_reanchors() {
+        assert!(reschedule_anchor(false, true, Some(true), false));
+    }
+
+    /// A no-op edit must not disturb the anchor — the scheduler's own
+    /// `now + interval` write after a fire is the authority there.
+    #[test]
+    fn unrelated_edit_leaves_anchor_alone() {
+        assert!(!reschedule_anchor(true, true, None, false));
+        assert!(!reschedule_anchor(false, false, Some(false), false));
+    }
+
+    /// Editing the interval of a prompt that stays disabled must not
+    /// re-anchor: it would fire the instant it is switched back on.
+    #[test]
+    fn disabled_prompt_is_never_reanchored() {
+        assert!(!reschedule_anchor(true, false, Some(false), true));
+        assert!(!reschedule_anchor(false, false, None, true));
+    }
+
+    /// Re-saving an already-enabled prompt with the same interval must
+    /// not reset the countdown on every save.
+    #[test]
+    fn saving_an_enabled_prompt_unchanged_keeps_its_schedule() {
+        assert!(!reschedule_anchor(true, true, Some(true), false));
+    }
 }
