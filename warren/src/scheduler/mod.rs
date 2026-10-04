@@ -11,6 +11,46 @@ use uuid::Uuid;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 const USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Total wall-clock a stuck run will be nudged before warren gives up and
+/// re-arms the schedule anyway. Four hours comfortably outlasts an
+/// Anthropic weekly/session window and any plausible provider quota, so the
+/// give-up should only fire on something genuinely not going to clear.
+const RESUME_BUDGET: Duration = Duration::from_secs(4 * 60 * 60);
+
+/// Delay before the next bump, or `None` once the budget is spent.
+///
+/// Mirrors the backoff the community watchdogs use
+/// (cheapestinference/claude-auto-retry): 30/60/120/240/300s then flat 300s,
+/// so a provider coming back is picked up within a couple of minutes while a
+/// long outage settles into one attempt every five. ±15% jitter keeps a
+/// fleet of agents from retrying in lockstep.
+fn bump_delay(attempt: u32) -> Option<Duration> {
+    const LADDER: [u64; 5] = [30, 60, 120, 240, 300];
+    let base = LADDER
+        .get(attempt as usize)
+        .copied()
+        .unwrap_or(*LADDER.last().unwrap());
+    if Duration::from_secs(base) > RESUME_BUDGET {
+        return None;
+    }
+    // Deterministic ±15% from the attempt number: a real random source is
+    // not worth the nondeterminism in tests, and the spread across a fleet
+    // is what matters.
+    let spread = (base / 100 * 15) as i64;
+    let offset = if spread == 0 {
+        0
+    } else {
+        (attempt as i64 * 7919) % (2 * spread + 1) - spread
+    };
+    let secs = (base as i64 + offset).max(1) as u64;
+    let d = Duration::from_secs(secs);
+    if d > RESUME_BUDGET {
+        None
+    } else {
+        Some(d)
+    }
+}
 /// how long the per-run observer waits for a
 /// `StopHook`/`NeedsInput`/`Dead` envelope before finalizing the run
 /// as `observation_deadline` (line 727). Picked at 1 h so a long,
@@ -727,6 +767,91 @@ impl UsageAccum {
     }
 }
 
+/// Close a run out and put the schedule back on its normal cadence.
+///
+/// Every terminal path writes the same three things — the run outcome, the
+/// finish marker that anchors the next interval, and `next_fire_at` — and
+/// getting the order wrong leaves the schedule silently wedged. One helper
+/// keeps them together.
+async fn finalize_and_rearm(
+    state: &AppState,
+    prompt: &scheduled_prompt::Model,
+    run_id: Uuid,
+    fired_at: chrono::DateTime<chrono::Utc>,
+    outcome: &str,
+    error: Option<&str>,
+) {
+    let now = chrono::Utc::now();
+    if let Err(e) = db_ops::finalize_run(&state.db, run_id, outcome, error).await {
+        log::error!("scheduler: finalize {outcome} failed: {e:?}");
+    }
+    if let Err(e) = db_ops::mark_scheduled_prompt_finished(&state.db, prompt.id, now).await {
+        log::error!("scheduler: mark finished failed: {e:?}");
+    }
+    let next = now + chrono::Duration::seconds(prompt.interval_seconds);
+    if let Err(e) = db_ops::set_next_fire_at(&state.db, prompt.id, next, fired_at).await {
+        log::error!("scheduler: set_next_fire_at failed: {e:?}");
+    }
+}
+
+/// A run whose turn died on an API error and is being nudged back to life.
+///
+/// The run row is deliberately left OPEN and `next_fire_at` left NULL, so no
+/// further schedule fires until this one genuinely completes. Finalizing the
+/// run would advance the schedule past work that never finished, which is the
+/// behaviour the operator explicitly does not want.
+struct ResumeState {
+    class: String,
+    kind: Option<String>,
+    error_type: String,
+    attempt: u32,
+    waited: Duration,
+}
+
+impl ResumeState {
+    /// One bump: clear a wedged input line, then make sure there is exactly
+    /// one unclaimed bump in the agent's inbox.
+    ///
+    /// The inbox bump is not decoration — `fire_prompt`'s team-scope gate is
+    /// `count_inbox_by_target > 0`, so with an empty inbox the re-armed
+    /// schedule would skip forever and never actually resume.
+    async fn bump(&self, state: &AppState, handle: &AgentHandle) {
+        match handle.state().await {
+            Ok(snapshot) if snapshot.state != rabbit_lib::wire::AgentState::Idle => {
+                // Only act on an idle session; a working one is making
+                // progress and must not be interrupted. This is the
+                // safeguard the community watchdogs all converge on.
+                if let Err(e) = handle.interrupt().await {
+                    log::warn!("scheduler: resume interrupt failed: {e:?}");
+                } else {
+                    log::info!(
+                        "scheduler: resume interrupted a non-idle agent ({:?}) to clear wedged input",
+                        snapshot.state
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("scheduler: resume could not read agent state: {e:?}"),
+        }
+        let payload = format!(
+            "scheduled prompt `{}` was interrupted by an API error ({}); \
+             this is a scheduler bump, safe to claim once you are running again",
+            self.class, self.error_type
+        );
+        match db_ops::ensure_scheduler_bump(&state.db, &self.class, self.kind.as_deref(), &payload)
+            .await
+        {
+            Ok(Some(_)) => log::info!(
+                "scheduler: queued inbox bump for class={} after {}",
+                self.class,
+                self.error_type
+            ),
+            Ok(None) => {}
+            Err(e) => log::warn!("scheduler: inbox bump failed: {e:?}"),
+        }
+    }
+}
+
 fn spawn_observation(
     state: Arc<AppState>,
     handle: AgentHandle,
@@ -749,6 +874,11 @@ async fn observe(
     let mut rx = handle.subscribe_meta();
     let deadline = tokio::time::sleep(OBSERVATION_HARD_DEADLINE);
     tokio::pin!(deadline);
+    // Parked far in the future and only armed while a run is in resume
+    // mode, so the `if resuming` guard keeps the branch disabled otherwise.
+    let bump_tick = tokio::time::sleep(Duration::from_secs(86_400));
+    tokio::pin!(bump_tick);
+    let mut resuming: Option<ResumeState> = None;
 
     loop {
         tokio::select! {
@@ -773,6 +903,83 @@ async fn observe(
                         outcome
                     );
                     return;
+                }
+                Ok(EnvelopeBody::StopFailure { error_type, error_message }) => {
+                    let class = rabbit_lib::wire::StopFailureClass::from_error_type(&error_type);
+                    if class == rabbit_lib::wire::StopFailureClass::Fatal {
+                        // Nothing to wait out: a billing or auth failure
+                        // only the operator can fix. Finalize and re-arm
+                        // so the schedule is not wedged behind a problem
+                        // that will never clear.
+                        finalize_and_rearm(
+                            &state,
+                            &prompt,
+                            run_id,
+                            fired_at,
+                            "api_error",
+                            Some(&error_message),
+                        )
+                        .await;
+                        log::error!(
+                            "scheduler: api_error (fatal, not retrying) prompt={} run={} type={error_type}: {error_message}",
+                            prompt.id,
+                            run_id
+                        );
+                        return;
+                    }
+                    // Retryable. The turn is still pending — we merely lost
+                    // the ability to watch it. Hold the run open and the
+                    // schedule suspended, and start nudging.
+                    let agent = db_ops::get_agent(&state.db, handle.agent_id).await;
+                    let (class, kind) = match agent {
+                        Ok(Some(a)) => (a.class, a.kind),
+                        _ => (String::new(), None),
+                    };
+                    if class.is_empty() {
+                        log::error!(
+                            "scheduler: cannot resume — agent {} has no class; \
+                             holding run open would wedge the schedule. Finalizing.",
+                            handle.agent_id
+                        );
+                        finalize_and_rearm(
+                            &state,
+                            &prompt,
+                            run_id,
+                            fired_at,
+                            "api_error_unaddressable",
+                            Some(&error_message),
+                        )
+                        .await;
+                        return;
+                    }
+                    log::warn!(
+                        "scheduler: api_error (retryable) prompt={} run={} type={error_type}: {error_message} \
+                         — holding run open, bumping every cycle",
+                        prompt.id,
+                        run_id
+                    );
+                    let mut rs = ResumeState {
+                        class,
+                        kind,
+                        error_type,
+                        attempt: 0,
+                        waited: Duration::from_secs(0),
+                    };
+                    // Bump immediately, then on the ladder.
+                    rs.bump(&state, &handle).await;
+                    rs.attempt = 1;
+                    if let Some(d) = bump_delay(rs.attempt) {
+                        bump_tick.as_mut().reset(tokio::time::Instant::now() + d);
+                    }
+                    // Push the observation hard deadline out to match the
+                    // resume budget. Left alone it would fire at the 1h
+                    // mark, finalize the run as `observation_deadline` and
+                    // cut recovery short — reintroducing the original
+                    // behaviour half way through the fix.
+                    deadline
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + RESUME_BUDGET);
+                    resuming = Some(rs);
                 }
                 Ok(EnvelopeBody::NeedsInput { reason, .. }) => {
                     if let Err(e) = handle.interrupt().await {
@@ -862,6 +1069,47 @@ async fn observe(
                     return;
                 }
             },
+            // Bump cycle, armed only while a run is in resume mode. Until
+            // the operator's provider lets the turn finish, this is the only
+            // thing keeping the run — and therefore the whole schedule —
+            // alive.
+            _ = &mut bump_tick, if resuming.is_some() => {
+                let exhausted = {
+                    let rs = resuming.as_mut().expect("guarded by `if resuming.is_some()`");
+                    match bump_delay(rs.attempt) {
+                        Some(d) if rs.waited + d <= RESUME_BUDGET => {
+                            rs.waited += d;
+                            rs.attempt += 1;
+                            bump_tick
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + d);
+                            false
+                        }
+                        _ => true,
+                    }
+                };
+                if exhausted {
+                    let waited = resuming.as_ref().map(|r| r.waited).unwrap_or_default();
+                    finalize_and_rearm(
+                        &state,
+                        &prompt,
+                        run_id,
+                        fired_at,
+                        "api_error_unrecovered",
+                        Some("still failing after the resume budget elapsed"),
+                    )
+                    .await;
+                    log::error!(
+                        "scheduler: giving up on prompt={} run={} after {waited:?} of bumping",
+                        prompt.id,
+                        run_id
+                    );
+                    return;
+                }
+                if let Some(rs) = resuming.as_ref() {
+                    rs.bump(&state, &handle).await;
+                }
+            }
             _ = &mut deadline => {
                 // Hard deadline hit without seeing StopHook / NeedsInput /
                 // Dead. The run may have completed successfully but we
@@ -1455,5 +1703,105 @@ mod tests {
             config: cfg,
             live,
         })
+    }
+}
+
+#[cfg(test)]
+mod stop_failure_tests {
+    use super::*;
+    use rabbit_lib::wire::StopFailureClass;
+
+    /// Fatal means "only the operator can fix this". Bumping an auth or
+    /// billing failure for four hours just delays telling them, so the
+    /// classification has to name exactly those.
+    #[test]
+    fn fatal_types_are_the_operator_fixable_ones() {
+        for t in [
+            "authentication_failed",
+            "oauth_org_not_allowed",
+            "account_on_hold",
+            "billing_error",
+            "invalid_request",
+            "model_not_found",
+        ] {
+            assert_eq!(
+                StopFailureClass::from_error_type(t),
+                StopFailureClass::Fatal,
+                "{t} must not be bumped"
+            );
+        }
+    }
+
+    /// Everything else is worth waiting out.
+    #[test]
+    fn retryable_types_cover_the_transient_ones() {
+        for t in [
+            "rate_limit",
+            "overloaded",
+            "server_error",
+            "max_output_tokens",
+            "cloud_credential_error",
+            "unknown",
+        ] {
+            assert_eq!(
+                StopFailureClass::from_error_type(t),
+                StopFailureClass::Retryable,
+                "{t} should be bumped"
+            );
+        }
+    }
+
+    /// A provider we have never heard of is far more likely to be a
+    /// temporary rate limit than a permanent misconfiguration, and the
+    /// resume budget bounds the cost of guessing wrong. Anything new is
+    /// retryable.
+    #[test]
+    fn unknown_type_defaults_to_retryable() {
+        assert_eq!(
+            StopFailureClass::from_error_type("some_new_provider_error"),
+            StopFailureClass::Retryable
+        );
+    }
+
+    /// The ladder: 30, 60, 120, 240, 300, then flat 300 forever after.
+    #[test]
+    fn bump_delay_follows_the_ladder() {
+        let secs = |a: u32| bump_delay(a).map(|d| d.as_secs()).unwrap_or(0);
+        for (attempt, base) in [
+            (0u32, 30u64),
+            (1, 60),
+            (2, 120),
+            (3, 240),
+            (4, 300),
+            (9, 300),
+        ] {
+            let got = secs(attempt);
+            // ±15% of the base value.
+            let lo = (base as f64 * 0.85) as u64;
+            let hi = (base as f64 * 1.15) as u64 + 1;
+            assert!(
+                got >= lo && got <= hi,
+                "attempt {attempt}: {got}s outside the expected {lo}..={hi} band around {base}s"
+            );
+        }
+    }
+
+    /// The resume must give up after the 4h budget rather than nudging
+    /// forever, but the budget has to outlast a real provider window.
+    #[test]
+    fn resume_budget_is_four_hours_and_delays_stay_inside_it() {
+        assert_eq!(RESUME_BUDGET, Duration::from_secs(4 * 60 * 60));
+        // Summing the flat tail of the ladder must eventually cross it.
+        let mut waited = Duration::from_secs(0);
+        for attempt in 0..200u32 {
+            let Some(d) = bump_delay(attempt) else {
+                break;
+            };
+            waited += d;
+            if waited > RESUME_BUDGET {
+                return;
+            }
+        }
+        panic!("the ladder never exhausts the resume budget");
     }
 }

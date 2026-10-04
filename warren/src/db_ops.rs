@@ -1326,6 +1326,56 @@ pub async fn list_agents_by_class_kind(
 /// `count_inbox_for_agent` but parameterized directly on the address
 /// rather than a specific agent. Used by the scheduler to decide
 /// whether to fire when `ignore_inbox_state = false`.
+/// Marker embedded in a scheduler bump's payload so bumps are
+/// distinguishable from real inter-agent work on the comms board.
+pub const SCHEDULER_BUMP_MARKER: &str = "[scheduler-bump]";
+
+/// Is there already an unclaimed bump for this agent?
+///
+/// Checked as a query rather than in-memory state so the dedup survives a
+/// warren restart mid-outage. Without it a four-hour stall would insert a
+/// row per bump cycle (~48 rows) and bury the actual work in the board.
+pub async fn has_open_scheduler_bump(db: &Db, class: &str) -> AppResult<bool> {
+    let found = request::Entity::find()
+        .filter(request::Column::Status.eq(1_i16))
+        .filter(request::Column::TargetClass.eq(class.to_string()))
+        .filter(request::Column::Payload.contains(SCHEDULER_BUMP_MARKER))
+        .one(db)
+        .await?;
+    Ok(found.is_some())
+}
+
+/// Insert a bump into the agent's inbox, unless one is already open.
+///
+/// Status 1 is `awaiting_agent_request_claim`, which is exactly what both
+/// `count_inbox_by_target` and the agent's own inbox query read — so this
+/// satisfies the scheduler's team-scope gate without changing that gate, and
+/// the agent can genuinely claim the work once it recovers.
+pub async fn ensure_scheduler_bump(
+    db: &Db,
+    target_class: &str,
+    target_type: Option<&str>,
+    payload: &str,
+) -> AppResult<Option<request::Model>> {
+    if has_open_scheduler_bump(db, target_class).await? {
+        return Ok(None);
+    }
+    let body = format!("{SCHEDULER_BUMP_MARKER} {payload}");
+    let created = create_request(
+        db,
+        &crate::models::RequestNew {
+            target_class: target_class.to_string(),
+            target_type: target_type.map(String::from),
+            payload: body,
+            channel_id: None,
+        },
+        1,
+        None,
+    )
+    .await?;
+    Ok(Some(created))
+}
+
 pub async fn count_inbox_by_target(db: &Db, class: &str, kind: Option<&str>) -> AppResult<u64> {
     use sea_orm::QuerySelect;
     let kind_cond = match kind {

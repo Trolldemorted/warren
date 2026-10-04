@@ -1684,6 +1684,33 @@ fn build_envelopes(ev: &ObserverEvent) -> Vec<EnvelopeBody> {
             usage: ev.usage.clone(),
             error: None,
         }),
+        // The turn ended on an API error (rate limit, provider overload,
+        // auth/billing). Not a lifecycle transition, so `StopHook` never
+        // fires for it and the scheduler would otherwise wait out its full
+        // observation deadline. `error_type` is Claude's own classification
+        // and is what the scheduler branches on.
+        "stop_failure" => {
+            let raw = ev.raw.as_ref();
+            let error_type = raw
+                .and_then(|r| r.get("error_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let error_message = raw
+                .and_then(|r| r.get("error_message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            log::warn!(
+                "supervisor: turn ended on an API error ({}): {}",
+                error_type,
+                error_message
+            );
+            Some(EnvelopeBody::StopFailure {
+                error_type,
+                error_message,
+            })
+        }
         // a `PermissionRequest` hook fired while
         // an in-flight scheduled run is waiting for operator approval.
         // The scheduler's observation task subscribes to `meta_tx` and

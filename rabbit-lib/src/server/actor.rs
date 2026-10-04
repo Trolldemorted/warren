@@ -715,6 +715,7 @@ fn envelope_kind(body: &EnvelopeBody) -> &'static str {
         EnvelopeBody::SendKey(_) => "send_key",
         EnvelopeBody::ShellRepaint { .. } => "shell_repaint",
         EnvelopeBody::StopHook { .. } => "stop_hook",
+        EnvelopeBody::StopFailure { .. } => "stop_failure",
         EnvelopeBody::NeedsInput { .. } => "needs_input",
         EnvelopeBody::PromptRejected { .. } => "prompt_rejected",
         EnvelopeBody::ScreenSnapshot { .. } => "screen_snapshot",

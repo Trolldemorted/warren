@@ -9,7 +9,18 @@ use std::path::{Path, PathBuf};
 /// event). No `matcher` is emitted — it's ignored for `UserPromptSubmit` /
 /// `Stop`, and an empty matcher would stop `SessionStart` / `SessionEnd`
 /// from ever firing.
-const HOOK_EVENTS: &[&str] = &["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"];
+/// `StopFailure` is the only native signal that a turn died from an API
+/// error — Claude deliberately does not fire `Stop` for one — so the
+/// scheduler has no way to notice a rate-limited run without it. It needs
+/// Claude Code v2.1.78+; older sessions simply never fire it and the
+/// scheduler falls back to its observation deadline.
+const HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "UserPromptSubmit",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+];
 
 pub fn install(workdir: &Path, hook_bin: &Path) -> Result<()> {
     let dir = workdir.join(".claude");
@@ -64,7 +75,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn overwrites_with_four_hooks_when_absent() {
+    fn overwrites_with_every_event_when_absent() {
         let dir = tempdir().unwrap();
         let bin = PathBuf::from("/usr/local/bin/rabbit-hook");
         install(dir.path(), &bin).unwrap();
@@ -171,5 +182,32 @@ mod tests {
                 "{event} must omit the ignored env block"
             );
         }
+    }
+
+    /// `StopFailure` is the only native signal that a turn died on an API
+    /// error — Claude does not fire `Stop` for one — so without this hook a
+    /// rate-limited scheduled run has no terminal signal at all and hangs
+    /// until the observation deadline. Asserted separately so dropping it is
+    /// a named failure rather than a silent loss of recovery.
+    #[test]
+    fn stop_failure_hook_is_registered_without_a_matcher() {
+        assert!(
+            HOOK_EVENTS.contains(&"StopFailure"),
+            "StopFailure must stay registered"
+        );
+        let out = build(Path::new("rabbit-hook"));
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let entry = &v["hooks"]["StopFailure"];
+        assert!(entry.is_array(), "StopFailure should be an array");
+        assert_eq!(
+            entry[0]["hooks"][0]["command"], "rabbit-hook",
+            "StopFailure must dispatch to the shared hook binary"
+        );
+        // A matcher would filter by error_type and silently drop any type
+        // Claude adds later, which then arrives as no signal at all.
+        assert!(
+            entry[0].get("matcher").is_none(),
+            "StopFailure must omit its matcher so new error types still fire"
+        );
     }
 }

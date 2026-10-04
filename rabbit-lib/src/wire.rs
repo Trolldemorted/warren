@@ -21,6 +21,56 @@ pub struct TermFrame {
     pub data: Vec<u8>,
 }
 
+/// How the scheduler should respond to a [`EnvelopeBody::StopFailure`].
+///
+/// The split matters because half of these will never clear on their own:
+/// bumping a billing or auth failure for hours just delays an error the
+/// operator has to fix. Everything else is transient and worth waiting
+/// out — a bumped agent that recovers finishes the run through the normal
+/// `StopHook` path.
+///
+/// Mirrors the classification the community watchdogs use
+/// (cheapestinference/claude-auto-retry), which is in turn driven by the
+/// `error_type` values Claude Code's own `StopFailure` matcher accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StopFailureClass {
+    /// Worth waiting out: quota windows, provider overload, transient 5xx.
+    Retryable,
+    /// Will not clear by waiting. Surface to the operator and give up.
+    Fatal,
+}
+
+impl StopFailureClass {
+    /// Classify a raw `error_type` from the hook payload.
+    ///
+    /// Unrecognised types are `Retryable`, not `Fatal`: a provider we have
+    /// never seen is far more likely to be a temporary rate limit than a
+    /// permanent misconfiguration, and the 4-hour budget bounds the cost
+    /// of being wrong. `Fatal` is reserved for the types that name a
+    /// problem only the operator can fix.
+    pub fn from_error_type(error_type: &str) -> Self {
+        match error_type {
+            "authentication_failed"
+            | "oauth_org_not_allowed"
+            | "account_on_hold"
+            | "billing_error"
+            | "invalid_request"
+            | "model_not_found" => Self::Fatal,
+            // rate_limit, overloaded, server_error, max_output_tokens,
+            // cloud_credential_error, unknown, and anything newer Claude
+            // adds — all treated as "wait and bump".
+            _ => Self::Retryable,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::Fatal => "fatal",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub v: u32,
@@ -150,6 +200,23 @@ pub enum EnvelopeBody {
         prompt_id: uuid::Uuid,
         usage: Option<UsageSnapshot>,
         error: Option<String>,
+    },
+    /// Claude Code's `StopFailure` hook: the turn ended because of an API
+    /// error rather than a normal stop. This is the *only* native signal
+    /// for "the turn died" — Claude deliberately does not fire `Stop`
+    /// for it, so a run that hits a rate limit would otherwise hang until
+    /// the observation deadline.
+    ///
+    /// `error_type` is Claude's own classification (`rate_limit`,
+    /// `overloaded`, `server_error`, `authentication_failed`,
+    /// `billing_error`, `invalid_request`, `model_not_found`, …,
+    /// `unknown`). It is the field the `StopFailure` hook's `matcher`
+    /// filters on, and it is what [`StopFailureClass`] is derived from.
+    /// Never parse `error_message` for control flow; it is prose and its
+    /// wording changes between versions.
+    StopFailure {
+        error_type: String,
+        error_message: String,
     },
     // Claude fired a `permission_request` hook
     /// (the operator needs to approve a tool call before the turn can

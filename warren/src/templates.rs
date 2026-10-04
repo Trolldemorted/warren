@@ -371,6 +371,10 @@ pub fn outcome_badge(outcome: &str) -> &'static str {
         "rabbit_offline" => "bg-secondary",
         "meta_channel_closed" => "bg-warning text-dark",
         "observation_deadline" => "bg-warning text-dark",
+        // An API error that could not be waited out. `api_error` is a fatal
+        // class (auth/billing) that was never worth bumping; the other two
+        // are the give-up paths, so they read as failures rather than skips.
+        "api_error" | "api_error_unaddressable" | "api_error_unrecovered" => "bg-danger",
         "failed" => "bg-danger",
         "fired" => "bg-secondary",
         "skipped_offline" | "skipped_no_idle" | "skipped_no_inbox" | "skipped_unsafe_scrape" => {

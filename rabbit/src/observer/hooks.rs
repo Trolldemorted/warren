@@ -224,6 +224,33 @@ fn parse(kind: &str, payload: &serde_json::Value, handle: &ObserverHandle) -> Ob
                 raw: Some(payload.clone()),
             }
         }
+        // `StopFailure` fires only when a turn ends because of an API
+        // error, which is the one termination Claude does NOT report via
+        // `Stop`. Without this, a scheduled run that hits a rate limit
+        // has no terminal signal at all and hangs until the observation
+        // deadline. The payload carries `error_type` / `error_message`;
+        // both are kept in `raw` and classified at the envelope boundary
+        // (`StopFailureClass::from_error_type`) so nothing here has to
+        // know the vocabulary.
+        "stop_failure" => ObserverEvent {
+            kind: "stop_failure",
+            // The turn is over, but the agent is usable — a rate limit is
+            // not a lifecycle transition, so do not move the state.
+            state: None,
+            session_id: None,
+            prompt_id: payload
+                .get("prompt_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok()),
+            started_at: None,
+            ended_at: Some(chrono::Utc::now()),
+            usage: None,
+            error: payload
+                .get("error_message")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            raw: Some(payload.clone()),
+        },
         "notification" => ObserverEvent {
             kind: "log",
             state: None,
