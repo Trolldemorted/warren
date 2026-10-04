@@ -18,6 +18,11 @@ const USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// give-up should only fire on something genuinely not going to clear.
 const RESUME_BUDGET: Duration = Duration::from_secs(4 * 60 * 60);
 
+/// What a bump types into claude's PTY. Resumes the interrupted turn rather
+/// than starting a new one — a fresh scheduled prompt must not fire until
+/// this one has genuinely finished.
+const BUMP_NUDGE: &str = "continue";
+
 /// Delay before the next bump, or `None` once the budget is spent.
 ///
 /// Mirrors the backoff the community watchdogs use
@@ -809,13 +814,23 @@ struct ResumeState {
 }
 
 impl ResumeState {
-    /// One bump: clear a wedged input line, then make sure there is exactly
-    /// one unclaimed bump in the agent's inbox.
+    /// One bump: clear a wedged input line, nudge claude to carry on, then
+    /// make sure there is exactly one unclaimed bump in the agent's inbox.
     ///
-    /// The inbox bump is not decoration — `fire_prompt`'s team-scope gate is
+    /// The nudge is the part that actually recovers the turn. An inbox row
+    /// cannot: claude only acts on what reaches its PTY, and nothing claims
+    /// an inbox item while the agent is stuck. The inbox row is for the
+    /// scheduler's own gate — `fire_prompt`'s team-scope check is
     /// `count_inbox_by_target > 0`, so with an empty inbox the re-armed
-    /// schedule would skip forever and never actually resume.
+    /// schedule would skip forever and never resume.
+    ///
+    /// The nudge is deliberately the word `continue`, not the schedule's own
+    /// prompt text: the rule is that no *new* scheduled prompt may fire
+    /// until the interrupted one truly finishes, and `continue` resumes the
+    /// work already in flight instead of starting something new. This is
+    /// also what the community watchdogs type.
     async fn bump(&self, state: &AppState, handle: &AgentHandle) {
+        let mut ready = false;
         match handle.state().await {
             Ok(snapshot) if snapshot.state != rabbit_lib::wire::AgentState::Idle => {
                 // Only act on an idle session; a working one is making
@@ -829,9 +844,35 @@ impl ResumeState {
                         snapshot.state
                     );
                 }
+                // Give the interrupt a moment to land, otherwise the nudge
+                // races the Ctrl-C and the busy-gate rejects it.
+                tokio::time::sleep(Duration::from_millis(750)).await;
+                ready = handle
+                    .state()
+                    .await
+                    .map(|s| s.state == rabbit_lib::wire::AgentState::Idle)
+                    .unwrap_or(false);
             }
-            Ok(_) => {}
+            Ok(_) => ready = true,
             Err(e) => log::warn!("scheduler: resume could not read agent state: {e:?}"),
+        }
+        if ready {
+            match handle
+                .prompt_with_origin(BUMP_NUDGE, false, uuid::Uuid::nil())
+                .await
+            {
+                Ok(_) => log::info!(
+                    "scheduler: nudged class={} to continue after {}",
+                    self.class,
+                    self.error_type
+                ),
+                Err(e) => log::warn!("scheduler: resume nudge rejected: {e:?}"),
+            }
+        } else {
+            log::warn!(
+                "scheduler: agent still not idle after interrupt — skipping nudge, \
+                 will retry next cycle"
+            );
         }
         let payload = format!(
             "scheduled prompt `{}` was interrupted by an API error ({}); \

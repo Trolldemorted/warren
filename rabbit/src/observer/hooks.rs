@@ -234,9 +234,12 @@ fn parse(kind: &str, payload: &serde_json::Value, handle: &ObserverHandle) -> Ob
         // know the vocabulary.
         "stop_failure" => ObserverEvent {
             kind: "stop_failure",
-            // The turn is over, but the agent is usable — a rate limit is
-            // not a lifecycle transition, so do not move the state.
-            state: None,
+            // The turn IS over — it ended on an error, not a normal stop.
+            // Leaving the state alone is what wedges the agent: it stays
+            // `Running` forever (no `Stop` hook will ever fire to clear
+            // it), which makes the busy-gate reject every later prompt and
+            // stops the agent from being picked as Idle by any schedule.
+            state: Some(State::Idle),
             session_id: None,
             prompt_id: payload
                 .get("prompt_id")
@@ -326,6 +329,43 @@ mod tests {
         assert_eq!(h.latest_state(), State::Running);
         h.ingest("Stop", &json!({}));
         assert_eq!(h.latest_state(), State::Idle);
+    }
+
+    /// A turn that ends on an API error still ended. Leaving the state
+    /// alone wedges the agent at `Running` forever — no `Stop` hook will
+    /// ever arrive to clear it — which makes the busy-gate reject every
+    /// later prompt and stops any schedule from picking the agent as idle.
+    #[test]
+    fn stop_failure_marks_idle_because_the_turn_ended() {
+        let h = ObserverHandle::new();
+        h.ingest("UserPromptSubmit", &json!({}));
+        assert_eq!(h.latest_state(), State::Running);
+        h.ingest(
+            "StopFailure",
+            &json!({"error_type": "rate_limit", "error_message": "limit reached"}),
+        );
+        assert_eq!(
+            h.latest_state(),
+            State::Idle,
+            "a StopFailure ends the turn and must clear Running"
+        );
+    }
+
+    /// The typed classification must survive to the raw payload; the
+    /// scheduler branches on `error_type` and must never parse the prose.
+    #[test]
+    fn stop_failure_preserves_error_type_and_message() {
+        let h = ObserverHandle::new();
+        // `ingest` returns the parsed event; the broadcast send happens on
+        // the HTTP hook path, not here.
+        let ev = h.ingest(
+            "StopFailure",
+            &json!({"error_type": "billing_error", "error_message": "card declined"}),
+        );
+        assert_eq!(ev.kind, "stop_failure");
+        let raw = ev.raw.expect("raw payload retained");
+        assert_eq!(raw["error_type"], "billing_error");
+        assert_eq!(raw["error_message"], "card declined");
     }
 
     #[test]
