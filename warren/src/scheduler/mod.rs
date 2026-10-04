@@ -372,6 +372,20 @@ pub async fn fire_prompt(
                 // pre-split version had for the weekly/session
                 // thresholds.
                 if missing_scrape_blocks_prompt(need_usage, need_context) {
+                    // Name the guard that is blocking. `skipped_unsafe_scrape`
+                    // on its own is a dead end for an operator: with a
+                    // third-party model `/usage` renders nothing parseable, so
+                    // a configured safety buffer can make this fire on every
+                    // tick forever.
+                    log::warn!(
+                        "scheduler: scrape returned no usable data for prompt={} — blocking the \
+                         fire. weekly_buffer={} session_buffer={} context_threshold={:?}. \
+                         A threshold that the provider never satisfies will skip every tick.",
+                        prompt.id,
+                        prompt.weekly_safety_buffer_pct,
+                        prompt.session_safety_buffer_pct,
+                        prompt.context_clear_threshold_tokens
+                    );
                     skip(
                         &state,
                         &prompt,
@@ -599,6 +613,23 @@ async fn skip(
         .into_iter()
         .next()
         .map(|r| r.outcome);
+    // Skips used to be entirely silent — the only evidence was a run-history
+    // row nobody was watching. A schedule that stops firing for hours
+    // produced nothing at all in the log, which is indistinguishable from
+    // "warren is idle". Log every skip, and say whether it is a repeat so
+    // a persistent condition is obvious.
+    if prev.as_deref() == Some(outcome) {
+        log::warn!(
+            "scheduler: skip prompt={} outcome={outcome} (repeating — no new run row)",
+            prompt.id
+        );
+    } else {
+        log::warn!(
+            "scheduler: skip prompt={} outcome={outcome} next_fire_in={}s",
+            prompt.id,
+            prompt.interval_seconds
+        );
+    }
     if prev.as_deref() != Some(outcome) {
         db_ops::insert_run_started(
             &state.db,
@@ -645,8 +676,21 @@ async fn fetch_fresh_usage(
     // ignore — the worst case is the run row records `None` for
     // `usage_context_pct`, which matches the "no scrape yet" sentinel.
     if need_context {
+        // Log the request itself. Without this, "warren asked and rabbit
+        // never answered" and "warren never asked" are the same symptom —
+        // neither shows up on the agent page, and the 5s wait makes them
+        // indistinguishable.
+        log::info!(
+            "scheduler: requesting /context scrape (agent {}) for the auto-clear threshold",
+            handle.agent_id
+        );
         if let Err(e) = handle.context_check().await {
-            log::warn!("scheduler: context_check send failed (ignored): {e:?}");
+            // Previously ignored, on the assumption that a failed send is
+            // harmless. It is not: the guard below then waits out the full
+            // timeout for an envelope that was never requested, and reports
+            // it as a scrape failure. Bail immediately and say so.
+            log::error!("scheduler: context_check send failed, cannot evaluate the guard: {e:?}");
+            return None;
         }
     }
     if !need_usage && !need_context {
@@ -688,11 +732,28 @@ async fn fetch_fresh_usage(
     // early return without the needed field is treated identically.
     let tup = match result {
         Ok(t) => t,
-        Err(_) => return None,
+        Err(_) => {
+            // Say we were waiting and gave up. Without this the only clue is
+            // a `skipped_unsafe_scrape` row, and "warren asked but the modal
+            // never painted" is indistinguishable from "warren never asked"
+            // when all you can see is the agent page.
+            log::warn!(
+                "scheduler: usage scrape timed out after {timeout_d:?} \
+                 (need_usage={need_usage}, need_context={need_context}) — \
+                 no envelope carried the field the guard needs"
+            );
+            return None;
+        }
     };
     let (weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens) = tup;
     if !usage_collected(need_usage, weekly_pct) || !context_collected(need_context, ctx_used_tokens)
     {
+        log::warn!(
+            "scheduler: usage scrape closed without the required field \
+             (need_usage={need_usage} got_weekly={weekly_pct:?}, need_context={need_context} \
+             got_ctx_used_tokens={ctx_used_tokens:?}) — the /usage or /context modal \
+             did not deliver a parseable reply"
+        );
         return None;
     }
     Some((weekly_pct, session_pct, ctx_used_pct, ctx_used_tokens))
