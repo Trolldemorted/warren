@@ -1142,6 +1142,29 @@ pub async fn set_next_fire_at(
     Ok(())
 }
 
+/// Advance `next_fire_at` WITHOUT touching `last_fired_at`.
+///
+/// Every non-fire path (a skip, a stale-run sweep, a failed submit) used to
+/// call `set_next_fire_at` with the current time, which stamped
+/// `last_fired_at` for a prompt that never reached the agent. The schedule
+/// page then showed a fire that did not happen, and a prompt that had been
+/// skipping for hours looked busier than one that was actually running.
+pub async fn reschedule_next_fire(
+    db: &Db,
+    id: Uuid,
+    next_fire_at: chrono::DateTime<chrono::Utc>,
+) -> AppResult<()> {
+    let mut am = scheduled_prompt::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .into_active_model();
+    am.next_fire_at = Set(Some(next_fire_at));
+    am.updated_at = Set(chrono::Utc::now());
+    am.update(db).await?;
+    Ok(())
+}
+
 /// Mark `last_finished_at` once observation completes. The scheduler
 /// uses this to advance the interval anchor for the next slot.
 pub async fn mark_scheduled_prompt_finished(

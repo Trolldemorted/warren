@@ -136,7 +136,7 @@ async fn reconcile_after_restart(state: &AppState) -> anyhow::Result<u64> {
         db_ops::finalize_run(&state.db, run.id, "warren_restart", Some("warren_restart")).await?;
         if let Some(p) = db_ops::get_scheduled_prompt(&state.db, run.scheduled_prompt_id).await? {
             let next = now + chrono::Duration::seconds(p.interval_seconds);
-            db_ops::set_next_fire_at(&state.db, p.id, next, now).await?;
+            db_ops::reschedule_next_fire(&state.db, p.id, next).await?;
             db_ops::mark_scheduled_prompt_finished(&state.db, p.id, now).await?;
         }
         reconciled += 1;
@@ -200,7 +200,7 @@ async fn finalize_stale_run(
     db_ops::mark_scheduled_prompt_finished(&state.db, run.scheduled_prompt_id, now).await?;
     if let Some(p) = db_ops::get_scheduled_prompt(&state.db, run.scheduled_prompt_id).await? {
         let next = now + chrono::Duration::seconds(p.interval_seconds);
-        db_ops::set_next_fire_at(&state.db, p.id, next, now).await?;
+        db_ops::reschedule_next_fire(&state.db, p.id, next).await?;
     }
     log::warn!(
         "scheduler: stale run {} for prompt {} finalized as warren_restart",
@@ -520,7 +520,7 @@ pub async fn fire_prompt(
             run.id
         );
         let next = now + chrono::Duration::seconds(prompt.interval_seconds);
-        db_ops::set_next_fire_at(&state.db, prompt.id, next, now).await?;
+        db_ops::reschedule_next_fire(&state.db, prompt.id, next).await?;
         return Ok(());
     }
 
@@ -645,7 +645,7 @@ async fn skip(
         .await?;
     }
     let next = now + chrono::Duration::seconds(prompt.interval_seconds);
-    db_ops::set_next_fire_at(&state.db, prompt.id, next, now).await?;
+    db_ops::reschedule_next_fire(&state.db, prompt.id, next).await?;
     Ok(())
 }
 
