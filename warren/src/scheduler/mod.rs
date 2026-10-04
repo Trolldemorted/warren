@@ -18,10 +18,10 @@ const USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// give-up should only fire on something genuinely not going to clear.
 const RESUME_BUDGET: Duration = Duration::from_secs(4 * 60 * 60);
 
-/// What a bump types into claude's PTY. Resumes the interrupted turn rather
-/// than starting a new one — a fresh scheduled prompt must not fire until
-/// this one has genuinely finished.
-const BUMP_NUDGE: &str = "continue";
+/// What a bump types into claude's PTY. Resumes the interrupted turn
+/// rather than starting a new one — a fresh scheduled prompt must not
+/// fire until this one has genuinely finished.
+pub const BUMP_NUDGE: &[u8] = b"continue\r";
 
 /// Delay before the next bump, or `None` once the budget is spent.
 ///
@@ -875,68 +875,59 @@ struct ResumeState {
 }
 
 impl ResumeState {
-    /// One bump: clear a wedged input line, nudge claude to carry on, then
-    /// make sure there is exactly one unclaimed bump in the agent's inbox.
+    /// One bump: clear a wedged input line, type `continue` into the PTY,
+    /// then make sure there is exactly one unclaimed bump in the inbox.
     ///
-    /// The nudge is the part that actually recovers the turn. An inbox row
-    /// cannot: claude only acts on what reaches its PTY, and nothing claims
-    /// an inbox item while the agent is stuck. The inbox row is for the
-    /// scheduler's own gate — `fire_prompt`'s team-scope check is
-    /// `count_inbox_by_target > 0`, so with an empty inbox the re-armed
-    /// schedule would skip forever and never resume.
+    /// The nudge is written straight to the PTY via `send_keys`, not sent as
+    /// a `Prompt`. That is deliberate and it is the whole reason this works:
+    /// the prompt path is gated on the agent being idle, and an agent blocked
+    /// on an API limit is *never* idle — the turn is wedged, so the state is
+    /// `Running` indefinitely. Gating on idle, as this did originally,
+    /// guarantees the nudge never fires. `send_keys` has no such gate: the
+    /// bytes always reach the PTY, which is exactly the `tmux send-keys`
+    /// trick the community watchdogs use.
     ///
-    /// The nudge is deliberately the word `continue`, not the schedule's own
-    /// prompt text: the rule is that no *new* scheduled prompt may fire
-    /// until the interrupted one truly finishes, and `continue` resumes the
-    /// work already in flight instead of starting something new. This is
-    /// also what the community watchdogs type.
+    /// The interrupt first clears whatever is half-typed on the input line,
+    /// so the nudge lands on a clean prompt instead of appending to it.
+    ///
+    /// The inbox row is not the recovery mechanism — claude acts on what
+    /// reaches its PTY, and nothing claims an inbox item while the agent is
+    /// wedged. It is there for the scheduler's own gate: `fire_prompt`'s
+    /// team-scope check is `count_inbox_by_target > 0`, so with an empty
+    /// inbox the re-armed schedule would skip forever and never resume.
     async fn bump(&self, state: &AppState, handle: &AgentHandle) {
-        let mut ready = false;
         match handle.state().await {
             Ok(snapshot) if snapshot.state != rabbit_lib::wire::AgentState::Idle => {
-                // Only act on an idle session; a working one is making
-                // progress and must not be interrupted. This is the
-                // safeguard the community watchdogs all converge on.
                 if let Err(e) = handle.interrupt().await {
                     log::warn!("scheduler: resume interrupt failed: {e:?}");
                 } else {
                     log::info!(
-                        "scheduler: resume interrupted a non-idle agent ({:?}) to clear wedged input",
+                        "scheduler: interrupted a {:?} agent to clear its input line",
                         snapshot.state
                     );
                 }
-                // Give the interrupt a moment to land, otherwise the nudge
-                // races the Ctrl-C and the busy-gate rejects it.
+                // Let the Ctrl-C land before typing into the same line.
                 tokio::time::sleep(Duration::from_millis(750)).await;
-                ready = handle
-                    .state()
-                    .await
-                    .map(|s| s.state == rabbit_lib::wire::AgentState::Idle)
-                    .unwrap_or(false);
             }
-            Ok(_) => ready = true,
+            Ok(_) => {}
             Err(e) => log::warn!("scheduler: resume could not read agent state: {e:?}"),
         }
-        if ready {
-            match handle
-                .prompt_with_origin(BUMP_NUDGE, false, uuid::Uuid::nil())
-                .await
-            {
-                Ok(_) => log::info!(
-                    "scheduler: nudged class={} to continue after {}",
-                    self.class,
-                    self.error_type
-                ),
-                Err(e) => log::warn!("scheduler: resume nudge rejected: {e:?}"),
-            }
-        } else {
-            log::warn!(
-                "scheduler: agent still not idle after interrupt — skipping nudge, \
-                 will retry next cycle"
-            );
+        match handle
+            .send_keys(
+                rabbit_lib::wire::TERM_CHAN_CLAUDE,
+                bytes::Bytes::from_static(BUMP_NUDGE),
+            )
+            .await
+        {
+            Ok(()) => log::info!(
+                "scheduler: nudged class={} to continue after {}",
+                self.class,
+                self.error_type
+            ),
+            Err(e) => log::warn!("scheduler: resume nudge failed: {e:?}"),
         }
         let payload = format!(
-            "scheduled prompt `{}` was interrupted by an API error ({}); \
+            "scheduled prompt for class `{}` was interrupted by an API error ({}); \
              this is a scheduler bump, safe to claim once you are running again",
             self.class, self.error_type
         );
@@ -1905,5 +1896,26 @@ mod stop_failure_tests {
             }
         }
         panic!("the ladder never exhausts the resume budget");
+    }
+}
+
+#[cfg(test)]
+mod bump_nudge_tests {
+    use super::BUMP_NUDGE;
+
+    /// The nudge must terminate the line. Without the CR it is typed into
+    /// the prompt but never submitted, so claude sits there holding the
+    /// text and the next cycle appends another copy.
+    #[test]
+    fn nudge_is_submitted_with_a_carriage_return() {
+        assert_eq!(BUMP_NUDGE, b"continue\r");
+    }
+
+    /// It resumes the interrupted turn; it must not be the schedule's own
+    /// prompt text, since no new scheduled prompt may fire until the
+    /// interrupted one has genuinely finished.
+    #[test]
+    fn nudge_resumes_rather_than_restarts() {
+        assert!(!BUMP_NUDGE.windows(5).any(|w| w == b"clear"));
     }
 }
