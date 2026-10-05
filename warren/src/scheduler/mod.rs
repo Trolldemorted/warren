@@ -782,11 +782,30 @@ async fn fetch_fresh_usage(
     // the clear/no-clear decision run on stale data — the scrape we
     // fired was then never waited for. `UsageAccum` accepts each
     // field only from the source that actually measured it.
+    let mut logged_any = false;
     let result = tokio::time::timeout(timeout_d, async {
         let mut acc = UsageAccum::new(need_usage, need_context);
         loop {
             match rx.recv().await {
                 Ok(EnvelopeBody::Usage(snap)) => {
+                    // Log the first envelope seen in the window. A silent
+                    // 5s timeout cannot distinguish "rabbit never published"
+                    // from "rabbit published something with no data in it",
+                    // and those need opposite fixes. Only the first is
+                    // logged so a busy agent does not flood.
+                    if !logged_any {
+                        logged_any = true;
+                        log::debug!(
+                            "scheduler: first scrape envelope source={:?} ctx_used_tokens={:?} \
+                             ctx_used_pct={:?} ctx_total={:?} weekly_pct={:?} session_pct={:?}",
+                            snap.source,
+                            snap.ctx_used_tokens,
+                            snap.ctx_used_pct,
+                            snap.ctx_total_tokens,
+                            snap.weekly_pct,
+                            snap.session_pct
+                        );
+                    }
                     acc.absorb(&snap);
                     if acc.satisfied() {
                         return acc.into_tuple();
@@ -813,8 +832,8 @@ async fn fetch_fresh_usage(
             // when all you can see is the agent page.
             log::warn!(
                 "scheduler: usage scrape timed out after {timeout_d:?} \
-                 (need_usage={need_usage}, need_context={need_context}) — \
-                 no envelope carried the field the guard needs"
+                 (need_usage={need_usage}, need_context={need_context}, saw_envelope={logged_any}) \
+                 — no envelope carried the field the guard needs"
             );
             return None;
         }
