@@ -66,6 +66,10 @@ pub struct AgentStateSnapshot {
     /// refreshed on subsequent `Command::Resize` dispatches. None until
     /// the first `TuiConfig` arrives.
     pub term_size: Option<TermSize>,
+    /// Provider classification of the failure that put the agent into
+    /// `ApiBlocked` (`rate_limit`, `overloaded`, …). `None` in every
+    /// other state, and cleared when the agent leaves `ApiBlocked`.
+    pub error_type: Option<String>,
 }
 
 impl Default for AgentStateSnapshot {
@@ -79,6 +83,7 @@ impl Default for AgentStateSnapshot {
                 ..Default::default()
             },
             term_size: None,
+            error_type: None,
         }
     }
 }
@@ -165,11 +170,19 @@ impl AgentHandle {
         let has_usage =
             new_state.last_usage.input_tokens > 0 || new_state.last_usage.output_tokens > 0;
         let term_size = new_state.term_size;
+        let error_type = new_state.error_type.clone();
         {
             let mut g = self.state.lock().expect("state mutex poisoned");
             g.state = state;
             g.session_id = session_id.clone();
             g.claude_version = claude_version;
+            // Only meaningful while blocked; sticky-cleared so a stale
+            // classification can't outlive the state that justified it.
+            if state == AgentState::ApiBlocked {
+                g.error_type = error_type.clone();
+            } else {
+                g.error_type = None;
+            }
             if has_usage {
                 g.last_usage = usage;
             }
@@ -184,6 +197,11 @@ impl AgentHandle {
             state,
             session_id,
             reason: None,
+            error_type: if state == AgentState::ApiBlocked {
+                error_type
+            } else {
+                None
+            },
         }));
     }
 

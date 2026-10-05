@@ -456,8 +456,6 @@ components:
             - meta_channel_closed
             - observation_deadline
             - api_error
-            - api_error_unaddressable
-            - api_error_unrecovered
             - failed
             - skipped_no_matching_agent
             - skipped_no_idle_agent

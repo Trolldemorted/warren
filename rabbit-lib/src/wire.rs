@@ -308,6 +308,12 @@ pub struct StateFrame {
     pub state: AgentState,
     pub session_id: Option<String>,
     pub reason: Option<String>,
+    /// Set only when `state` is `ApiBlocked`: the provider's own
+    /// classification of the failure (`rate_limit`, `overloaded`,
+    /// `server_error`, …). It is what the nudge ladder paces itself
+    /// against. `reason` stays free-form for its existing uses.
+    #[serde(default)]
+    pub error_type: Option<String>,
 }
 
 /// — the canonical typed state enum.
@@ -320,6 +326,13 @@ pub enum AgentState {
     Starting,
     Idle,
     Running,
+    /// A turn is still in flight but the provider is refusing to serve it
+    /// (`StopFailure` with a retryable class). Distinct from `Idle`: the
+    /// turn has not ended, so the agent must not be given new work, and
+    /// distinct from `Running`: nothing is progressing, so nudging is
+    /// appropriate. Collapsing this into `Idle` is what let a second
+    /// prompt land on a live turn.
+    ApiBlocked,
     Ended,
     Dead,
 }
@@ -332,6 +345,7 @@ impl AgentState {
             AgentState::Starting => "starting",
             AgentState::Idle => "idle",
             AgentState::Running => "running",
+            AgentState::ApiBlocked => "api_blocked",
             AgentState::Ended => "ended",
             AgentState::Dead => "dead",
         }
@@ -345,6 +359,7 @@ impl std::str::FromStr for AgentState {
             "starting" => Ok(AgentState::Starting),
             "idle" => Ok(AgentState::Idle),
             "running" => Ok(AgentState::Running),
+            "api_blocked" | "apiblocked" => Ok(AgentState::ApiBlocked),
             "ended" => Ok(AgentState::Ended),
             "dead" => Ok(AgentState::Dead),
             other => Err(format!("unknown agent state: {other}")),

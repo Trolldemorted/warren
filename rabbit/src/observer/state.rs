@@ -4,6 +4,9 @@ pub enum State {
     Starting,
     Idle,
     Running,
+    /// A turn ended on an API error but has NOT completed. The turn is
+    /// still in flight, so the agent is not available for new work.
+    ApiBlocked,
     Ended,
     Dead,
 }
@@ -14,6 +17,7 @@ impl State {
             State::Starting => "starting",
             State::Idle => "idle",
             State::Running => "running",
+            State::ApiBlocked => "api_blocked",
             State::Ended => "ended",
             State::Dead => "dead",
         }
@@ -44,6 +48,7 @@ impl State {
             rabbit_lib::wire::AgentState::Starting => State::Starting,
             rabbit_lib::wire::AgentState::Idle => State::Idle,
             rabbit_lib::wire::AgentState::Running => State::Running,
+            rabbit_lib::wire::AgentState::ApiBlocked => State::ApiBlocked,
             rabbit_lib::wire::AgentState::Ended => State::Ended,
             rabbit_lib::wire::AgentState::Dead => State::Dead,
         }

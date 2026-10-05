@@ -1149,6 +1149,20 @@ pub async fn set_next_fire_at(
 /// `last_fired_at` for a prompt that never reached the agent. The schedule
 /// page then showed a fire that did not happen, and a prompt that had been
 /// skipping for hours looked busier than one that was actually running.
+///
+/// Enabled schedules currently left un-armed (`next_fire_at IS NULL`).
+///
+/// A `StopFailure` deliberately parks `next_fire_at` at NULL so the schedule
+/// cannot fire while the agent's turn is still in flight. These are the ones
+/// waiting for the agent to recover.
+pub async fn list_suspended_scheduled_prompts(db: &Db) -> AppResult<Vec<scheduled_prompt::Model>> {
+    Ok(scheduled_prompt::Entity::find()
+        .filter(scheduled_prompt::Column::Enabled.eq(true))
+        .filter(scheduled_prompt::Column::NextFireAt.is_null())
+        .all(db)
+        .await?)
+}
+
 pub async fn reschedule_next_fire(
     db: &Db,
     id: Uuid,

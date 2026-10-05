@@ -234,12 +234,13 @@ fn parse(kind: &str, payload: &serde_json::Value, handle: &ObserverHandle) -> Ob
         // know the vocabulary.
         "stop_failure" => ObserverEvent {
             kind: "stop_failure",
-            // The turn IS over — it ended on an error, not a normal stop.
-            // Leaving the state alone is what wedges the agent: it stays
-            // `Running` forever (no `Stop` hook will ever fire to clear
-            // it), which makes the busy-gate reject every later prompt and
-            // stops the agent from being picked as Idle by any schedule.
-            state: Some(State::Idle),
+            // The turn has NOT ended — it is wedged on an API error. This is
+            // its own state, not `Idle` (which would make the agent eligible
+            // for a second prompt on a live turn) and not `Running` (nothing
+            // is progressing, so nudging is appropriate). No `Stop` hook will
+            // ever arrive to move it on, so this state is sticky until the
+            // nudge ladder gets claude going again.
+            state: Some(State::ApiBlocked),
             session_id: None,
             prompt_id: payload
                 .get("prompt_id")
@@ -331,12 +332,16 @@ mod tests {
         assert_eq!(h.latest_state(), State::Idle);
     }
 
-    /// A turn that ends on an API error still ended. Leaving the state
-    /// alone wedges the agent at `Running` forever — no `Stop` hook will
-    /// ever arrive to clear it — which makes the busy-gate reject every
-    /// later prompt and stops any schedule from picking the agent as idle.
+    /// A turn that ends on an API error has NOT ended. It is wedged:
+    /// claude is sitting at an error with the turn unended and no `Stop`
+    /// hook will ever arrive to clear it.
+    ///
+    /// It must be `ApiBlocked`, not `Idle` — `Idle` would make the agent
+    /// eligible for a second prompt on a live turn — and not `Running`,
+    /// because nothing is progressing and the nudge ladder keys off this
+    /// state to know nudging is appropriate.
     #[test]
-    fn stop_failure_marks_idle_because_the_turn_ended() {
+    fn stop_failure_marks_api_blocked_not_idle() {
         let h = ObserverHandle::new();
         h.ingest("UserPromptSubmit", &json!({}));
         assert_eq!(h.latest_state(), State::Running);
@@ -346,13 +351,11 @@ mod tests {
         );
         assert_eq!(
             h.latest_state(),
-            State::Idle,
-            "a StopFailure ends the turn and must clear Running"
+            State::ApiBlocked,
+            "a StopFailure leaves the turn in flight — it must not read as Idle"
         );
     }
 
-    /// The typed classification must survive to the raw payload; the
-    /// scheduler branches on `error_type` and must never parse the prose.
     #[test]
     fn stop_failure_preserves_error_type_and_message() {
         let h = ObserverHandle::new();

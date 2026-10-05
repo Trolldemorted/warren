@@ -279,6 +279,7 @@ pub async fn run(config: Config) -> Result<()> {
                             state: "dead".into(),
                             session_id: None,
                             reason: Some("spawn_failed".into()),
+                            error_type: None,
                         },
                     )
                     .await;
@@ -757,7 +758,7 @@ pub async fn run(config: Config) -> Result<()> {
                                     StateFrame {
                                         state: agent_state_from_observer(st),
                                         session_id: observer.latest_session(),
-                                        reason: None,
+                                        reason: None, error_type: None,
                                     },
                                 )
                                 .await;
@@ -1454,6 +1455,7 @@ fn spawn_run_one(
                     state: "idle".into(),
                     session_id: None,
                     reason: None,
+                    error_type: None,
                 },
             )
             .await;
@@ -1584,6 +1586,7 @@ async fn handle_outcome(
             state: state_label.into(),
             session_id,
             reason: reason.map(|s| s.to_string()),
+            error_type: None,
         },
     )
     .await;
@@ -1606,6 +1609,7 @@ async fn handle_outcome(
                         state: "dead".into(),
                         session_id: None,
                         reason: Some("crash_loop".into()),
+                        error_type: None,
                     },
                 )
                 .await;
@@ -1644,10 +1648,22 @@ fn build_envelopes(ev: &ObserverEvent) -> Vec<EnvelopeBody> {
     // side-effect echo lands (matches the supervisor's own ordering:
     // `send_state` -> `cmd_tx.send(State)` precedes any per-turn traffic).
     if let Some(st) = ev.state {
+        // Only the ApiBlocked frame carries the provider's classification —
+        // that is what the nudge ladder paces itself against.
+        let error_type = if agent_state_from_observer(st) == AgentState::ApiBlocked {
+            ev.raw
+                .as_ref()
+                .and_then(|r| r.get("error_type"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        } else {
+            None
+        };
         out.push(EnvelopeBody::State(StateFrame {
             state: agent_state_from_observer(st),
             session_id: ev.session_id.clone(),
             reason: Some(ev.kind.to_string()),
+            error_type,
         }));
     }
     let side_effect = match ev.kind {
@@ -1744,6 +1760,7 @@ fn agent_state_from_observer(st: State) -> AgentState {
         State::Starting => AgentState::Starting,
         State::Idle => AgentState::Idle,
         State::Running => AgentState::Running,
+        State::ApiBlocked => AgentState::ApiBlocked,
         State::Ended => AgentState::Ended,
         State::Dead => AgentState::Dead,
     }
@@ -2768,6 +2785,7 @@ mod tests {
                 state: AgentState::Idle,
                 session_id: None,
                 reason: None,
+                error_type: None,
             },
         )
         .await
@@ -2781,6 +2799,7 @@ mod tests {
                 state: AgentState::Dead,
                 session_id: None,
                 reason: Some("crashed".into()),
+                error_type: None,
             },
         )
         .await

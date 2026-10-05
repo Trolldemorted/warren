@@ -194,6 +194,7 @@ async fn run_inner<T: WsTransport>(
             cols: tui_cols,
             rows: tui_rows,
         }),
+        error_type: None,
     });
 
     // send the warren-supplied grid size to
@@ -301,8 +302,7 @@ async fn run_inner<T: WsTransport>(
                                         // State updates don't carry a fresh term_size;
                                         // leave it None so `update_state` keeps the
                                         // cached value sticky.
-                                        term_size: None,
-                                    });
+                                        term_size: None, error_type: None,});
                                 }
                                 if let EnvelopeBody::PromptEcho(pe) = &env.body {
                                     started_at.insert(pe.prompt_id, Utc::now());
@@ -429,6 +429,7 @@ async fn run_inner<T: WsTransport>(
             ..Default::default()
         },
         term_size: None,
+        error_type: None,
     });
 }
 
@@ -508,6 +509,10 @@ async fn dispatch<T: WsTransport>(
             let snap = handle.snapshot();
             let reject_reason: Option<&'static str> = match snap.state {
                 AgentState::Running => Some("agent is running a turn"),
+                // A blocked turn is STILL in flight — claude is sitting at an
+                // API error with the turn unended. Treating it as available is
+                // how a second prompt lands on a live turn.
+                AgentState::ApiBlocked => Some("agent is blocked on an API error"),
                 AgentState::Dead => Some("agent is dead"),
                 _ => None,
             };
@@ -1016,6 +1021,7 @@ mod tests {
                 state: AgentState::Idle,
                 session_id: Some("session-A".into()),
                 reason: None,
+                error_type: None,
             }),
         };
         let idle_json = serde_json::to_string(&idle).expect("serialize state");

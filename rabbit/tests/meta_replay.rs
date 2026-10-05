@@ -73,6 +73,7 @@ fn state(s: &str) -> EnvelopeBody {
         state: s.into(),
         session_id: None,
         reason: None,
+        error_type: None,
     })
 }
 

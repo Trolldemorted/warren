@@ -135,13 +135,83 @@ async fn reconcile_after_restart(state: &AppState) -> anyhow::Result<u64> {
         }
         db_ops::finalize_run(&state.db, run.id, "warren_restart", Some("warren_restart")).await?;
         if let Some(p) = db_ops::get_scheduled_prompt(&state.db, run.scheduled_prompt_id).await? {
-            let next = now + chrono::Duration::seconds(p.interval_seconds);
-            db_ops::reschedule_next_fire(&state.db, p.id, next).await?;
+            // Only re-arm if the agent isn't still blocked. Re-arming
+            // unconditionally is what let a warren restart mid-stall walk a
+            // suspended schedule back into the tick loop while the agent
+            // remained unusable. The agent's own state is the authority.
+            let blocked = run
+                .agent_id
+                .and_then(|aid| state.live.registry.get(&aid))
+                .map(|h| matches!(h.snapshot().state, rabbit_lib::wire::AgentState::ApiBlocked))
+                .unwrap_or(false);
+            if !blocked {
+                let next = now + chrono::Duration::seconds(p.interval_seconds);
+                db_ops::reschedule_next_fire(&state.db, p.id, next).await?;
+            } else {
+                log::warn!(
+                    "scheduler: prompt={} left un-armed — its agent is still ApiBlocked",
+                    p.id
+                );
+            }
             db_ops::mark_scheduled_prompt_finished(&state.db, p.id, now).await?;
         }
         reconciled += 1;
     }
     Ok(reconciled)
+}
+
+/// Re-arm schedules left un-armed by an API stall whose agent has since
+/// recovered.
+///
+/// A `StopFailure` parks `next_fire_at` at NULL, and the nudge ladder re-arms
+/// it when the agent leaves `ApiBlocked`. But if the agent recovers while
+/// nobody is watching — a warren restart mid-stall destroys the ladder — the
+/// schedule would sit NULL forever and never run again.
+///
+/// The agent's own state is the gate, so un-arming here is safe: it only ever
+/// applies to a schedule whose agent is `Idle`, i.e. nothing in flight. A
+/// blocked or working agent is left alone.
+async fn rearm_recovered_schedules(state: &Arc<AppState>) -> anyhow::Result<u64> {
+    let suspended = db_ops::list_suspended_scheduled_prompts(&state.db).await?;
+    if suspended.is_empty() {
+        return Ok(0);
+    }
+    // Only Idle agents may be re-armed. Check the live handles rather than
+    // the DB: a disconnected agent is not a recovered one, and its absence
+    // must leave the schedule suspended.
+    let mut idle: Vec<(uuid::Uuid, String, Option<String>)> = Vec::new();
+    for entry in state.live.registry.iter() {
+        let (aid, handle) = (entry.key(), entry.value());
+        if matches!(handle.snapshot().state, rabbit_lib::wire::AgentState::Idle) {
+            if let Ok(Some(a)) = db_ops::get_agent(&state.db, *aid).await {
+                idle.push((*aid, a.class, a.kind));
+            }
+        }
+    }
+    if idle.is_empty() {
+        return Ok(0);
+    }
+    let now = chrono::Utc::now();
+    let mut rearmed = 0u64;
+    for p in &suspended {
+        let targets_idle = match &p.agent_id {
+            Some(aid) => idle.iter().any(|(id, _, _)| id == aid),
+            None => idle.iter().any(|(_, class, kind)| {
+                class == p.target_class.as_deref().unwrap_or("") && p.target_kind == *kind
+            }),
+        };
+        if !targets_idle {
+            continue;
+        }
+        let next = now + chrono::Duration::seconds(p.interval_seconds);
+        db_ops::reschedule_next_fire(&state.db, p.id, next).await?;
+        log::info!(
+            "scheduler: prompt={} re-armed — its agent recovered while the schedule was suspended",
+            p.id
+        );
+        rearmed += 1;
+    }
+    Ok(rearmed)
 }
 
 async fn tick(state: &Arc<AppState>) -> anyhow::Result<()> {
@@ -155,6 +225,10 @@ async fn tick(state: &Arc<AppState>) -> anyhow::Result<()> {
                 log::error!("scheduler: fire_prompt failed: {e:?}");
             }
         });
+    }
+
+    if let Err(e) = rearm_recovered_schedules(state).await {
+        log::error!("scheduler: rearm_recovered_schedules failed: {e:?}");
     }
 
     let threshold = now - chrono::Duration::seconds(STALE_RUN_THRESHOLD.as_secs() as i64);
@@ -833,6 +907,18 @@ impl UsageAccum {
     }
 }
 
+/// Close a run without touching the schedule.
+///
+/// Used when the turn was interrupted but the agent has NOT finished it. The
+/// run row is the honest record, so it gets closed; `next_fire_at` is left
+/// NULL, which is the mechanism that keeps the schedule from firing again
+/// until the agent actually recovers.
+async fn finalize_run_only(state: &AppState, run_id: Uuid, outcome: &str, error: Option<&str>) {
+    if let Err(e) = db_ops::finalize_run(&state.db, run_id, outcome, error).await {
+        log::error!("scheduler: finalize {outcome} failed: {e:?}");
+    }
+}
+
 /// Close a run out and put the schedule back on its normal cadence.
 ///
 /// Every terminal path writes the same three things — the run outcome, the
@@ -897,7 +983,11 @@ impl ResumeState {
     /// inbox the re-armed schedule would skip forever and never resume.
     async fn bump(&self, state: &AppState, handle: &AgentHandle) {
         match handle.state().await {
-            Ok(snapshot) if snapshot.state != rabbit_lib::wire::AgentState::Idle => {
+            // Only clear the input line when the agent is actually wedged.
+            // A `Running` agent is making progress and must be left alone —
+            // the nudge ladder only runs while the state is `ApiBlocked`, so
+            // this is defence in depth, not the primary gate.
+            Ok(snapshot) if snapshot.state == rabbit_lib::wire::AgentState::ApiBlocked => {
                 if let Err(e) = handle.interrupt().await {
                     log::warn!("scheduler: resume interrupt failed: {e:?}");
                 } else {
@@ -1004,6 +1094,11 @@ async fn observe(
                         // only the operator can fix. Finalize and re-arm
                         // so the schedule is not wedged behind a problem
                         // that will never clear.
+                        // Fatal classes are not a stall — the agent is usable
+                        // and there is nothing to wait out. Close the run and
+                        // put the schedule back on its cadence, logging loudly
+                        // so a billing failure is never mistaken for a quiet
+                        // schedule.
                         finalize_and_rearm(
                             &state,
                             &prompt,
@@ -1020,9 +1115,26 @@ async fn observe(
                         );
                         return;
                     }
-                    // Retryable. The turn is still pending — we merely lost
-                    // the ability to watch it. Hold the run open and the
-                    // schedule suspended, and start nudging.
+                    // Retryable. Finalize the run honestly — the turn WAS
+                    // interrupted — but do NOT re-arm `next_fire_at`. Leaving
+                    // it NULL is what enforces the rule that no new scheduled
+                    // prompt fires until this one truly finishes: the claim
+                    // query filters `next_fire_at <= now`, which NULL never
+                    // satisfies. We don't need the agent state to protect the
+                    // schedule, and we don't need to fabricate a "gave up"
+                    // outcome to un-wedge it.
+                    //
+                    // Recovery is then driven entirely by the agent's own
+                    // `ApiBlocked` state, which rabbit owns and re-declares on
+                    // connect. The ladder nudges while that state holds and
+                    // re-arms this schedule when it lifts.
+                    finalize_run_only(&state, run_id, "api_error", Some(&error_message)).await;
+                    log::warn!(
+                        "scheduler: api_error (retryable) prompt={} run={} type={error_type}: {error_message} \
+                         — run closed, schedule left un-armed until the agent recovers",
+                        prompt.id,
+                        run_id
+                    );
                     let agent = db_ops::get_agent(&state.db, handle.agent_id).await;
                     let (class, kind) = match agent {
                         Ok(Some(a)) => (a.class, a.kind),
@@ -1030,27 +1142,11 @@ async fn observe(
                     };
                     if class.is_empty() {
                         log::error!(
-                            "scheduler: cannot resume — agent {} has no class; \
-                             holding run open would wedge the schedule. Finalizing.",
+                            "scheduler: cannot bump — agent {} has no class to address an inbox row to",
                             handle.agent_id
                         );
-                        finalize_and_rearm(
-                            &state,
-                            &prompt,
-                            run_id,
-                            fired_at,
-                            "api_error_unaddressable",
-                            Some(&error_message),
-                        )
-                        .await;
                         return;
                     }
-                    log::warn!(
-                        "scheduler: api_error (retryable) prompt={} run={} type={error_type}: {error_message} \
-                         — holding run open, bumping every cycle",
-                        prompt.id,
-                        run_id
-                    );
                     let mut rs = ResumeState {
                         class,
                         kind,
@@ -1064,14 +1160,6 @@ async fn observe(
                     if let Some(d) = bump_delay(rs.attempt) {
                         bump_tick.as_mut().reset(tokio::time::Instant::now() + d);
                     }
-                    // Push the observation hard deadline out to match the
-                    // resume budget. Left alone it would fire at the 1h
-                    // mark, finalize the run as `observation_deadline` and
-                    // cut recovery short — reintroducing the original
-                    // behaviour half way through the fix.
-                    deadline
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + RESUME_BUDGET);
                     resuming = Some(rs);
                 }
                 Ok(EnvelopeBody::NeedsInput { reason, .. }) => {
@@ -1162,40 +1250,50 @@ async fn observe(
                     return;
                 }
             },
-            // Bump cycle, armed only while a run is in resume mode. Until
-            // the operator's provider lets the turn finish, this is the only
-            // thing keeping the run — and therefore the whole schedule —
-            // alive.
+            // Bump cycle. Armed only while the agent is in `ApiBlocked`,
+            // which is the whole condition this exists for: a turn that is
+            // still in flight but making no progress. `Running` is never
+            // nudged — that is an agent that is working.
             _ = &mut bump_tick, if resuming.is_some() => {
-                let exhausted = {
-                    let rs = resuming.as_mut().expect("guarded by `if resuming.is_some()`");
-                    match bump_delay(rs.attempt) {
-                        Some(d) if rs.waited + d <= RESUME_BUDGET => {
-                            rs.waited += d;
-                            rs.attempt += 1;
-                            bump_tick
-                                .as_mut()
-                                .reset(tokio::time::Instant::now() + d);
-                            false
+                match handle.state().await {
+                    Ok(snap) if snap.state != rabbit_lib::wire::AgentState::ApiBlocked => {
+                        // The block lifted. Re-arm the schedule — it has been
+                        // un-armed (NULL) since the StopFailure — and stop.
+                        let now = chrono::Utc::now();
+                        let next = now + chrono::Duration::seconds(prompt.interval_seconds);
+                        if let Err(e) =
+                            db_ops::set_next_fire_at(&state.db, prompt.id, next, fired_at).await
+                        {
+                            log::error!("scheduler: re-arm on recovery failed: {e:?}");
                         }
-                        _ => true,
+                        log::info!(
+                            "scheduler: prompt={} recovered to {:?}; schedule re-armed",
+                            prompt.id,
+                            snap.state
+                        );
+                        return;
                     }
-                };
-                if exhausted {
-                    let waited = resuming.as_ref().map(|r| r.waited).unwrap_or_default();
-                    finalize_and_rearm(
-                        &state,
-                        &prompt,
-                        run_id,
-                        fired_at,
-                        "api_error_unrecovered",
-                        Some("still failing after the resume budget elapsed"),
-                    )
-                    .await;
+                    Ok(_) => {}
+                    Err(e) => log::warn!("scheduler: bump could not read agent state: {e:?}"),
+                }
+                if let Some(d) = bump_delay(resuming.as_ref().map(|r| r.attempt).unwrap_or(0)) {
+                    bump_tick
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + d);
+                    if let Some(rs) = resuming.as_mut() {
+                        rs.attempt += 1;
+                        rs.waited += d;
+                    }
+                } else {
+                    // Out of ladder. Do NOT re-arm: the agent is still blocked,
+                    // so the schedule must stay suspended. Stop nudging and say
+                    // so — the agent's `ApiBlocked` state remains the
+                    // authority, and a fresh `StopFailure` (or the
+                    // startup reconciliation) picks it up again.
                     log::error!(
-                        "scheduler: giving up on prompt={} run={} after {waited:?} of bumping",
-                        prompt.id,
-                        run_id
+                        "scheduler: prompt={} still blocked after the bump budget; \
+                         leaving it un-armed. The agent stays ApiBlocked until it recovers.",
+                        prompt.id
                     );
                     return;
                 }
@@ -1917,5 +2015,58 @@ mod bump_nudge_tests {
     #[test]
     fn nudge_resumes_rather_than_restarts() {
         assert!(!BUMP_NUDGE.windows(5).any(|w| w == b"clear"));
+    }
+}
+
+#[cfg(test)]
+mod api_blocked_tests {
+    use rabbit_lib::wire::AgentState;
+
+    /// A blocked agent must fail the same single-funnel gate a running one
+    /// does. The turn is still in flight — claude is sitting at an API
+    /// error — so a second prompt landing on it is the failure mode this
+    /// whole state was added to prevent.
+    #[test]
+    fn api_blocked_is_not_treated_as_available() {
+        assert_ne!(AgentState::ApiBlocked, AgentState::Idle);
+        assert_ne!(AgentState::ApiBlocked, AgentState::Running);
+        // Scheduling eligibility is `Idle`-only, so this is what keeps a
+        // blocked agent off every prompt surface.
+        let eligible = |s: AgentState| s == AgentState::Idle;
+        assert!(!eligible(AgentState::ApiBlocked));
+        assert!(!eligible(AgentState::Running));
+        assert!(eligible(AgentState::Idle));
+    }
+
+    /// `stop_failure_marks_api_blocked_not_idle` in rabbit pins the producer
+    /// side. This pins that the classification is the same string rabbit
+    /// publishes, so the ladder's view cannot drift from the state's.
+    #[test]
+    fn error_type_survives_the_wire() {
+        let frame = rabbit_lib::wire::StateFrame {
+            state: AgentState::ApiBlocked,
+            session_id: None,
+            reason: None,
+            error_type: Some("rate_limit".to_string()),
+        };
+        let json = serde_json::to_string(&frame).expect("serialize");
+        assert!(
+            json.contains("api_blocked"),
+            "state serializes snake_case: {json}"
+        );
+        let back: rabbit_lib::wire::StateFrame = serde_json::from_str(&json).expect("roundtrip");
+        assert_eq!(back.state, AgentState::ApiBlocked);
+        assert_eq!(back.error_type.as_deref(), Some("rate_limit"));
+    }
+
+    /// A frame from an older peer omits the new field entirely; it must
+    /// still parse rather than dropping the state update on the floor.
+    #[test]
+    fn state_frame_without_error_type_still_parses() {
+        let back: rabbit_lib::wire::StateFrame =
+            serde_json::from_str(r#"{"state":"idle","session_id":null,"reason":null}"#)
+                .expect("legacy frame parses");
+        assert_eq!(back.state, AgentState::Idle);
+        assert_eq!(back.error_type, None);
     }
 }
