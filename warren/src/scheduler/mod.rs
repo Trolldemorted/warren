@@ -1128,6 +1128,22 @@ async fn observe(
                     // `ApiBlocked` state, which rabbit owns and re-declares on
                     // connect. The ladder nudges while that state holds and
                     // re-arms this schedule when it lifts.
+                    // The ladder is already running (a nudge started a turn
+                    // that failed again). Do not re-finalize the closed run or
+                    // reset the cadence — just note the new classification and
+                    // let the next tick nudge again. Restarting here would
+                    // reset the attempt counter and hammer the PTY.
+                    if resuming.is_some() {
+                        if let Some(rs) = resuming.as_mut() {
+                            rs.error_type = error_type.clone();
+                        }
+                        log::warn!(
+                            "scheduler: api_error again prompt={} type={error_type}: {error_message} \
+                             — provider still refusing, continuing on the ladder",
+                            prompt.id
+                        );
+                        return;
+                    }
                     finalize_run_only(&state, run_id, "api_error", Some(&error_message)).await;
                     log::warn!(
                         "scheduler: api_error (retryable) prompt={} run={} type={error_type}: {error_message} \
@@ -1255,10 +1271,14 @@ async fn observe(
             // still in flight but making no progress. `Running` is never
             // nudged — that is an agent that is working.
             _ = &mut bump_tick, if resuming.is_some() => {
-                match handle.state().await {
-                    Ok(snap) if snap.state != rabbit_lib::wire::AgentState::ApiBlocked => {
-                        // The block lifted. Re-arm the schedule — it has been
-                        // un-armed (NULL) since the StopFailure — and stop.
+                // Two independent decisions: pace the loop, and decide
+                // whether to actually type at the agent. Only `ApiBlocked`
+                // is safe to nudge — `Idle` means the turn is over and
+                // `Running` means it is working.
+                let should_nudge = match handle.state().await {
+                    Ok(snap) if snap.state == rabbit_lib::wire::AgentState::Idle => {
+                        // The turn genuinely finished. Re-arm the schedule —
+                        // it has been parked (NULL) since the StopFailure.
                         let now = chrono::Utc::now();
                         let next = now + chrono::Duration::seconds(prompt.interval_seconds);
                         if let Err(e) =
@@ -1266,39 +1286,50 @@ async fn observe(
                         {
                             log::error!("scheduler: re-arm on recovery failed: {e:?}");
                         }
-                        log::info!(
-                            "scheduler: prompt={} recovered to {:?}; schedule re-armed",
-                            prompt.id,
-                            snap.state
-                        );
+                        log::info!("scheduler: prompt={} reached Idle; schedule re-armed", prompt.id);
                         return;
                     }
-                    Ok(_) => {}
-                    Err(e) => log::warn!("scheduler: bump could not read agent state: {e:?}"),
-                }
-                if let Some(d) = bump_delay(resuming.as_ref().map(|r| r.attempt).unwrap_or(0)) {
-                    bump_tick
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + d);
-                    if let Some(rs) = resuming.as_mut() {
-                        rs.attempt += 1;
-                        rs.waited += d;
+                    Ok(snap) if snap.state == rabbit_lib::wire::AgentState::Running => {
+                        // A turn our nudge started. Leave it strictly alone.
+                        // Falling through to the nudge below would type
+                        // into work that is in progress — and the ladder must
+                        // stay alive here, because if the provider is still
+                        // refusing this turn will fail again and the next
+                        // `StopFailure` needs something still watching.
+                        log::debug!(
+                            "scheduler: prompt={} is Running after a nudge; waiting, not nudging",
+                            prompt.id
+                        );
+                        false
                     }
-                } else {
-                    // Out of ladder. Do NOT re-arm: the agent is still blocked,
-                    // so the schedule must stay suspended. Stop nudging and say
-                    // so — the agent's `ApiBlocked` state remains the
-                    // authority, and a fresh `StopFailure` (or the
-                    // startup reconciliation) picks it up again.
+                    Ok(_) => true,
+                    Err(e) => {
+                        log::warn!("scheduler: bump could not read agent state: {e:?}");
+                        false
+                    }
+                };
+                let attempt = resuming.as_ref().map(|r| r.attempt).unwrap_or(0);
+                let Some(d) = bump_delay(attempt) else {
+                    // Out of ladder. Do NOT re-arm: the agent is still
+                    // blocked, so the schedule must stay parked. Its
+                    // `ApiBlocked` state remains the authority and a fresh
+                    // `StopFailure` restarts the ladder.
                     log::error!(
                         "scheduler: prompt={} still blocked after the bump budget; \
-                         leaving it un-armed. The agent stays ApiBlocked until it recovers.",
+                         leaving it un-armed until the agent recovers",
                         prompt.id
                     );
                     return;
+                };
+                bump_tick.as_mut().reset(tokio::time::Instant::now() + d);
+                if let Some(rs) = resuming.as_mut() {
+                    rs.attempt += 1;
+                    rs.waited += d;
                 }
-                if let Some(rs) = resuming.as_ref() {
-                    rs.bump(&state, &handle).await;
+                if should_nudge {
+                    if let Some(rs) = resuming.as_ref() {
+                        rs.bump(&state, &handle).await;
+                    }
                 }
             }
             _ = &mut deadline => {
