@@ -1911,28 +1911,32 @@ async fn run_usage_scrape(
     // scrape's outer loop driving the parser's per-round
     // budget in parallel.
     //
-    // Phase 1 sequence: paste-close preamble concatenated with
-    // the `/usage` slash command. Always emit `\x1b[201~`
-    // unconditionally before the slash — if the TUI is in
-    // `BracketedPaste` (operator pasted a long block), this
-    // cleanly closes the paste before the slash lands; if the
-    // TUI is in any other mode, the stray `201~` is ignored by
-    // claude's input parser (it only acts on `201~` after
-    // seeing the matching `200~` open). Prepending
-    // unconditionally avoids the cost of tracking paste mode
-    // across the byte stream — see the conversation in this
-    // task's doc history.
+    // Phase 1 sequence is just the `/usage` slash command — no
+    // bracketed-paste preamble.
     //
-    // The whole sequence (preamble + slash) goes into ONE
-    // Sequence item so the writer actor's `write_all` lands
-    // it atomically against any concurrent operator
+    // A stray `ESC[201~` (paste-end) used to be prepended here, on the
+    // assumption that claude ignores it when it is not pasting. It does
+    // not: the sequence leaves the TUI in bracketed-paste mode, so the
+    // `/usage` text AND its trailing `\r` arrive as pasted content rather
+    // than as a submission. The slash lands in the input line, never
+    // executes, and the scrape times out with no data — which is exactly
+    // what we saw for both `/usage` and `/context`.
+    //
+    // The preamble cannot be made conditional cheaply: avt does not
+    // expose bracketed-paste mode, so knowing whether to send it means
+    // scanning claude's output for `ESC[?2004h`. Paying that to protect
+    // the rare case (an operator pasting a large block at the same moment
+    // a scrape fires) is not worth having the scrape never work at all.
+    // If that case ever matters, the right fix is a real mode query, not
+    // a speculative escape.
+    //
+    // `input::slash` already emits the complete, balanced sequence:
+    // `CTRL_U`, the `/cmd` text, `ENTER`.
+    //
+    // The whole thing goes into ONE Sequence item so the writer actor's
+    // `write_all` lands it atomically against any concurrent operator
     // submission.
     let mut slash: Vec<u8> = Vec::with_capacity(8 + 6);
-    slash.extend_from_slice(b"\x1b[201~");
-    // `input::slash` writes to a `&mut dyn Write`; the actor
-    // is the writer, but here we just want the byte sequence
-    // it produces so we can submit it via `Sequence`. Use a
-    // tiny scratch buffer.
     let mut shim = BufShim { out: &mut slash };
     let _ = input::slash(&mut shim, "usage");
     let slash_bytes = slash;
@@ -2077,8 +2081,12 @@ async fn run_context_scrape(
     // lifecycle.
     let mut rx = term_bcast_tx.subscribe();
 
+    // No bracketed-paste preamble — see the identical note in
+    // `run_usage_scrape`. A stray paste-end here leaves the TUI in
+    // bracketed-paste mode, and `/context` plus its `ENTER` are pasted
+    // rather than submitted, so the modal never opens and the scrape
+    // captures nothing.
     let mut slash: Vec<u8> = Vec::with_capacity(8 + 9);
-    slash.extend_from_slice(b"\x1b[201~");
     let mut shim = BufShim { out: &mut slash };
     let _ = input::slash(&mut shim, "context");
     let slash_bytes = slash;
