@@ -534,16 +534,37 @@ pub async fn run(config: Config) -> Result<()> {
                                         // successful scrapes confirm the
                                         // budget is sufficient and
                                         // timestamp the regression frontier.
-                                        log::info!(
-                                            "context_check: empty={scrape_empty} \
-                                             incomplete={scrape_incomplete} aborted={aborted} \
-                                             used={:?} total={:?} pct={:?} free={:?} window={:?}",
-                                            snap.used_tokens,
-                                            snap.total_tokens,
-                                            snap.used_pct,
-                                            snap.free_pct,
-                                            snap.window_tokens,
-                                        );
+                                        // `warn`, not `info`: an empty scrape is
+                                        // a real failure — every consumer of the
+                                        // auto-clear guard (the scheduler) blocks
+                                        // on it, so an empty result silently
+                                        // wedges a schedule at `info` level.
+                                        if scrape_empty || snap.used_tokens.is_none() {
+                                            log::warn!(
+                                                "context_check: SCRAPE RETURNED NO USED_TOKENS \
+                                                 empty={scrape_empty} incomplete={scrape_incomplete} \
+                                                 aborted={aborted} used={:?} total={:?} pct={:?} \
+                                                 free={:?} window={:?} categories={:?} \
+                                                 — the /context modal did not produce a parseable row",
+                                                snap.used_tokens,
+                                                snap.total_tokens,
+                                                snap.used_pct,
+                                                snap.free_pct,
+                                                snap.window_tokens,
+                                                snap.categories,
+                                            );
+                                        } else {
+                                            log::info!(
+                                                "context_check: empty={scrape_empty} \
+                                                 incomplete={scrape_incomplete} aborted={aborted} \
+                                                 used={:?} total={:?} pct={:?} free={:?} window={:?}",
+                                                snap.used_tokens,
+                                                snap.total_tokens,
+                                                snap.used_pct,
+                                                snap.free_pct,
+                                                snap.window_tokens,
+                                            );
+                                        }
                                         // Merge the modal fields on top of
                                         // the most-recent transcript
                                         // snapshot. The supervisor doesn't
