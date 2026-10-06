@@ -5,65 +5,43 @@ use rabbit_lib::server::handle::AgentHandle;
 use rabbit_lib::wire::{
     AgentState, EnvelopeBody, UsageSnapshot, USAGE_SOURCE_CONTEXT_CHECK, USAGE_SOURCE_USAGE_CHECK,
 };
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
 const USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Total wall-clock a stuck run will be nudged before warren gives up and
-/// re-arms the schedule anyway. Four hours comfortably outlasts an
-/// Anthropic weekly/session window and any plausible provider quota, so the
-/// give-up should only fire on something genuinely not going to clear.
-const RESUME_BUDGET: Duration = Duration::from_secs(4 * 60 * 60);
+/// How long to wait between nudges of the same agent.
+///
+/// Flat rather than a backoff ladder: a nudge that works either lands
+/// immediately or fails on the next provider call, so a short initial
+/// delay buys nothing over a steady cadence, and a ladder only meant the
+/// agent could be hit every 30s in the first minute.
+const API_NUDGE_INTERVAL: chrono::Duration = chrono::Duration::seconds(300);
+
+/// After this much continuous blocking, the nudge is escalated from
+/// `warn` to `error` so a genuinely stuck agent is visible in the log
+/// without stopping the recovery. Log-only — there is deliberately no
+/// "give up" path, because giving up leaves an agent wedged with nothing
+/// left to make it Idle again.
+const API_BLOCKED_ESCALATION: chrono::Duration = chrono::Duration::seconds(5 * 60 * 60);
+
+/// When an agent first went blocked, and when we last nudged it.
+type BlockedFor = (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>);
+
+/// Last nudge we sent each agent, and when it first went blocked.
+///
+/// Transient rate-limiting state, NOT authoritative: the agent's own
+/// `ApiBlocked` state is the source of truth. Losing this map on a
+/// warren restart only costs a couple of extra nudges.
+static API_NUDGE_STATE: Mutex<Option<HashMap<Uuid, BlockedFor>>> = Mutex::new(None);
 
 /// What a bump types into claude's PTY. Resumes the interrupted turn
 /// rather than starting a new one — a fresh scheduled prompt must not
 /// fire until this one has genuinely finished.
 pub const BUMP_NUDGE: &[u8] = b"continue\r";
-
-/// Delay before the next bump, or `None` once the budget is spent.
-///
-/// Mirrors the backoff the community watchdogs use
-/// (cheapestinference/claude-auto-retry): 30/60/120/240/300s then flat 300s,
-/// so a provider coming back is picked up within a couple of minutes while a
-/// long outage settles into one attempt every five. ±15% jitter keeps a
-/// fleet of agents from retrying in lockstep.
-fn bump_delay(attempt: u32) -> Option<Duration> {
-    const LADDER: [u64; 5] = [30, 60, 120, 240, 300];
-    let base = LADDER
-        .get(attempt as usize)
-        .copied()
-        .unwrap_or(*LADDER.last().unwrap());
-    if Duration::from_secs(base) > RESUME_BUDGET {
-        return None;
-    }
-    // Deterministic ±15% from the attempt number: a real random source is
-    // not worth the nondeterminism in tests, and the spread across a fleet
-    // is what matters.
-    let spread = (base / 100 * 15) as i64;
-    let offset = if spread == 0 {
-        0
-    } else {
-        (attempt as i64 * 7919) % (2 * spread + 1) - spread
-    };
-    let secs = (base as i64 + offset).max(1) as u64;
-    let d = Duration::from_secs(secs);
-    if d > RESUME_BUDGET {
-        None
-    } else {
-        Some(d)
-    }
-}
-/// how long the per-run observer waits for a
-/// `StopHook`/`NeedsInput`/`Dead` envelope before finalizing the run
-/// as `observation_deadline` (line 727). Picked at 1 h so a long,
-/// legitimate Claude turn (multi-step agentic work, large-file
-/// reads, network-bound tool calls) doesn't get prematurely swept
-/// while the agent is still genuinely running. The observer only
-/// finalizes-with-no-status in the absence of any signal — a
-/// `StopHook` arriving 59 min in still closes the run cleanly.
 const OBSERVATION_HARD_DEADLINE: Duration = Duration::from_secs(3600);
 /// After this many seconds without a `StopHook`/`NeedsInput`, the periodic
 /// sweep presumes the run is lost and finalizes it as `'warren_restart'`.
@@ -229,6 +207,15 @@ async fn tick(state: &Arc<AppState>) -> anyhow::Result<()> {
 
     if let Err(e) = rearm_recovered_schedules(state).await {
         log::error!("scheduler: rearm_recovered_schedules failed: {e:?}");
+    }
+
+    // Recovery for API-blocked agents lives here rather than in any single
+    // run's observation, so it is indifferent to warren uptime and to a run
+    // ending for an unrelated reason.
+    match nudge_api_blocked_agents(state).await {
+        Ok(n) if n > 0 => log::debug!("scheduler: nudged {n} api-blocked agent(s)"),
+        Ok(_) => {}
+        Err(e) => log::error!("scheduler: nudge_api_blocked_agents failed: {e:?}"),
     }
 
     let threshold = now - chrono::Duration::seconds(STALE_RUN_THRESHOLD.as_secs() as i64);
@@ -965,93 +952,148 @@ async fn finalize_and_rearm(
     }
 }
 
-/// A run whose turn died on an API error and is being nudged back to life.
+/// Nudge one `ApiBlocked` agent, if the cadence allows it.
 ///
-/// The run row is deliberately left OPEN and `next_fire_at` left NULL, so no
-/// further schedule fires until this one genuinely completes. Finalizing the
-/// run would advance the schedule past work that never finished, which is the
-/// behaviour the operator explicitly does not want.
-struct ResumeState {
-    class: String,
-    kind: Option<String>,
-    error_type: String,
-    attempt: u32,
-    waited: Duration,
+/// This used to live inside the run's observation task, which was the
+/// wrong lifetime: a run can end for many reasons — `StopHook`,
+/// `NeedsInput`, a closed meta channel, the hard deadline — and every one
+/// of them took the nudge loop with it, leaving a wedged agent with
+/// nothing watching. Recovery is keyed on the AGENT being blocked, not on
+/// a run being open.
+///
+/// Nudging is unconditional on idleness because `ApiBlocked` already means
+/// the turn is dead and unwatchable; the only states where typing would be
+/// wrong are `Running` (it would inject into live work) and `Idle` (the
+/// turn is over), and neither is `ApiBlocked`.
+async fn nudge_api_blocked_agent(
+    state: &AppState,
+    agent_id: Uuid,
+    handle: &AgentHandle,
+    error_type: &str,
+    class: &str,
+    kind: Option<&str>,
+) -> bool {
+    let now = chrono::Utc::now();
+    // Scope the lock tightly: it must not be held across the awaits below,
+    // or the whole scheduler task stops being `Send`.
+    let (blocked_for, due) = {
+        let mut guard = API_NUDGE_STATE.lock().expect("nudge state poisoned");
+        let map = guard.get_or_insert_with(HashMap::new);
+        let entry = map.entry(agent_id).or_insert((now, now));
+        let due = now - entry.0 >= API_NUDGE_INTERVAL;
+        let blocked_for = now - entry.1;
+        if due {
+            entry.0 = now;
+        }
+        (blocked_for, due)
+    };
+    if !due {
+        return false;
+    }
+
+    // Clear whatever is half-typed on the input line so the nudge lands on
+    // a clean prompt instead of appending to it.
+    match handle.state().await {
+        Ok(snap) if snap.state == rabbit_lib::wire::AgentState::Idle => {
+            // Recovered between the state check and now; nothing to nudge.
+            return false;
+        }
+        Ok(_) => {
+            if let Err(e) = handle.interrupt().await {
+                log::warn!("scheduler: api nudge interrupt failed: {e:?}");
+            }
+        }
+        Err(e) => log::warn!("scheduler: api nudge could not read agent state: {e:?}"),
+    }
+    // Straight to the PTY: the prompt path is gated on idleness, and an
+    // `ApiBlocked` agent never passes that gate. This is the `tmux
+    // send-keys` trick the community watchdogs use.
+    if let Err(e) = handle
+        .send_keys(
+            rabbit_lib::wire::TERM_CHAN_CLAUDE,
+            bytes::Bytes::from_static(BUMP_NUDGE),
+        )
+        .await
+    {
+        log::warn!("scheduler: api nudge failed for agent {agent_id}: {e:?}");
+        return false;
+    }
+    if blocked_for >= API_BLOCKED_ESCALATION {
+        log::error!(
+            "scheduler: agent {agent_id} still blocked after {blocked_for:?}; \
+             nudging every {:?}. This usually needs an operator — check the \
+             provider's quota or credentials.",
+            API_NUDGE_INTERVAL
+        );
+    } else {
+        log::info!(
+            "scheduler: nudged blocked agent {agent_id} after {blocked_for:?} (type={error_type})"
+        );
+    }
+    // The inbox row is not the recovery mechanism — claude acts on what
+    // reaches its PTY, and nothing can claim an inbox item while the agent
+    // is wedged. It exists so the scheduler's team-scope gate
+    // (`count_inbox_by_target > 0`) is satisfied when the schedule
+    // re-arms on recovery.
+    let payload = format!(
+        "scheduler: agent for class `{class}` is blocked on an API error ({error_type}); \
+         safe to claim once you are running again"
+    );
+    match db_ops::ensure_scheduler_bump(&state.db, class, kind, &payload).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {}
+        Err(e) => log::warn!("scheduler: inbox bump failed: {e:?}"),
+    }
+    true
 }
 
-impl ResumeState {
-    /// One bump: clear a wedged input line, type `continue` into the PTY,
-    /// then make sure there is exactly one unclaimed bump in the inbox.
-    ///
-    /// The nudge is written straight to the PTY via `send_keys`, not sent as
-    /// a `Prompt`. That is deliberate and it is the whole reason this works:
-    /// the prompt path is gated on the agent being idle, and an agent blocked
-    /// on an API limit is *never* idle — the turn is wedged, so the state is
-    /// `Running` indefinitely. Gating on idle, as this did originally,
-    /// guarantees the nudge never fires. `send_keys` has no such gate: the
-    /// bytes always reach the PTY, which is exactly the `tmux send-keys`
-    /// trick the community watchdogs use.
-    ///
-    /// The interrupt first clears whatever is half-typed on the input line,
-    /// so the nudge lands on a clean prompt instead of appending to it.
-    ///
-    /// The inbox row is not the recovery mechanism — claude acts on what
-    /// reaches its PTY, and nothing claims an inbox item while the agent is
-    /// wedged. It is there for the scheduler's own gate: `fire_prompt`'s
-    /// team-scope check is `count_inbox_by_target > 0`, so with an empty
-    /// inbox the re-armed schedule would skip forever and never resume.
-    async fn bump(&self, state: &AppState, handle: &AgentHandle) {
-        match handle.state().await {
-            // Only clear the input line when the agent is actually wedged.
-            // A `Running` agent is making progress and must be left alone —
-            // the nudge ladder only runs while the state is `ApiBlocked`, so
-            // this is defence in depth, not the primary gate.
-            Ok(snapshot) if snapshot.state == rabbit_lib::wire::AgentState::ApiBlocked => {
-                if let Err(e) = handle.interrupt().await {
-                    log::warn!("scheduler: resume interrupt failed: {e:?}");
-                } else {
-                    log::info!(
-                        "scheduler: interrupted a {:?} agent to clear its input line",
-                        snapshot.state
-                    );
-                }
-                // Let the Ctrl-C land before typing into the same line.
-                tokio::time::sleep(Duration::from_millis(750)).await;
-            }
-            Ok(_) => {}
-            Err(e) => log::warn!("scheduler: resume could not read agent state: {e:?}"),
+/// Nudge every connected agent that is currently `ApiBlocked`.
+///
+/// Driven from the scheduler tick, so it is indifferent to warren uptime:
+/// an agent that recovered while nothing was watching gets picked up here.
+async fn nudge_api_blocked_agents(state: &Arc<AppState>) -> anyhow::Result<u64> {
+    let mut nudged = 0u64;
+    let agents: Vec<(Uuid, AgentHandle)> = state
+        .live
+        .registry
+        .iter()
+        .map(|e| (*e.key(), e.value().clone()))
+        .collect();
+    for (agent_id, handle) in agents {
+        if !matches!(
+            handle.snapshot().state,
+            rabbit_lib::wire::AgentState::ApiBlocked
+        ) {
+            // Recovered — stop tracking it so a future block resets the clock.
+            API_NUDGE_STATE
+                .lock()
+                .expect("nudge state poisoned")
+                .get_or_insert_with(HashMap::new)
+                .remove(&agent_id);
+            continue;
         }
-        match handle
-            .send_keys(
-                rabbit_lib::wire::TERM_CHAN_CLAUDE,
-                bytes::Bytes::from_static(BUMP_NUDGE),
-            )
-            .await
+        let error_type = handle
+            .snapshot()
+            .error_type
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let Ok(Some(a)) = db_ops::get_agent(&state.db, agent_id).await else {
+            continue;
+        };
+        if nudge_api_blocked_agent(
+            state,
+            agent_id,
+            &handle,
+            &error_type,
+            &a.class,
+            a.kind.as_deref(),
+        )
+        .await
         {
-            Ok(()) => log::info!(
-                "scheduler: nudged class={} to continue after {}",
-                self.class,
-                self.error_type
-            ),
-            Err(e) => log::warn!("scheduler: resume nudge failed: {e:?}"),
-        }
-        let payload = format!(
-            "scheduled prompt for class `{}` was interrupted by an API error ({}); \
-             this is a scheduler bump, safe to claim once you are running again",
-            self.class, self.error_type
-        );
-        match db_ops::ensure_scheduler_bump(&state.db, &self.class, self.kind.as_deref(), &payload)
-            .await
-        {
-            Ok(Some(_)) => log::info!(
-                "scheduler: queued inbox bump for class={} after {}",
-                self.class,
-                self.error_type
-            ),
-            Ok(None) => {}
-            Err(e) => log::warn!("scheduler: inbox bump failed: {e:?}"),
+            nudged += 1;
         }
     }
+    Ok(nudged)
 }
 
 fn spawn_observation(
@@ -1076,11 +1118,6 @@ async fn observe(
     let mut rx = handle.subscribe_meta();
     let deadline = tokio::time::sleep(OBSERVATION_HARD_DEADLINE);
     tokio::pin!(deadline);
-    // Parked far in the future and only armed while a run is in resume
-    // mode, so the `if resuming` guard keeps the branch disabled otherwise.
-    let bump_tick = tokio::time::sleep(Duration::from_secs(86_400));
-    tokio::pin!(bump_tick);
-    let mut resuming: Option<ResumeState> = None;
 
     loop {
         tokio::select! {
@@ -1109,15 +1146,12 @@ async fn observe(
                 Ok(EnvelopeBody::StopFailure { error_type, error_message }) => {
                     let class = rabbit_lib::wire::StopFailureClass::from_error_type(&error_type);
                     if class == rabbit_lib::wire::StopFailureClass::Fatal {
-                        // Nothing to wait out: a billing or auth failure
-                        // only the operator can fix. Finalize and re-arm
-                        // so the schedule is not wedged behind a problem
-                        // that will never clear.
-                        // Fatal classes are not a stall — the agent is usable
-                        // and there is nothing to wait out. Close the run and
-                        // put the schedule back on its cadence, logging loudly
-                        // so a billing failure is never mistaken for a quiet
-                        // schedule.
+                        // Fatal classes are not a stall — the agent is
+                        // usable and there is nothing to wait out, only
+                        // something the operator has to fix. Close the run
+                        // and put the schedule back on its cadence, logging
+                        // loudly so a billing failure is never mistaken for
+                        // a quiet schedule.
                         finalize_and_rearm(
                             &state,
                             &prompt,
@@ -1134,35 +1168,14 @@ async fn observe(
                         );
                         return;
                     }
-                    // Retryable. Finalize the run honestly — the turn WAS
-                    // interrupted — but do NOT re-arm `next_fire_at`. Leaving
-                    // it NULL is what enforces the rule that no new scheduled
-                    // prompt fires until this one truly finishes: the claim
-                    // query filters `next_fire_at <= now`, which NULL never
-                    // satisfies. We don't need the agent state to protect the
-                    // schedule, and we don't need to fabricate a "gave up"
-                    // outcome to un-wedge it.
-                    //
-                    // Recovery is then driven entirely by the agent's own
-                    // `ApiBlocked` state, which rabbit owns and re-declares on
-                    // connect. The ladder nudges while that state holds and
-                    // re-arms this schedule when it lifts.
-                    // The ladder is already running (a nudge started a turn
-                    // that failed again). Do not re-finalize the closed run or
-                    // reset the cadence — just note the new classification and
-                    // let the next tick nudge again. Restarting here would
-                    // reset the attempt counter and hammer the PTY.
-                    if resuming.is_some() {
-                        if let Some(rs) = resuming.as_mut() {
-                            rs.error_type = error_type.clone();
-                        }
-                        log::warn!(
-                            "scheduler: api_error again prompt={} type={error_type}: {error_message} \
-                             — provider still refusing, continuing on the ladder",
-                            prompt.id
-                        );
-                        return;
-                    }
+                    // Close the run honestly — the turn WAS interrupted —
+                    // but do NOT re-arm `next_fire_at`. Leaving it NULL is
+                    // what stops the schedule firing again until the turn
+                    // truly finishes: the claim query filters
+                    // `next_fire_at <= now`, which NULL never satisfies.
+                    // Recovery is owned by `nudge_api_blocked_agents` on the
+                    // scheduler tick, keyed on the agent's `ApiBlocked` state
+                    // rather than on this run staying open.
                     finalize_run_only(&state, run_id, "api_error", Some(&error_message)).await;
                     log::warn!(
                         "scheduler: api_error (retryable) prompt={} run={} type={error_type}: {error_message} \
@@ -1170,32 +1183,6 @@ async fn observe(
                         prompt.id,
                         run_id
                     );
-                    let agent = db_ops::get_agent(&state.db, handle.agent_id).await;
-                    let (class, kind) = match agent {
-                        Ok(Some(a)) => (a.class, a.kind),
-                        _ => (String::new(), None),
-                    };
-                    if class.is_empty() {
-                        log::error!(
-                            "scheduler: cannot bump — agent {} has no class to address an inbox row to",
-                            handle.agent_id
-                        );
-                        return;
-                    }
-                    let mut rs = ResumeState {
-                        class,
-                        kind,
-                        error_type,
-                        attempt: 0,
-                        waited: Duration::from_secs(0),
-                    };
-                    // Bump immediately, then on the ladder.
-                    rs.bump(&state, &handle).await;
-                    rs.attempt = 1;
-                    if let Some(d) = bump_delay(rs.attempt) {
-                        bump_tick.as_mut().reset(tokio::time::Instant::now() + d);
-                    }
-                    resuming = Some(rs);
                 }
                 Ok(EnvelopeBody::NeedsInput { reason, .. }) => {
                     if let Err(e) = handle.interrupt().await {
@@ -1289,68 +1276,6 @@ async fn observe(
             // which is the whole condition this exists for: a turn that is
             // still in flight but making no progress. `Running` is never
             // nudged — that is an agent that is working.
-            _ = &mut bump_tick, if resuming.is_some() => {
-                // Two independent decisions: pace the loop, and decide
-                // whether to actually type at the agent. Only `ApiBlocked`
-                // is safe to nudge — `Idle` means the turn is over and
-                // `Running` means it is working.
-                let should_nudge = match handle.state().await {
-                    Ok(snap) if snap.state == rabbit_lib::wire::AgentState::Idle => {
-                        // The turn genuinely finished. Re-arm the schedule —
-                        // it has been parked (NULL) since the StopFailure.
-                        let now = chrono::Utc::now();
-                        let next = now + chrono::Duration::seconds(prompt.interval_seconds);
-                        if let Err(e) =
-                            db_ops::set_next_fire_at(&state.db, prompt.id, next, fired_at).await
-                        {
-                            log::error!("scheduler: re-arm on recovery failed: {e:?}");
-                        }
-                        log::info!("scheduler: prompt={} reached Idle; schedule re-armed", prompt.id);
-                        return;
-                    }
-                    Ok(snap) if snap.state == rabbit_lib::wire::AgentState::Running => {
-                        // A turn our nudge started. Leave it strictly alone.
-                        // Falling through to the nudge below would type
-                        // into work that is in progress — and the ladder must
-                        // stay alive here, because if the provider is still
-                        // refusing this turn will fail again and the next
-                        // `StopFailure` needs something still watching.
-                        log::debug!(
-                            "scheduler: prompt={} is Running after a nudge; waiting, not nudging",
-                            prompt.id
-                        );
-                        false
-                    }
-                    Ok(_) => true,
-                    Err(e) => {
-                        log::warn!("scheduler: bump could not read agent state: {e:?}");
-                        false
-                    }
-                };
-                let attempt = resuming.as_ref().map(|r| r.attempt).unwrap_or(0);
-                let Some(d) = bump_delay(attempt) else {
-                    // Out of ladder. Do NOT re-arm: the agent is still
-                    // blocked, so the schedule must stay parked. Its
-                    // `ApiBlocked` state remains the authority and a fresh
-                    // `StopFailure` restarts the ladder.
-                    log::error!(
-                        "scheduler: prompt={} still blocked after the bump budget; \
-                         leaving it un-armed until the agent recovers",
-                        prompt.id
-                    );
-                    return;
-                };
-                bump_tick.as_mut().reset(tokio::time::Instant::now() + d);
-                if let Some(rs) = resuming.as_mut() {
-                    rs.attempt += 1;
-                    rs.waited += d;
-                }
-                if should_nudge {
-                    if let Some(rs) = resuming.as_ref() {
-                        rs.bump(&state, &handle).await;
-                    }
-                }
-            }
             _ = &mut deadline => {
                 // Hard deadline hit without seeing StopHook / NeedsInput /
                 // Dead. The run may have completed successfully but we
@@ -1949,7 +1874,6 @@ mod tests {
 
 #[cfg(test)]
 mod stop_failure_tests {
-    use super::*;
     use rabbit_lib::wire::StopFailureClass;
 
     /// Fatal means "only the operator can fix this". Bumping an auth or
@@ -1994,7 +1918,8 @@ mod stop_failure_tests {
 
     /// A provider we have never heard of is far more likely to be a
     /// temporary rate limit than a permanent misconfiguration, and the
-    /// resume budget bounds the cost of guessing wrong. Anything new is
+    /// escalation threshold bounds the cost of guessing wrong: it only
+    /// changes the log level, never the behaviour. Anything new is
     /// retryable.
     #[test]
     fn unknown_type_defaults_to_retryable() {
@@ -2003,47 +1928,37 @@ mod stop_failure_tests {
             StopFailureClass::Retryable
         );
     }
+}
 
-    /// The ladder: 30, 60, 120, 240, 300, then flat 300 forever after.
+#[cfg(test)]
+mod nudge_policy_tests {
+    use super::{API_BLOCKED_ESCALATION, API_NUDGE_INTERVAL};
+
+    /// Flat cadence. A nudge either lands immediately or fails on the next
+    /// provider call, so a short initial delay buys nothing — and the
+    /// backoff ladder it replaced fed a give-up branch that could never
+    /// execute, because its longest rung (300s) was always shorter than the
+    /// budget it compared against.
     #[test]
-    fn bump_delay_follows_the_ladder() {
-        let secs = |a: u32| bump_delay(a).map(|d| d.as_secs()).unwrap_or(0);
-        for (attempt, base) in [
-            (0u32, 30u64),
-            (1, 60),
-            (2, 120),
-            (3, 240),
-            (4, 300),
-            (9, 300),
-        ] {
-            let got = secs(attempt);
-            // ±15% of the base value.
-            let lo = (base as f64 * 0.85) as u64;
-            let hi = (base as f64 * 1.15) as u64 + 1;
-            assert!(
-                got >= lo && got <= hi,
-                "attempt {attempt}: {got}s outside the expected {lo}..={hi} band around {base}s"
-            );
-        }
+    fn nudge_cadence_is_flat_five_minutes() {
+        assert_eq!(API_NUDGE_INTERVAL, chrono::Duration::seconds(300));
     }
 
-    /// The resume must give up after the 4h budget rather than nudging
-    /// forever, but the budget has to outlast a real provider window.
+    /// The escalation threshold is log-only. There is deliberately no
+    /// "give up" path: stopping nudging leaves an `ApiBlocked` agent wedged
+    /// with nothing able to return it to `Idle`, so recovery would depend on
+    /// an operator noticing. Five hours of continuous blocking is well past
+    /// any plausible provider window, so it only means "this needs a human".
     #[test]
-    fn resume_budget_is_four_hours_and_delays_stay_inside_it() {
-        assert_eq!(RESUME_BUDGET, Duration::from_secs(4 * 60 * 60));
-        // Summing the flat tail of the ladder must eventually cross it.
-        let mut waited = Duration::from_secs(0);
-        for attempt in 0..200u32 {
-            let Some(d) = bump_delay(attempt) else {
-                break;
-            };
-            waited += d;
-            if waited > RESUME_BUDGET {
-                return;
-            }
-        }
-        panic!("the ladder never exhausts the resume budget");
+    fn escalation_is_log_only_after_five_hours() {
+        assert_eq!(
+            API_BLOCKED_ESCALATION,
+            chrono::Duration::seconds(5 * 60 * 60)
+        );
+        assert!(
+            API_BLOCKED_ESCALATION > API_NUDGE_INTERVAL,
+            "escalation must be reachable after at least one full cadence"
+        );
     }
 }
 
