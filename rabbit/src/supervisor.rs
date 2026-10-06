@@ -540,12 +540,26 @@ pub async fn run(config: Config) -> Result<()> {
                                         // on it, so an empty result silently
                                         // wedges a schedule at `info` level.
                                         if scrape_empty || snap.used_tokens.is_none() {
+                                            // An aborted scrape never wrote
+                                            // its bytes, so saying "the modal
+                                            // did not produce a parseable
+                                            // row" sends you looking at the
+                                            // parser when the real fault is
+                                            // upstream of it.
+                                            let why = if aborted {
+                                                "the /context WRITE was aborted before it \
+                                                 reached the PTY (something cancelled the writer \
+                                                 actor mid-sequence — look for an interrupt \
+                                                 around this time)"
+                                            } else {
+                                                "the /context modal rendered but produced no \
+                                                 parseable row"
+                                            };
                                             log::warn!(
                                                 "context_check: SCRAPE RETURNED NO USED_TOKENS \
                                                  empty={scrape_empty} incomplete={scrape_incomplete} \
                                                  aborted={aborted} used={:?} total={:?} pct={:?} \
-                                                 free={:?} window={:?} categories={:?} \
-                                                 — the /context modal did not produce a parseable row",
+                                                 free={:?} window={:?} categories={:?} — {why}",
                                                 snap.used_tokens,
                                                 snap.total_tokens,
                                                 snap.used_pct,

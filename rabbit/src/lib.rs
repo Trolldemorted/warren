@@ -33,15 +33,38 @@ pub use rabbit_lib::wire;
 /// prints to stderr, and exits the process with a non-zero code (so `main`
 /// stays a one-liner).
 pub fn run() -> anyhow::Result<()> {
+    /// Initialise logging with a sane default.
+    ///
+    /// `simple_logger::init_with_env()` defaults to TRACE when `RUST_LOG` is
+    /// unset, which turns on `tungstenite`'s per-frame protocol logging — every
+    /// WebSocket message printed as a byte array, continuously. On a busy agent
+    /// that is megabytes a minute and buries the log that matters.
+    ///
+    /// Default to `info` for our own crates and cap the chatty transport
+    /// dependencies at `warn`. An explicit `RUST_LOG` still wins, so debugging
+    /// the wire is a deliberate opt-in.
+    fn init_logging() {
+        if std::env::var_os("RUST_LOG").is_some() {
+            let _ = simple_logger::init_with_env();
+            return;
+        }
+        let _ = simple_logger::SimpleLogger::new()
+            .with_level(log::LevelFilter::Info)
+            .with_module_level("tungstenite", log::LevelFilter::Warn)
+            .with_module_level("hyper", log::LevelFilter::Warn)
+            .with_module_level("h2", log::LevelFilter::Warn)
+            .with_module_level("reqwest", log::LevelFilter::Warn)
+            .with_module_level("rustls", log::LevelFilter::Warn)
+            .init();
+    }
+
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::force_capture();
         eprintln!("panic: {info}\n{bt}");
         log::error!("panic: {info}");
         log::error!("backtrace:\n{bt}");
     }));
-    if let Err(e) = simple_logger::init_with_env() {
-        eprintln!("error: failed to initialize logger: {e:?}");
-    }
+    init_logging();
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

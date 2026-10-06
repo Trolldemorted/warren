@@ -48,8 +48,15 @@ fn resolve_hook_kind(payload: &serde_json::Value) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    if let Err(e) = simple_logger::init_with_env() {
-        eprintln!("rabbit-hook: failed to initialize logger: {e:?}");
+    // Same default as the supervisor: an unset RUST_LOG must not fall back
+    // to TRACE. This binary runs once per hook event, so per-frame transport
+    // logging here is pure cost.
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = simple_logger::init_with_env();
+    } else {
+        let _ = simple_logger::SimpleLogger::new()
+            .with_level(log::LevelFilter::Warn)
+            .init();
     }
 
     let url = std::env::var("RABBIT_OBSERVER_URL")

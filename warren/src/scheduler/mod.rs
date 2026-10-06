@@ -991,23 +991,28 @@ async fn nudge_api_blocked_agent(
         return false;
     }
 
-    // Clear whatever is half-typed on the input line so the nudge lands on
-    // a clean prompt instead of appending to it.
-    match handle.state().await {
-        Ok(snap) if snap.state == rabbit_lib::wire::AgentState::Idle => {
-            // Recovered between the state check and now; nothing to nudge.
+    // Re-check: the agent may have recovered between the sweep's scan and
+    // here, and typing `continue` into a finished turn would submit it as
+    // an ordinary prompt.
+    if let Ok(snap) = handle.state().await {
+        if snap.state != rabbit_lib::wire::AgentState::ApiBlocked {
             return false;
         }
-        Ok(_) => {
-            if let Err(e) = handle.interrupt().await {
-                log::warn!("scheduler: api nudge interrupt failed: {e:?}");
-            }
-        }
-        Err(e) => log::warn!("scheduler: api nudge could not read agent state: {e:?}"),
     }
-    // Straight to the PTY: the prompt path is gated on idleness, and an
-    // `ApiBlocked` agent never passes that gate. This is the `tmux
-    // send-keys` trick the community watchdogs use.
+    // Straight to the PTY, with NO interrupt first.
+    //
+    // The interrupt is not merely unnecessary here, it is actively harmful:
+    // `EnvelopeBody::Interrupt` is the only production caller of the writer
+    // actor's `cancel()`, which aborts whatever Sequence is in flight —
+    // including a concurrent `/context` or `/usage` scrape. Nudging every
+    // few minutes therefore killed the very scrape the auto-clear guard
+    // depends on, which is why the guard reported an empty context forever.
+    // It achieved nothing on a blocked agent either: the Ctrl-C went to a
+    // turn that had already died.
+    //
+    // `send_keys` bypasses the writer actor entirely (raw bytes on the
+    // wire), so it neither is cancelled nor cancels anything — the
+    // `tmux send-keys` trick the community watchdogs use.
     if let Err(e) = handle
         .send_keys(
             rabbit_lib::wire::TERM_CHAN_CLAUDE,
